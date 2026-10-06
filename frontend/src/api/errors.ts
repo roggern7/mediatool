@@ -39,6 +39,34 @@ const MESSAGES: Record<string, string> = {
   interrupted: "Interrompido porque o backend foi reiniciado.",
   ffmpeg_not_found: "FFmpeg não encontrado. Configure o caminho em Configurações.",
   backend_offline: "Não foi possível falar com o backend local.",
+  picker_busy: "Já existe uma janela de escolha de pasta aberta. Conclua ou feche essa janela do Windows.",
+  picker_unavailable:
+    "Não foi possível abrir a janela de escolha de pasta neste computador. Use a pasta padrão em Documentos.",
+  export_token_invalid: "A pasta escolhida expirou ou já foi usada. Escolha a pasta de novo.",
+  export_dest_invalid: "Pasta de destino inválida. Escolha outra pasta.",
+  export_dest_missing: "A pasta de destino não existe mais. Escolha outra pasta.",
+  export_dest_not_writable: "Sem permissão para gravar nesta pasta. Escolha outra pasta.",
+  export_dest_forbidden: "Esta pasta é usada pelo Media Tool ou pelo Windows. Escolha uma pasta sua, fora delas.",
+  export_dest_drive_root:
+    "Não é possível exportar direto para a raiz de uma unidade. Escolha ou crie uma subpasta.",
+  export_dest_too_long:
+    "O caminho desta pasta é longo demais para o Windows neste computador. Escolha uma pasta com caminho mais curto.",
+  export_empty: "Não há mídias para exportar nesta seleção.",
+  export_already_running:
+    "Já existe uma exportação em andamento para esta origem. Aguarde ela terminar ou cancele-a.",
+  export_no_space: "Sem espaço em disco para preparar o ZIP. Libere espaço ou use “Exportar para pasta”.",
+  export_read_failed:
+    "Um arquivo original não pôde ser lido durante a preparação do ZIP. Tente de novo.",
+  export_zip_not_ready: "O ZIP ainda não está pronto.",
+  export_zip_expired: "Este ZIP já foi removido. Prepare o ZIP de novo.",
+  export_not_folder: "Esta exportação é um ZIP: não há pasta para abrir.",
+  export_queue_full: "Há exportações demais na fila. Aguarde alguma terminar antes de pedir outra.",
+  export_not_found: "Exportação não encontrada.",
+  export_finished: "Esta exportação já terminou; não há nada para cancelar.",
+  export_folder_missing:
+    "A pasta desta exportação não existe mais (foi movida, renomeada ou apagada). Exporte de novo.",
+  export_disk_full: "O disco de destino ficou sem espaço. Libere espaço e exporte de novo para a mesma pasta.",
+  export_write_failed: "Muitas falhas seguidas ao gravar na pasta de destino. Verifique a pasta e exporte de novo.",
 };
 
 /** Códigos do Instagram: a mensagem do backend é mais precisa e tem prioridade; o texto fixo é fallback. */
@@ -58,6 +86,9 @@ const BACKEND_FIRST = new Set([
   "unsupported_media",
   "network_error",
   "timeout",
+  "export_dest_forbidden",
+  "export_no_space",
+  "export_folder_missing",
 ]);
 
 const BY_STATUS: Record<number, string> = {

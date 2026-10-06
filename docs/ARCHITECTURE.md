@@ -46,8 +46,11 @@ documento explica como as peças se encaixam.
 | `app.services.cdn_downloader` | Download seguro das URLs de CDN (validação de URL, DNS, redirects, tamanho, magic bytes). |
 | `app.services.import_service` | Cria lotes de importação e de processamento. |
 | `app.services.diagnostics` | Monta o relatório de `/api/diagnostics`. |
-| `app.services.system_open` | Abre arquivo ou pasta no Explorer (só caminhos dentro do storage). |
-| `app.jobs` | `worker` (claim com lease, heartbeat, pausa de downloads, manutenção), `pipeline` (etapas de ingest e process), `import_runner` (listagem), `recovery` (startup), `errors` (classificação retryable). |
+| `app.services.system_open` | Abre arquivo ou pasta no Explorer (só caminhos dentro das raízes permitidas; `open_folder` abre o conteúdo de uma pasta). |
+| `app.services.export_service` | Exportar para pasta: escolha do destino (diálogo nativo + token), criação, cancelamento e "Abrir pasta". Nunca recebe caminho do cliente. |
+| `app.services.export_destination` | Validação do destino, pasta padrão em Documentos, registro de tokens de destino (`DestinationTokens`) e o seletor nativo (`pick_folder_native` + processo filho `folder_picker_child`). |
+| `app.services.export_names` | Nomes de arquivo da exportação (amigáveis, estáveis, válidos no Windows); funções puras. |
+| `app.jobs` | `worker` (claim com lease, heartbeat, pausa de downloads, manutenção), `pipeline` (etapas de ingest e process), `import_runner` (listagem), `recovery` (startup), `errors` (classificação retryable), `export_runner` (thread própria das exportações para pasta, uma por vez). |
 | `app.integrations.instagram.session` | `InstagramSession` (opaca), `LocalInstagramSessionProvider`, DPAPI via ctypes. |
 | `app.integrations.instagram.validation` | `parse_profile_input`, validação de shortcode e URL. |
 | `app.integrations.instagram.downloader` | Interface `InstagramDownloader`, `RemoteMedia`, `ProfileInfo`, `InstagramError`. |
@@ -152,6 +155,44 @@ Contrato completo em `docs/BATCH_ROBUSTNESS.md`; aqui só o resumo:
 3. **Processamento:** se a mídia já tem rendition do mesmo preset com os mesmos params, o job termina `completed`
    com `stage=skipped`; senão o original existente é processado.
 
+## 5.1 Exportar para pasta
+
+Camada de saída sobre a Biblioteca; não altera storage, dedupe nem a relação lote -> mídia. Contrato completo: [CONTRACTS.md](CONTRACTS.md), seção 8.2.
+
+```
+painel --POST /api/exports/pick-folder--> export_service.pick_folder
+            (um diálogo por vez)             |-> processo filho (tkinter): diálogo nativo "Selecionar pasta"
+                                             |-> validate_destination(pasta escolhida)
+                                             '-> DestinationTokens.issue -> { token, path_display }
+painel --POST /api/exports {source, destination: {token} | {default: true}}--> export_service.create_export
+                                             |-> token -> pasta guardada no servidor (uso único) | pasta padrão
+                                             |-> validate_destination de novo
+                                             '-> exports (pending, total contado) -> acorda o ExportRunner
+ExportRunner (thread própria, 1 por vez) --> página de 500 mídias por keyset --> copia cada original em blocos
+   de 1 MiB para .<nome>.<id>.<aleatorio>.mtpart na pasta --> confere o tamanho --> renomeia sem sobrescrever
+```
+
+- **Fonte da verdade intacta:** o original só é aberto para leitura; nada é movido, ligado (hardlink, symlink, junção)
+  nem registrado na Biblioteca. `exports`/`export_items` (migration 0013) guardam só o pedido e o progresso.
+- **O que entra:** lote = mídias dos jobs de ingest concluídos (inclusive duplicatas `source_id`/`sha256`, que apontam
+  para a mídia já existente); grupo = união dos filhos; Biblioteca = ids ou filtro congelado menos exclusões. Cada
+  mídia uma vez (a consulta parte de `media`).
+- **Escala:** nenhuma lista inteira em memória (páginas por keyset, cópia em streaming) e progresso gravado a cada 200
+  arquivos ou 1 s. Seleção por filtro não materializa ids.
+- **Colisão:** arquivo idêntico (tamanho + SHA-256) é pulado; arquivo diferente com o mesmo nome leva a mídia para
+  ` (2)`, ` (3)`...; reexportar é idempotente.
+- **Cancelamento e falhas:** cooperativo entre arquivos e entre blocos; o temporário é removido e o que já foi copiado
+  fica. No startup, exportação `running` vira `failed`/`interrupted` e nada é apagado por padrão de nome (a exportação só remove temporários que a própria execução criou; um `.mtpart` pode sobrar). Destino comparado por identidade de arquivo, não só por texto.
+- **Retenção x lote inteiro:** a retenção de 30 dias apaga jobs antigos (seção 4.1). Antes de apagar, na mesma transação,
+  `purge_finished_before` copia os pares (lote, mídia) dos ingests concluídos para `batch_media` (migration 0013, com
+  backfill). A exportação lê `jobs concluídos ∪ batch_media`, então um lote antigo continua completo.
+- **Baixar ZIP:** mesma exportação com `mode = 'zip'`: o executor grava um `.zip` plano (STORED, ZIP64, entradas em
+  blocos de 1 MiB) em `<data>\exports-tmp` (`app.services.export_zip`), depois de conferir o espaço livre; o painel
+  baixa por `GET /api/exports/{id}/download?token=`. Pronto vale 24 h (1 h após o primeiro download); vencidos, parciais
+  e órfãos são removidos pela varredura do executor e no startup.
+- **Seletor:** dois métodos em processo filho sem shell (tkinter; se não inicializar, PowerShell com
+  `FolderBrowserDialog` e script fixo); nenhum funcionou -> 501 `picker_unavailable` e o painel oferece a pasta padrão.
+
 ## 6. Processamento
 
 `ProcessingOptions` (`metadata_cleanup`, `trim_start`, `mirror`, `speed`, `auto_adjust`, `reencode`) vem dos params
@@ -205,7 +246,7 @@ Imagem: JPEG de alta qualidade (PNG continua PNG), hflip, sem EXIF, orientação
 SQLite em `data\media-tool.db`, WAL, `foreign_keys=ON`, migrations em `backend\app\db\migrations\NNNN_nome.sql`
 registradas em `schema_migrations`: `0001_initial.sql` (schema e seed dos presets Padrão e Anti-duplicidade) e
 `0002_job_lease.sql` (coluna `jobs.claimed_by` e índice parcial para o lease). Tabelas: `presets`, `media`, `renditions`, `batches`, `jobs`, `settings`,
-`app_state`. Nenhuma tabela guarda sessão ou cookies; `app_state.instagram_session_last_test` guarda só o resultado
+`app_state`, e `exports`/`export_items`/`batch_media` (migration `0013`, exportar para pasta). Nenhuma tabela guarda sessão ou cookies; `app_state.instagram_session_last_test` guarda só o resultado
 do último teste (`ok`, `code`, `message`, `username`, `tested_at`). Datas em ISO 8601 UTC com `Z`.
 
 ## 9. Segurança
@@ -238,7 +279,13 @@ do último teste (`ok`, `code`, `message`, `username`, `tested_at`). Datas em IS
 - **Arquivos:** nomes internos derivados de hash/ids (nunca da origem), nada é sobrescrito; `system_open` só abre
   caminhos dentro das raízes permitidas (`ensure_within`) e, pelo aplicativo padrão, só extensões de mídia
   (`.mp4`, `.mov`, `.jpg`, `.png`, `.webp`...), nunca executáveis.
-- **Processos:** FFmpeg, ffprobe e o runner rodam com lista de argumentos e `shell=False`.
+- **Exportar para pasta:** nenhuma rota recebe caminho do cliente. O destino só existe se um humano o escolheu no
+  diálogo nativo aberto pelo backend (guardado no servidor atrás de um token aleatório de uso único, válido por
+  10 min) ou se o servidor montou a pasta padrão em Documentos. O destino é validado na escolha e de novo no início da
+  cópia (absoluto, existente, resolvido, fora das pastas do Media Tool e do sistema, não é raiz de unidade, gravável).
+  "Abrir pasta" usa o caminho do registro no banco, revalidado. Uma página externa não consegue mandar escrever nem
+  abrir um caminho: sem o header e a origem locais a mutação é recusada, e mesmo com eles não há campo de caminho.
+- **Processos:** FFmpeg, ffprobe, o runner e o seletor de pasta rodam com lista de argumentos e `shell=False`.
 
 ## 10. Scripts
 

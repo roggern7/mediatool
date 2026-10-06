@@ -28,6 +28,7 @@ from app.db.connection import Database
 from app.db.migrate import apply_migrations
 from app.db.repositories import (
     BatchRepository,
+    ExportRepository,
     JobRepository,
     MediaRepository,
     PresetRepository,
@@ -38,6 +39,7 @@ from app.integrations.instagram.downloader import InstagramDownloader
 from app.integrations.instagram.gallerydl import GalleryDlInstagramDownloader
 from app.integrations.instagram.session import InstagramSessionProvider, LocalInstagramSessionProvider
 from app.integrations.instagram.web.provider import InstagramWebDownloader, WebStateCache
+from app.jobs.export_runner import ExportRunner, recover_interrupted_exports
 from app.jobs.import_runner import ImportRunner
 from app.jobs.recovery import run_recovery
 from app.jobs.worker import Worker
@@ -112,10 +114,12 @@ def build_context(
         jobs=JobRepository(db),
         batches=BatchRepository(db),
         app_settings=app_settings,
+        exports=ExportRepository(db),
     )
     ctx.instagram_gate = gate
     ctx.worker = Worker(ctx, concurrency=settings.concurrency)
     ctx.import_runner = ImportRunner(ctx)
+    ctx.export_runner = ExportRunner(ctx)
     return ctx
 
 
@@ -161,6 +165,7 @@ def create_app(
         ctx.storage.ensure_dirs()
         apply_migrations(ctx.db)
         run_recovery(ctx)
+        recover_interrupted_exports(ctx)
         ctx.worker.set_concurrency(effective_concurrency(ctx))
         ctx.worker.set_download_concurrency(effective_download_concurrency(ctx))
         ctx.worker.load_pause_state()
@@ -168,10 +173,12 @@ def create_app(
         if run_threads:
             ctx.worker.start()
             ctx.import_runner.start()
+            ctx.export_runner.start()
         logger.info("Media Tool %s pronto em http://%s:%s", __version__, settings.host, settings.port)
         try:
             yield
         finally:
+            ctx.export_runner.stop()
             ctx.import_runner.stop()
             ctx.worker.stop()
             ctx.db.close_all()

@@ -177,3 +177,169 @@ describe("cliente: keyset, resumo do lote e processar por filtro", () => {
     expect(JSON.parse(String(init.body))).toEqual({ view: "originals", media_type: "image", preset_id: 2 });
   });
 });
+
+describe("cliente: exportar para pasta", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  function call(index = 0): { url: string; init: RequestInit; headers: Record<string, string> } {
+    const [url, init] = fetchMock.mock.calls[index] as [string, RequestInit];
+    return { url, init, headers: init.headers as Record<string, string> };
+  }
+
+  it("pickExportFolder pede o seletor nativo ao backend sem mandar nenhum caminho", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ cancelled: false, token: "tok", path_display: "C:/Saida" }));
+    const picked = await api.pickExportFolder();
+    const { url, init, headers } = call();
+    expect(url).toBe("/api/exports/pick-folder");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+    expect(headers["X-Media-Tool-Client"]).toBe("panel");
+    expect(picked).toEqual({ cancelled: false, token: "tok", path_display: "C:/Saida" });
+  });
+
+  it("pickExportFolder devolve o cancelamento do diálogo sem erro", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ cancelled: true, token: null, path_display: null }));
+    await expect(api.pickExportFolder()).resolves.toEqual({ cancelled: true, token: null, path_display: null });
+  });
+
+  it("createExport manda a fonte e só o token do destino", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 5, status: "pending" }, 202));
+    await api.createExport({ source: { kind: "batch", id: 41 }, destination: { token: "tok" } });
+    await api.createExport({ source: { kind: "group", id: 7 }, destination: { default: true } });
+    await api.createExport({
+      source: { kind: "library", selection: { filter: { view: "all", q: "perfil" }, exclude_ids: [3] } },
+      destination: { token: "tok2" },
+    });
+    await api.createExport({
+      source: { kind: "library", selection: { media_ids: [1, 2] } },
+      destination: { token: "tok3" },
+    });
+    expect(call(0).url).toBe("/api/exports");
+    expect(call(0).init.method).toBe("POST");
+    expect(call(0).headers["X-Media-Tool-Client"]).toBe("panel");
+    expect(JSON.parse(String(call(0).init.body))).toEqual({
+      source: { kind: "batch", id: 41 },
+      destination: { token: "tok" },
+    });
+    expect(JSON.parse(String(call(1).init.body))).toEqual({
+      source: { kind: "group", id: 7 },
+      destination: { default: true },
+    });
+    expect(JSON.parse(String(call(2).init.body))).toEqual({
+      source: { kind: "library", selection: { filter: { view: "all", q: "perfil" }, exclude_ids: [3] } },
+      destination: { token: "tok2" },
+    });
+    expect(JSON.parse(String(call(3).init.body))).toEqual({
+      source: { kind: "library", selection: { media_ids: [1, 2] } },
+      destination: { token: "tok3" },
+    });
+    for (let i = 0; i < 4; i += 1) expect(String(call(i).init.body)).not.toMatch(/path/);
+  });
+
+  it("progresso, lista, cancelamento e abrir pasta usam as rotas do contrato", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ id: 5, items: [], ok: true })));
+    await api.getExport(5);
+    await api.listExports({ batchId: 41, limit: 1 });
+    await api.listExports({ groupId: 7 });
+    await api.cancelExport(5);
+    await api.openExportFolder(5);
+    await api.openLibraryFolder();
+    expect(call(0).url).toBe("/api/exports/5");
+    expect(call(0).init.method).toBe("GET");
+    expect(call(1).url).toBe("/api/exports?batch_id=41&limit=1");
+    expect(call(2).url).toBe("/api/exports?group_id=7");
+    expect(call(3).url).toBe("/api/exports/5/cancel");
+    expect(call(4).url).toBe("/api/exports/5/open");
+    expect(call(5).url).toBe("/api/library/open-folder");
+    for (const index of [3, 4, 5]) {
+      expect(call(index).init.method).toBe("POST");
+      expect(call(index).init.body).toBeUndefined(); // nenhuma rota de abrir/cancelar leva caminho
+      expect(call(index).headers["X-Media-Tool-Client"]).toBe("panel");
+    }
+  });
+
+  it("erro do seletor ocupado chega com a mensagem em português", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ detail: "x", code: "picker_busy" }, 409));
+    const err = await api.pickExportFolder().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("picker_busy");
+    expect((err as ApiError).message).toContain("janela de escolha de pasta");
+  });
+});
+
+describe("cliente: baixar ZIP", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it("createExport pede o ZIP sem token de pasta e sem caminho", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 9, mode: "zip", status: "pending" }, 202));
+    const job = await api.createExport({ source: { kind: "batch", id: 41 }, destination: { zip: true } });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/exports");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ source: { kind: "batch", id: 41 }, destination: { zip: true } });
+    expect(job.mode).toBe("zip");
+  });
+
+  it("sem espaço: erro 507 com a mensagem do backend", async () => {
+    const detail = "Sem espaço em disco para preparar o ZIP: são necessários 18,6 GB e há 2,0 GB disponíveis.";
+    fetchMock.mockResolvedValue(jsonResponse({ detail, code: "export_no_space" }, 507));
+    const err = await api
+      .createExport({ source: { kind: "group", id: 7 }, destination: { zip: true } })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("export_no_space");
+    expect((err as ApiError).message).toBe(detail);
+  });
+});
+
+describe("cliente: retomada de exportações", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it("listExports filtra pelas exportações da Biblioteca", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [] }));
+    await api.listExports({ kind: "library", limit: 5 });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/exports?kind=library&limit=5");
+  });
+
+  it("409 export_already_running expõe o export_id no payload do erro", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ detail: "x", code: "export_already_running", export_id: 31 }, 409));
+    const err = await api
+      .createExport({ source: { kind: "batch", id: 41 }, destination: { zip: true } })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect((err as ApiError).code).toBe("export_already_running");
+    expect((err as ApiError).payload?.export_id).toBe(31);
+  });
+});

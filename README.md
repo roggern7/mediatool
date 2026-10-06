@@ -21,6 +21,8 @@ locais. Nada é enviado para servidores de terceiros além das requisições ao 
 - [Lotes grandes](#lotes-grandes)
 - [Fila e recuperação](#fila-e-recuperação)
 - [Biblioteca](#biblioteca)
+- [Baixar ZIP](#baixar-zip)
+- [Exportar para pasta](#exportar-para-pasta)
 - [Diagnóstico](#diagnóstico)
 - [Segurança e privacidade](#segurança-e-privacidade)
 - [gallery-dl](#gallery-dl)
@@ -529,11 +531,99 @@ A tela **Biblioteca** lista as mídias com miniatura local, abas **Todos**, **Or
 de tipo (**Todos**, **Vídeos**, **Imagens**), busca **Buscar por @perfil** e detalhes de origem (perfil, post, data).
 Para cada mídia: ver o original e os processados, **Abrir arquivo**, **Abrir pasta** (Explorer), **Processar** /
 **Reprocessar**, **Excluir processado** e **Excluir item** (a confirmação, **Excluir item e original**, apaga também
-o arquivo original). Só arquivos de mídia dentro do storage podem ser abertos pelo painel.
+o arquivo original). Só arquivos de mídia dentro do storage podem ser abertos pelo painel. O botão **Abrir pasta da
+Biblioteca** abre a pasta dos originais no Explorer e **Exportar selecionados** copia a seleção para uma pasta sua
+(ver [Exportar para pasta](#exportar-para-pasta)).
 
 Arquivos: originais em `storage\originals\<ano>\<mês>\<hash[:2]>\<hash>.<ext>`, processados em
 `storage\processed\<ano>\<mês>\`, miniaturas em `storage\thumbs`. Os nomes internos nunca vêm da origem e nada é
 sobrescrito.
+
+## Baixar ZIP
+
+A forma principal de levar as mídias para fora do Media Tool. Ficam três caminhos: **Baixar ZIP**, **Exportar para
+pasta** e **Abrir pasta da Biblioteca**. O armazenamento interno não muda e continua sendo a fonte da verdade.
+
+- **Importar**: na importação concluída (um perfil ou vários), **Baixar ZIP** gera um arquivo
+  `importacao-AAAA-MM-DD-HHMM.zip` com todas as mídias daquela importação, inclusive as que já estavam na Biblioteca.
+- **Biblioteca**: com mídias selecionadas, ou com **Selecionar todos os N resultados**, **Baixar ZIP** gera
+  `biblioteca-AAAA-MM-DD-HHMM.zip` com a seleção. Não há limite de quantidade: 100, 10.000 ou mais, só o disco limita.
+- O ZIP é **plano**: todos os arquivos na raiz, sem as pastas internas de data/hash e sem pasta por perfil, com os
+  mesmos nomes da exportação para pasta. Dois arquivos nunca ficam com o mesmo nome (o segundo ganha ` (2)`).
+- Enquanto prepara, o painel mostra `Preparando ZIP • 3.482 / 10.000 mídias` e o botão **Cancelar**. Ao terminar:
+  `ZIP pronto • 10.000 mídias • 18,4 GB` e o download começa sozinho pelo navegador. **Baixar novamente** fica
+  disponível enquanto o ZIP existir (`disponível até HH:MM`).
+- **Espaço**: o ZIP é montado primeiro num arquivo temporário do Media Tool (`data\exports-tmp`), do tamanho da soma
+  das mídias. Antes de aceitar o pedido e de novo ao começar a preparar, o Media Tool confere se há espaço,
+  contando os ZIPs que já estão na fila e mantendo livre o mínimo que os downloads exigem; se não houver, avisa
+  quanto precisa e quanto há. Essa conferência é feita no início: se o disco encher por outro motivo durante a
+  preparação, o ZIP falha com aviso de disco cheio e o arquivo parcial é apagado. O navegador vai precisar do mesmo espaço de novo na
+  pasta de Downloads, e isso o Media Tool não consegue conferir. Para acervos muito grandes, **Exportar para pasta**
+  copia direto para o destino, sem o arquivo intermediário.
+- **Limpeza automática**: o ZIP pronto fica guardado por 24 horas; depois que um download termina por inteiro, por
+  no máximo mais 1 hora (um download em andamento nunca é interrompido pela limpeza). Cancelar ou falhar apaga o
+  arquivo parcial na hora. Se o disco apertar para os downloads, ZIPs que já foram baixados saem antes do prazo.
+  O Media Tool só apaga os arquivos que ele mesmo criou em `data\exports-tmp`; os originais nunca são tocados.
+- **Saiu da tela?** A preparação continua. Ao voltar para a importação ou para a Biblioteca, o progresso reaparece;
+  se o ZIP já ficou pronto, aparece o link **Baixar novamente** com a validade.
+
+## Exportar para pasta
+
+As mídias ficam guardadas em `storage\originals`, em subpastas internas de data e hash. Essa organização serve ao
+Media Tool (deduplicação, histórico, processamento) e não muda. Para usar os arquivos fora dele existe a
+**exportação**: uma CÓPIA das mídias, com nomes legíveis, direto numa pasta que você escolhe, sem subpastas.
+
+- **Importar**: quando uma importação termina (um perfil ou vários), o painel dela mostra **Ver na Biblioteca**,
+  **Exportar para pasta**, **Abrir pasta** e a opção discreta **Usar pasta padrão**.
+  - **Exportar para pasta** abre a janela "Selecionar pasta" do próprio Windows (aparece a mensagem *Escolha a pasta
+    na janela do Windows…*). Depois de escolher, a cópia roda em segundo plano com progresso (`3.482 / 10.000`) e
+    botão **Cancelar exportação**. No fim: `1.248 mídias exportadas para C:\...\Minha pasta` e **Abrir pasta**.
+  - **Usar pasta padrão** dispensa a janela: o Media Tool cria `Documentos\Media Tool\Exports\Importacao-AAAA-MM-DD-HHMM`
+    e exporta para lá.
+  - **Abrir pasta** abre no Explorer a pasta da última exportação concluída daquela importação; se ela ainda não foi
+    exportada, o painel orienta a usar **Exportar para pasta**.
+  - A exportação é o resultado COMPLETO da importação: entram também as mídias que já estavam na Biblioteca e foram
+    reconhecidas como duplicadas. Com vários perfis, tudo vai junto para a mesma pasta, cada mídia uma vez.
+- **Biblioteca**: **Abrir pasta da Biblioteca** abre no Explorer a pasta física dos originais. Com mídias
+  selecionadas, **Exportar selecionados** copia a seleção para a pasta escolhida; com **Selecionar todos os N
+  resultados**, exporta todos os resultados do filtro (50, 500 ou dezenas de milhares), sem limite de quantidade.
+
+O que esperar:
+
+- **É cópia.** O original nunca é movido nem apagado, e não há atalho/link entre a pasta exportada e a Biblioteca.
+  Você pode mover, renomear ou apagar a pasta exportada (ou copiá-la para outro computador) sem afetar nada.
+- **São os originais**, não as versões processadas.
+- **Nomes**: `perfil_AAAA-MM-DD_codigo-do-post.ext` (item de carrossel ganha `_1`, `_2`...), com a extensão do
+  original. Caracteres que o Windows não aceita são trocados por `_`. A data é a da publicação em UTC (horário
+  universal), para o nome ser sempre o mesmo em qualquer computador; uma publicação feita à noite no Brasil pode
+  aparecer com a data do dia seguinte.
+- **Nada é sobrescrito.** Se a pasta já tem um arquivo com o mesmo nome: sendo o mesmo conteúdo, ele não é copiado de
+  novo ("já estavam na pasta"); sendo outro arquivo, a mídia é gravada com ` (2)`, ` (3)`... ("renomeadas"). Exportar
+  de novo para a mesma pasta só completa o que faltava.
+- **Cancelar** mantém os arquivos já copiados e remove o arquivo temporário que estava pela metade. Se o Media Tool
+  for fechado no meio, a exportação aparece como interrompida; exporte de novo para a mesma pasta para completar.
+- **Arquivos temporários**: durante a cópia cada mídia é gravada primeiro num arquivo `.nome.N.xxxxxxxx.mtpart`
+  (começa com ponto, termina em `.mtpart`) e só depois recebe o nome final. O Media Tool só apaga os temporários
+  que ele mesmo criou naquela execução e nunca apaga outro arquivo da sua pasta, mesmo com nome parecido. Se o
+  computador ou o app for desligado no meio, um `.mtpart` pode sobrar: pode apagar à mão.
+- **Uma exportação por vez**: as outras esperam na fila (até 20). Downloads e processamento continuam normalmente.
+  A mesma importação não pode ter duas exportações abertas ao mesmo tempo (nem a Biblioteca).
+- A pasta padrão criada em Documentos é removida sozinha se a exportação for cancelada ou falhar sem copiar nada.
+- **Pastas recusadas**: a raiz de uma unidade (`C:\`, escolha uma subpasta), as pastas do próprio Media Tool (storage,
+  data, logs, a pasta do projeto, ou uma pasta que as contenha) e as pastas do Windows (`Windows`, `Program Files`,
+  `ProgramData`). Pen drive, HD externo e pasta de rede são aceitos.
+- Disco de destino cheio: a exportação para com um aviso claro; libere espaço e exporte de novo para a mesma pasta.
+
+- **Importações antigas continuam completas.** A limpeza automática da fila (jobs encerrados há mais de 30 dias) não
+  reduz a exportação: antes de apagar um job antigo, o Media Tool guarda a ligação entre a importação e a mídia
+  (tabela `batch_media`). Exportar uma importação meses depois traz as mesmas mídias. Só sai da lista a mídia que
+  você excluiu da Biblioteca.
+- **Importação que não terminou**: um perfil parado em "Precisa de atenção" com mídias já baixadas, ou uma
+  importação de vários perfis sem nenhum perfil em andamento, também mostram **Exportar para pasta**, com o aviso de
+  que a exportação leva só o que já foi baixado.
+- **Se a janela de escolha de pasta não abrir**: o Media Tool tenta dois métodos do Windows. Se nenhum funcionar no
+  seu computador, aparece um aviso com o botão **Exportar para a pasta padrão em Documentos** (na Biblioteca a pasta
+  criada é `Documentos\Media Tool\Exports\Biblioteca-AAAA-MM-DD-HHMM`).
 
 ## Diagnóstico
 
@@ -570,6 +660,17 @@ filtro que remove valores de sessão e cookies.
   `*.cdninstagram.com` e `*.fbcdn.net`, com bloqueio de IPs privados, limite de tamanho e verificação do tipo real
   do arquivo.
 - O FFmpeg é chamado sem shell, com lista de argumentos; o original nunca é modificado.
+- **Exportar para pasta, como o destino é autorizado:** a API não tem nenhum campo de caminho. A pasta de destino só
+  existe se você a escolheu na janela "Selecionar pasta" do Windows, aberta pelo próprio backend nesta máquina (um
+  processo filho curto, sem shell), ou se é a pasta padrão que o backend cria em `Documentos\Media Tool\Exports`. A
+  pasta escolhida fica guardada no backend, ligada a um código aleatório de uso único que vale 10 minutos; o painel
+  só devolve esse código. Antes de copiar, o backend confere de novo a pasta: precisa existir, ser gravável, não ser
+  a raiz de uma unidade e estar fora das pastas do Media Tool (storage, data, logs, projeto) e do Windows
+  (`Windows`, `Program Files`, `ProgramData`), inclusive por atalho, junção ou caminho alternativo para a mesma pasta (rede apontando para
+  este computador, `\\?\`): a comparação é pela identidade da pasta no disco, não só pelo texto do caminho. "Abrir pasta" só abre a pasta
+  registrada de uma exportação (ou a pasta dos originais), nunca um caminho informado pela página. Como todas essas
+  ações são mutações, valem as proteções acima: uma página de outro site não consegue abrir o seletor, exportar nem
+  abrir pastas.
 - `.gitignore` exclui `.env`, toda a pasta `data` (banco, backups e `data\secrets`), o conteúdo de `storage`, logs,
   arquivos de cookies e artefatos de prova de conceito. O repositório só tem código, migrations, testes, scripts e
   documentação.

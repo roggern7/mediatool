@@ -51,6 +51,8 @@ import { isPaused, useNow } from "../lib/pause";
 import { PauseBanner } from "../components/PauseBanner";
 import { BatchNotice } from "../components/BatchNotice";
 import { ImportGroupPanel } from "../components/ImportGroupPanel";
+import { ImportExportBar } from "../components/ExportPanel";
+import { batchExportOffer, libraryPathForProfile } from "../lib/exportFolder";
 import { listingDropped, listingDroppedSuffix, needsAttention } from "../lib/batchState";
 import { navigate, ROUTES } from "../lib/router";
 import { queueForBatch } from "../lib/batchRoute";
@@ -695,6 +697,7 @@ function BatchPanel({
     );
   }
 
+  const exportOffer = batchExportOffer(batch);
   return (
     <div className="panel" style={{ marginTop: 20 }} aria-live="polite">
       <BatchSummary batch={batch} />
@@ -723,11 +726,6 @@ function BatchPanel({
         <button type="button" className="btn btn-sm btn-ghost" onClick={() => navigate(queueForBatch(batch.id))}>
           Ver na Fila
         </button>
-        {!ACTIVE_BATCH.has(batch.status) ? (
-          <button type="button" className="btn btn-sm btn-ghost" onClick={() => navigate(ROUTES.library)}>
-            Abrir Biblioteca
-          </button>
-        ) : null}
         <span className="grow" />
         {onClose ? (
           <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
@@ -735,6 +733,17 @@ function BatchPanel({
           </button>
         ) : null}
       </div>
+      <ImportExportBar
+        source={{ kind: "batch", id: batch.id }}
+        finished={exportOffer.offer}
+        note={exportOffer.note}
+        lastExport={batch.last_export}
+        libraryPath={libraryPathForProfile(batch.source_profile)}
+        onChanged={() => {
+          query.reload();
+          onChanged();
+        }}
+      />
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { ExternalLink, FolderOpen, Trash2, Wand2, X } from "lucide-react";
 import { api, messageOf } from "../api/client";
 import type { Media, MediaType, MediaView, Preset, Rendition } from "../api/types";
 import { Link } from "../components/Layout";
+import { ExportStatus } from "../components/ExportPanel";
 import { PresetPickerDialog } from "../components/PresetPicker";
 import { ConfirmDialog, Empty, ErrorLine, Pill, SkeletonRows, Spinner, Thumb } from "../components/ui";
 import {
@@ -16,6 +17,15 @@ import {
 } from "../lib/format";
 import { ACTIVE_BATCH, JOB_STATUS_LABEL, TERMINAL_JOB, jobTone } from "../lib/labels";
 import { MAX_BULK_PROCESS, canOfferSelectAll, processByFilterBody, withinBulkCap } from "../lib/filterSelection";
+import {
+  ORIGINALS_NOTE,
+  exportSelectedLabel,
+  initialLibrarySearch,
+  isExportActive,
+  librarySelectionSource,
+  zipSelectedLabel,
+} from "../lib/exportFolder";
+import { useExportFlow } from "../lib/useExportFlow";
 import {
   FIRST_PAGE,
   type PageCursor,
@@ -61,7 +71,8 @@ export function LibraryPage() {
   const toast = useToast();
   const [view, setView] = useState<MediaView>("all");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
-  const [search, setSearch] = useState("");
+  // "Ver na Biblioteca" de uma importação abre a tela já com a busca pelo perfil (?perfil=usuario).
+  const [search, setSearch] = useState(() => initialLibrarySearch(window.location.search));
   const [pager, setPager] = useState<Pager>({ scope: "", stack: FIRST_PAGE });
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   // Todos os resultados do filtro atual (processados no servidor, sem carregar os ids).
@@ -71,6 +82,8 @@ export function LibraryPage() {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [busy, setBusy] = useState(false);
   const [pollMs, setPollMs] = useState<number | null>(null);
+  // Retoma o ZIP/exportação da Biblioteca em andamento, ou volta a oferecer o ZIP pronto, ao reabrir a tela.
+  const exportFlow = useExportFlow({ resumeFor: { kind: "library" } });
 
   const q = useDebounced(search.trim().replace(/^@/, ""), 300);
   const scope = JSON.stringify({ view, typeFilter, q });
@@ -122,6 +135,7 @@ export function LibraryPage() {
   const offerSelectAll = !allByFilter && !processedView && canOfferSelectAll(items.length, selectedIds.length, total);
   const nextPage = list.data ? nextCursor(list.data, stack, PAGE_SIZE) : null;
   const start = pageStart(stack, PAGE_SIZE);
+  const exportActive = isExportActive(exportFlow.current);
   const newCount = typeof watch.data === "number" && list.data ? Math.max(0, watch.data - list.data.total) : 0;
 
   function goTo(nextStack: PageCursor[]) {
@@ -161,6 +175,21 @@ export function LibraryPage() {
     } catch (err) {
       toast.push("err", messageOf(err));
     }
+  }
+
+  async function openLibraryFolder() {
+    try {
+      await api.openLibraryFolder();
+      toast.push("ok", "Pasta da Biblioteca aberta no Explorer.");
+    } catch (err) {
+      toast.push("err", messageOf(err));
+    }
+  }
+
+  /** Exporta a seleção atual (ids da página ou todos os resultados do filtro, resolvidos no servidor). */
+  function exportSelected(mode: "pick" | "zip" = "pick") {
+    const source = librarySelectionSource({ allByFilter, view, typeFilter, q, selectedIds });
+    if (source) void exportFlow.start(source, mode);
   }
 
   async function runDialog(presetId?: number) {
@@ -214,6 +243,15 @@ export function LibraryPage() {
           <span className="muted small">
             {list.data ? (processedView ? `${formatCount(total)} mídias processadas` : `${formatCount(total)} itens`) : null}
           </span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            title="Abre no Explorer a pasta onde os arquivos originais ficam guardados"
+            onClick={() => void openLibraryFolder()}
+          >
+            <FolderOpen size={13} strokeWidth={1.75} aria-hidden="true" />
+            Abrir pasta da Biblioteca
+          </button>
         </div>
       </div>
 
@@ -294,6 +332,26 @@ export function LibraryPage() {
             <Wand2 size={13} strokeWidth={1.75} aria-hidden="true" />
             Processar com preset (opcional)
           </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={total === 0 || exportFlow.busy || exportActive}
+            title="Prepara um arquivo .zip com todos os resultados do filtro e inicia o download"
+            aria-label={zipSelectedLabel(total)}
+            onClick={() => exportSelected("zip")}
+          >
+            Baixar ZIP
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={total === 0 || exportFlow.busy || exportActive}
+            title={ORIGINALS_NOTE}
+            aria-label={exportSelectedLabel(total)}
+            onClick={() => exportSelected()}
+          >
+            Exportar selecionados
+          </button>
           <button type="button" className="btn btn-sm btn-ghost" onClick={clearSelection}>
             Limpar seleção
           </button>
@@ -319,11 +377,32 @@ export function LibraryPage() {
             <Wand2 size={13} strokeWidth={1.75} aria-hidden="true" />
             Processar com preset (opcional)
           </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={exportFlow.busy || exportActive}
+            title="Prepara um arquivo .zip com as mídias selecionadas e inicia o download"
+            aria-label={zipSelectedLabel(selectedIds.length)}
+            onClick={() => exportSelected("zip")}
+          >
+            Baixar ZIP
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={exportFlow.busy || exportActive}
+            title={ORIGINALS_NOTE}
+            aria-label={exportSelectedLabel(selectedIds.length)}
+            onClick={() => exportSelected()}
+          >
+            Exportar selecionados
+          </button>
           <button type="button" className="btn btn-sm btn-ghost" onClick={clearSelection}>
             Limpar seleção
           </button>
         </div>
       ) : null}
+      <ExportStatus flow={exportFlow} />
 
       <div className={`library${detail ? " with-detail" : ""}`}>
         <div style={{ minWidth: 0 }}>

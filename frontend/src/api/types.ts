@@ -197,6 +197,8 @@ export interface Batch {
   group_id?: number | null;
   group_position?: number | null;
   group_state?: GroupChildState | null;
+  /** Última exportação para pasta concluída deste lote; null/ausente se nunca foi exportado. */
+  last_export?: LastExport | null;
 }
 
 export type GroupChildState = "waiting" | "active" | "attention" | "completed" | "failed" | "cancelled";
@@ -240,6 +242,8 @@ export interface ImportGroup {
   profile_end_count: number;
   progress: BatchProgress;
   listing_dropped_total: number;
+  /** Última exportação para pasta concluída do grupo inteiro; null/ausente se nunca foi exportado. */
+  last_export?: LastExport | null;
 }
 
 export interface SkippedProfile {
@@ -458,4 +462,74 @@ export interface JobsQuery {
   limit?: number;
   offset?: number;
   before_id?: number;
+}
+
+/** Exportação para pasta. Contrato: docs/CONTRACTS.md, seção 8.2. */
+export type ExportStatus = "pending" | "running" | "completed" | "cancelled" | "failed" | "expired";
+/** `folder`: cópia para uma pasta; `zip`: um .zip plano preparado pelo servidor para download. */
+export type ExportMode = "folder" | "zip";
+
+export interface LastExport {
+  id: number;
+  /** Pasta de destino, só para exibição (o painel nunca envia caminho ao backend). */
+  dest_path: string;
+  status: ExportStatus;
+  total: number;
+  /** Gravadas na pasta (inclui as renomeadas). */
+  copied: number;
+  /** Arquivo idêntico já estava na pasta. */
+  skipped_existing: number;
+  /** Gravadas com outro nome porque havia um arquivo diferente com o mesmo nome. */
+  renamed: number;
+  /** Original ausente no storage. */
+  missing: number;
+  failed: number;
+  finished_at: string | null;
+  mode?: ExportMode;
+}
+
+export interface ExportJob extends LastExport {
+  /** Só em mode = "zip". `download_url` (com o token de download) e `zip_bytes` só com o ZIP pronto. */
+  zip_name?: string | null;
+  zip_bytes?: number | null;
+  zip_ready?: boolean;
+  zip_expires_at?: string | null;
+  download_url?: string | null;
+  kind: "batch" | "group" | "library";
+  batch_id: number | null;
+  group_id: number | null;
+  /** Arquivos já tratados: copied + skipped_existing + missing + failed. */
+  processed: number;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+}
+
+export interface ExportFilter {
+  view: MediaView;
+  media_type?: MediaType;
+  q?: string;
+  profile?: string;
+}
+
+export type ExportSelection = { media_ids: number[] } | { filter: ExportFilter; exclude_ids?: number[] };
+
+export type ExportSource =
+  | { kind: "batch"; id: number }
+  | { kind: "group"; id: number }
+  | { kind: "library"; selection: ExportSelection };
+
+/** `token`: pasta escolhida no seletor nativo; `default`: pasta padrão criada pelo servidor em Documentos. */
+export type ExportDestination = { token: string } | { default: true } | { zip: true };
+
+export interface ExportRequest {
+  source: ExportSource;
+  destination: ExportDestination;
+}
+
+export interface PickFolderResult {
+  cancelled: boolean;
+  token: string | null;
+  path_display: string | null;
 }

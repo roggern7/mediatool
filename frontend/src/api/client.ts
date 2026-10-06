@@ -1,6 +1,8 @@
 import type {
   Batch,
   Diagnostics,
+  ExportJob,
+  ExportRequest,
   Health,
   ImportGroupDetail,
   ImportGroupList,
@@ -13,6 +15,7 @@ import type {
   Media,
   MediaQuery,
   Paged,
+  PickFolderResult,
   Preset,
   PresetParams,
   ProcessByFilterRequest,
@@ -24,6 +27,7 @@ import type {
 } from "./types";
 import { errorMessageFor } from "./errors";
 import type { CookiePatch } from "../lib/sessionCookies";
+import { PICK_FOLDER_TIMEOUT_MS } from "../lib/exportFolder";
 
 const CLIENT_HEADER = "X-Media-Tool-Client";
 const CLIENT_VALUE = "panel";
@@ -232,6 +236,26 @@ export const api = {
     request<{ ok: boolean }>("POST", `/media/${id}/open`, {
       body: renditionId !== undefined ? { target, rendition_id: renditionId } : { target },
     }),
+
+  /**
+   * Abre o seletor NATIVO de pasta do Windows pelo backend (sem corpo: nenhum caminho sai do painel). A resposta só
+   * chega quando o usuário escolhe ou cancela, por isso o prazo longo.
+   */
+  pickExportFolder: () =>
+    request<PickFolderResult>("POST", "/exports/pick-folder", { timeoutMs: PICK_FOLDER_TIMEOUT_MS }),
+  createExport: (req: ExportRequest) =>
+    request<ExportJob>("POST", "/exports", { body: req, timeoutMs: SLOW_TIMEOUT_MS }),
+  getExport: (id: number) => request<ExportJob>("GET", `/exports/${id}`),
+  /** Últimas exportações (mais recente primeiro) de um lote ou de um grupo. */
+  listExports: (q: { batchId?: number; groupId?: number; kind?: ExportJob["kind"]; limit?: number } = {}) =>
+    request<{ items: ExportJob[] }>("GET", "/exports", {
+      query: { batch_id: q.batchId, group_id: q.groupId, kind: q.kind, limit: q.limit },
+    }),
+  cancelExport: (id: number) => request<ExportJob>("POST", `/exports/${id}/cancel`),
+  /** Abre no Explorer a pasta daquela exportação (o caminho vem do registro no backend). */
+  openExportFolder: (id: number) => request<{ ok: boolean }>("POST", `/exports/${id}/open`),
+  /** Abre no Explorer a pasta física dos originais da Biblioteca. */
+  openLibraryFolder: () => request<{ ok: boolean }>("POST", "/library/open-folder"),
 
   listJobs: (q: JobsQuery) =>
     request<JobsPage>("GET", "/jobs", {

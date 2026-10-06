@@ -18,8 +18,9 @@ media-tool\   (raiz do repositório)
     app\core\            config, logging (com redação de segredos), security (middleware, validadores), paths
     app\db\              conexão SQLite, migrations SQL numeradas, repositórios
     app\schemas\         Pydantic de entrada/saída
-    app\services\        storage, cdn_downloader, diagnostics, system_open, import_service
-    app\jobs\            fila persistente, worker, import runner, recovery
+    app\services\        storage, cdn_downloader, diagnostics, system_open, import_service,
+                         export_service, export_destination, export_names (exportar para pasta, seção 8.2)
+    app\jobs\            fila persistente, worker, import runner, recovery, export runner
     app\integrations\instagram\
         session.py       InstagramSession, InstagramSessionProvider, LocalInstagramSessionProvider, dpapi
         validation.py    parse_profile_input, validate_shortcode, validate_instagram_url
@@ -243,7 +244,18 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
   (migration 0012): importação de vários perfis; só guarda o pedido, o estado é derivado dos filhos. `batches` ganha
   `group_id` (FK, NULL em lotes avulsos/antigos), `group_position` (1-based) e `listing_end`
   (`profile_end`|`limit`|NULL).
-- `settings(key PK, value json, updated_at)`; `app_state(key PK, value, updated_at)`.
+- `exports(id, kind /*batch|group|library*/, batch_id FK SET NULL, group_id FK SET NULL, selection json /*só library*/,
+  dest_path, dest_created /*1 = pasta padrão criada pelo servidor para esta exportação*/,
+  mode /*folder|zip*/, zip_path, zip_name, zip_token, zip_bytes, zip_expires_at, zip_downloaded_at,
+  status /*pending|running|completed|cancelled|failed*/, total, copied, skipped_existing, renamed, missing,
+  failed, cancel_requested, error_code, error_message, created_at, started_at, finished_at)` e
+  `export_items(export_id FK CASCADE, media_id, PK (export_id, media_id))` (migration 0013; seção 8.2): em `library` por
+  ids, `export_items` guarda os ids escolhidos; por filtro, guarda os ids EXCLUÍDOS e `selection` guarda o filtro
+  congelado (`max_id`). Para lote e grupo nada é materializado (as mídias saem dos jobs de ingest concluídos).
+- `batch_media(batch_id FK CASCADE, media_id FK CASCADE, PK (batch_id, media_id))` (migration 0013): relação durável
+  lote -> mídia, preenchida pelo backfill da migration e pelo purge de jobs antes de apagar (seção 8.2).
+- `settings(key PK, value json, updated_at)`; `app_state(key PK, value, updated_at)` (`export_last_folder`: última pasta
+  de exportação usada, só para abrir o diálogo nela).
 Nenhuma tabela guarda sessão/cookies.
 
 ## 7. Estados
@@ -310,6 +322,14 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | DELETE | /api/renditions/{id} | | 204 |
 | DELETE | /api/media/{id} | `?delete_original=true` obrigatório | 204 |
 | POST | /api/media/{id}/open | `{target:"file"\|"folder", rendition_id?}` | `{ok}` |
+| POST | /api/library/open-folder | | `{ok}` (seção 8.2) |
+| POST | /api/exports/pick-folder | | `PickFolder` (seção 8.2) |
+| POST | /api/exports | `ExportRequest` | `Export` 202 (seção 8.2) |
+| GET | /api/exports | `batch_id?`, `group_id?`, `limit` | `{items: Export[]}` |
+| GET | /api/exports/{id} | | `Export` |
+| GET | /api/exports/{id}/download | `token` | arquivo `.zip` (seção 8.2, Baixar ZIP) |
+| POST | /api/exports/{id}/cancel | | `Export` |
+| POST | /api/exports/{id}/open | | `{ok}` |
 | GET | /api/jobs | `status` csv, `batch_id`, `ids` csv, `limit`, `offset` | `{items, total, counts}` |
 | GET | /api/jobs/{id} | | `Job` |
 | POST | /api/jobs/{id}/cancel | | `Job` |
@@ -346,7 +366,8 @@ Batch = { id, source, source_profile|null, content_type|null, requested_limit|nu
   listing_dropped: { unexpected_total: number, reasons: {<motivo>: n}, pending: number },
   listing_end: "profile_end"|"limit"|null,   // por que a listagem terminou (seção 8.1); null enquanto lista/erro/antigo
   group_id: number|null, group_position: number|null /*1-based*/,
-  group_state: "waiting"|"active"|"attention"|"completed"|"failed"|"cancelled"|null /*só em filhos de grupo*/ }
+  group_state: "waiting"|"active"|"attention"|"completed"|"failed"|"cancelled"|null /*só em filhos de grupo*/,
+  last_export: LastExport|null /*última exportação para pasta concluída do lote; seção 8.2*/ }
   // pending: parte de unexpected_total/reasons que ainda é da página ABERTA da listagem (sem checkpoint; ex.: lote
   // em needs_attention ou parado no meio da página). Já está somada no total para não ficar invisível; vira
   // definitiva se a listagem encerrar ou o lote for cancelado, e é substituída (sem duplicar) se a página for refeita.
@@ -445,7 +466,8 @@ ImportGroup = { id, content_type, requested_limit: number|null /*POR PERFIL*/, p
   profiles: { total, waiting, active, completed, attention, failed, cancelled } /*os seis somam total*/,
   profile_end_count: number /*filhos com listing_end = profile_end*/,
   progress: { found, downloaded, processed, skipped, failed, pending, active } /*soma das mídias dos filhos*/,
-  listing_dropped_total: number /*soma de listing_dropped definitivo dos filhos; o detalhe fica em cada filho*/ }
+  listing_dropped_total: number /*soma de listing_dropped definitivo dos filhos; o detalhe fica em cada filho*/,
+  last_export: LastExport|null /*última exportação para pasta concluída do grupo inteiro; seção 8.2*/ }
 ImportGroupDetail = { group: ImportGroup, children: Batch[] /*ordem group_position*/,
   next_after_position: number|null,
   skipped?: { profile: string, reason: "profile_already_importing" }[] /*só na criação*/,
@@ -527,7 +549,8 @@ perfil (`/p/...`, `/reel/...`, `/reels/...`, `/explore/...`, `/stories/...`, `/a
   `session_missing`; 409 `instagram_paused`; 404 `preset_not_found`.
 
 `GET /api/import-groups?limit=50&before_id=` -> `{ "items": [ImportGroup, ...], "total": 12, "next_before_id": 3 }`
-(ordem id DESC; `next_before_id` `null` no fim). Duas consultas ao banco para a página inteira.
+(ordem id DESC; `next_before_id` `null` no fim). Custo fixo para a página inteira (lista, agregados dos filhos e
+`last_export`), independente do número de grupos e de filhos.
 
 `GET /api/import-groups/{id}?children_limit=100&after_position=100` -> `ImportGroupDetail` (sem `skipped`/
 `duplicates`). Cada filho é um `Batch` completo: `source_profile`, `group_position`, `status`, `listing_state`
@@ -562,6 +585,255 @@ O filho seguinte começa quando o da vez terminou de listar (os downloads dele s
 conta própria (`attention`, pausa do lote). Erro em um perfil não afeta os outros. Pausa global do Instagram
 (`GET /api/settings` -> `instagram.paused_until`) segura todos e a listagem retoma do checkpoint. Depois de reiniciar
 o app a fila continua de onde parou, na mesma ordem.
+
+### 8.2 Exportar para pasta
+
+Camada de exportação amigável sobre a Biblioteca. O armazenamento interno (`storage\originals`, SHA-256, dedupe,
+histórico) não muda e continua sendo a fonte da verdade: exportar é COPIAR os originais para UMA pasta plana escolhida
+pelo usuário (sem subpastas; vários perfis ficam juntos). Nunca move, nunca cria hardlink/symlink/junção, nunca
+sobrescreve. Apagar a pasta exportada depois não afeta a Biblioteca. Exporta o ORIGINAL (não a versão processada).
+
+**Destino autorizado (segurança).** Nenhuma rota aceita caminho vindo do cliente. O destino só existe de duas formas:
+1. `POST /api/exports/pick-folder` (sem corpo): o BACKEND abre o diálogo nativo "Selecionar pasta" do Windows num
+   processo filho curto, sem shell, com lista de argumentos fixa, ambiente filtrado, sem janela de console e prazo de
+   10 min (estourou = cancelado). Dois métodos, nesta ordem: (a) `python -m app.services.folder_picker_child`
+   (tkinter; janela dona `Tk()` com `-topmost`, `lift()`, `focus_force()` e `update()` antes de
+   `askdirectory(parent=root, mustexist=True)`; diretório inicial pelo stdin; resposta em JSON só com ASCII);
+   (b) se o tkinter/Tcl não inicializar (erro de import, `TclError`, processo que não inicia ou resposta inválida):
+   `powershell.exe -NoProfile -NonInteractive -STA -Command <script fixo>` com
+   `System.Windows.Forms.FolderBrowserDialog` (diretório inicial pela variável `MEDIA_TOOL_PICKER_INITIAL` só do
+   filho, passada apenas se for diretório absoluto existente; resposta em Base64 de UTF-8). Cancelar o diálogo não
+   passa para o método seguinte. Nenhum método funcionou (ou fora do Windows): 501 `picker_unavailable`, com
+   mensagem orientando a usar a pasta padrão. O caminho escolhido chega íntegro com acentos, Unicode e espaços,
+   sem depender do codepage do console. Um diálogo por vez (segundo pedido: 409 `picker_busy`). A pasta escolhida é validada e fica guardada NO SERVIDOR, ligada a um token
+   aleatório (`secrets.token_urlsafe(32)`) de USO ÚNICO e validade de 10 min. Diretório inicial do diálogo: a última
+   pasta usada, senão `<Documentos>\Media Tool\Exports` (criada sob demanda).
+2. `destination: {default: true}`: o servidor cria `<Documentos>\Media Tool\Exports\Importacao-AAAA-MM-DD-HHMM`
+   para lote/grupo e `...\Biblioteca-AAAA-MM-DD-HHMM` para seleção da Biblioteca (sufixo `-2`, `-3`... se já
+   existir). No painel, a Biblioteca só oferece essa opção quando o seletor responde `picker_unavailable`.
+
+Validação do destino, feita na escolha E de novo quando a cópia começa: caminho absoluto e sem `..`; existente e
+pasta; resolvido (links e junções seguidos, então um atalho para dentro do storage é recusado); não é raiz de unidade
+nem de compartilhamento; não está dentro (nem é pai) das pastas gerenciadas pelo Media Tool (pasta do projeto,
+storage, data com banco/backups/secrets, logs, inclusive quando configuradas fora do projeto); não está dentro de
+`%SystemRoot%`, `Program Files`, `Program Files (x86)` ou `ProgramData`; gravável. Unidade local, removível e de rede
+(UNC ou unidade mapeada) são aceitas: é um destino do usuário, escolhido no diálogo nativo desta máquina.
+"Dentro" e "pai" são decididos por IDENTIDADE de arquivo (volume + número do arquivo, `os.stat`), além do texto do
+caminho: para o destino e cada ancestral dele, a identidade é comparada com a de cada pasta gerenciada e do sistema; e
+a identidade do destino é comparada com a de cada ancestral das pastas gerenciadas. Assim um caminho alternativo
+para a mesma pasta (`\\localhost\C$\...`, `\\?\C:\...`, unidade mapeada para um compartilhamento desta máquina,
+junção) é recusado igual. `\\?\` é normalizado e `\\.\` é recusado. A mesma verificação roda na escolha, no início
+da cópia e no "Abrir pasta"; durante a cópia, antes de cada arquivo, o executor confere que a pasta de destino continua
+sendo a MESMA pasta validada (se foi trocada, para com `export_folder_missing`). Caminhos com mais de 260 caracteres
+são aceitos (checagens e I/O com o prefixo de caminho longo); se ainda assim não for utilizável: `export_dest_too_long`.
+
+| Método | Caminho | Corpo / query | Resposta |
+|---|---|---|---|
+| POST | /api/exports/pick-folder | (sem corpo; qualquer corpo é ignorado) | `PickFolder`; 409 `picker_busy`; erros de destino abaixo; 501 `picker_unavailable` |
+| POST | /api/exports | `ExportRequest` | `Export` 202 (`status: "pending"`, `total` já contado); 404 `batch_not_found`\|`group_not_found`; 409 `export_token_invalid`\|`export_empty`\|`export_already_running` (corpo com `export_id` da existente)\|`export_queue_full`; erros de destino; 422 `validation_error` (qualquer campo extra, como `path`, é rejeitado) |
+| GET | /api/exports | `batch_id?`, `group_id?`, `kind?=batch\|group\|library`, `limit`<=50 (10) | `{items: Export[]}` (id DESC) |
+| GET | /api/exports/{id} | | `Export` (progresso); 404 `export_not_found` |
+| POST | /api/exports/{id}/cancel | | `Export`; 409 `export_finished`; 404 `export_not_found` |
+| POST | /api/exports/{id}/open | (sem corpo) | `{ok}`: abre no Explorer a pasta do REGISTRO no banco, revalidada; 409 `export_folder_missing`; 422 `export_dest_forbidden`; 404 `export_not_found`; 501 `unsupported` |
+| POST | /api/library/open-folder | (sem corpo) | `{ok}`: abre no Explorer a pasta física dos originais (`Settings.storage.originals`); 501 `unsupported` |
+
+Todas as rotas POST acima são mutações: valem as proteções da seção 8 (Host local, header `X-Media-Tool-Client`,
+`Origin` permitido).
+
+```ts
+PickFolder = { cancelled: boolean, token: string|null, path_display: string|null }   // cancelled: true = diálogo fechado
+ExportSource =
+  | { kind: "batch", id: number }                                 // lote avulso ou UM filho de grupo
+  | { kind: "group", id: number }                                 // importação de vários perfis inteira
+  | { kind: "library", selection: ExportSelection }
+ExportSelection =
+  | { media_ids: number[] /*sem teto de quantidade; limite real = corpo de 1 MB*/ }
+  | { filter: { view?: "all"|"originals"|"processed", media_type?: "video"|"image", q?: string, profile?: string },
+      exclude_ids?: number[] }                     // "todos os resultados do filtro", resolvido no servidor
+ExportRequest = { source: ExportSource, destination: { token: string } | { default: true } | { zip: true } }
+Export = { id, kind: "batch"|"group"|"library", batch_id|null, group_id|null, dest_path /*só exibição*/,
+  status: "pending"|"running"|"completed"|"cancelled"|"failed",
+  total, processed /*copied + skipped_existing + missing + failed*/,
+  copied /*gravadas na pasta, inclui renamed*/, skipped_existing /*arquivo idêntico já estava na pasta*/,
+  renamed /*gravadas com outro nome por colisão*/, missing /*original ausente no storage*/, failed,
+  error_code|null, error_message|null, created_at, started_at|null, finished_at|null }
+LastExport = { id, dest_path, status, total, copied, skipped_existing, renamed, missing, failed, finished_at|null }
+```
+`Batch.last_export` e `ImportGroup.last_export`: última exportação CONCLUÍDA daquele lote/grupo (ou `null`); é ela
+que o "Abrir pasta" da importação abre (`POST /api/exports/{last_export.id}/open`). `null` = orientar a usar
+"Exportar para pasta". A exportação de um grupo aparece no grupo, não nos filhos.
+
+Exemplos:
+```json
+POST /api/exports/pick-folder          -> { "cancelled": false, "token": "q3J...43 caracteres...", "path_display": "D:\\Fotos\\Minha pasta" }
+POST /api/exports/pick-folder          -> { "cancelled": true, "token": null, "path_display": null }
+POST /api/exports  { "source": { "kind": "group", "id": 7 }, "destination": { "token": "q3J..." } }
+POST /api/exports  { "source": { "kind": "batch", "id": 41 }, "destination": { "default": true } }
+POST /api/exports  { "source": { "kind": "library", "selection": { "media_ids": [12, 15, 18] } },
+                     "destination": { "token": "q3J..." } }
+POST /api/exports  { "source": { "kind": "library", "selection": { "filter": { "view": "all", "media_type": "video",
+                     "q": "perfil" }, "exclude_ids": [15] } }, "destination": { "token": "q3J..." } }
+```
+```json
+{ "id": 3, "kind": "group", "batch_id": null, "group_id": 7, "dest_path": "D:\\Fotos\\Minha pasta",
+  "status": "running", "total": 10000, "processed": 3482, "copied": 3470, "skipped_existing": 12, "renamed": 3,
+  "missing": 0, "failed": 0, "error_code": null, "error_message": null,
+  "created_at": "2026-10-06T12:00:00.000Z", "started_at": "2026-10-06T12:00:00.412Z", "finished_at": null }
+```
+
+**O que entra.** `batch`: toda mídia ligada a um job de ingest CONCLUÍDO do lote, inclusive os concluídos como
+duplicata (`source_id` ou `sha256`), que apontam para a mídia que já existia na Biblioteca, UNIDA à relação durável
+`batch_media` (abaixo); cada mídia uma vez.
+`group`: a união de todos os filhos, cada mídia uma vez (mídia compartilhada entre perfis entra uma vez). `library`:
+os ids pedidos (ids desconhecidos ou repetidos são ignorados) ou todas as mídias do filtro menos `exclude_ids`; o
+filtro é congelado no pedido (mídias importadas depois não entram). Sem nenhuma mídia: 409 `export_empty`, nada é
+criado. Não há teto numérico de ids: o limite é o corpo de 1 MB da requisição; a seleção por filtro não manda ids.
+
+**Relação durável lote -> mídia (`batch_media`).** A retenção (jobs encerrados há mais de 30 dias) apaga jobs
+antigos; para a exportação continuar representando o lote inteiro meses depois, a migration 0013 cria
+`batch_media(batch_id, media_id)` com backfill dos ingests concluídos existentes, e
+`JobRepository.purge_finished_before` (a única rotina que apaga jobs) grava ali, na MESMA transação e ANTES do
+`DELETE`, os pares (lote, mídia) dos ingests concluídos do trecho que vai apagar. Pipeline, downloader e dedupe não
+foram alterados. A consulta da exportação de lote/grupo é a união `jobs concluídos do lote ∪ batch_media`, paginada
+por keyset sobre `media.id`, sem materializar a lista. Mídia excluída da Biblioteca (ou lote apagado) sai da relação
+por `ON DELETE CASCADE`.
+
+**Nomes dos arquivos** (`app/services/export_names.py`): `{perfil}_{AAAA-MM-DD}_{codigo_do_post}[_{n}].{ext}`. Data =
+`taken_at` (UTC); `n` (1-based) só em item de carrossel (post com mais de um item na Biblioteca, ou item de índice
+maior que zero); sem código do post: `{perfil}_{AAAA-MM-DD}_{id da mídia}`; sem perfil: prefixo `midia`; sem perfil
+nem código: `midia_{12 primeiros caracteres do SHA-256}`. Extensão = a do original no storage. Sanitização: Unicode
+NFC; `<>:"/\|?*` e caracteres de controle viram `_`; sem ponto/espaço nas pontas; nome reservado do Windows (`CON`,
+`PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, com ou sem extensão) ganha `_` na frente; nome inteiro limitado a
+120 caracteres (o corte é no nome base, nunca na extensão). O I/O usa o prefixo `\\?\` (caminhos longos).
+
+**Colisão** (nome já existe na pasta; diferença só de maiúsculas/minúsculas conta como colisão no Windows):
+arquivo IDÊNTICO (mesmo tamanho e mesmo SHA-256 do original; o hash do arquivo da pasta só é lido quando o tamanho
+bate) -> não copia, conta `skipped_existing`; arquivo DIFERENTE -> grava com sufixo ` (2)`, ` (3)`... e conta
+`renamed` (o arquivo que estava lá nunca é tocado). Reexportar para a mesma pasta é idempotente.
+
+**Execução** (`app/jobs/export_runner.py`): thread própria, UMA exportação por vez (as demais ficam `pending`, em
+fila, na ordem de criação); não usa o pool de download/FFmpeg. Mídias lidas em páginas de 500 por keyset (`id`
+crescente); cada original é copiado em blocos de 1 MiB para um temporário
+`.<nome>.<id da exportação>.<8 hex aleatórios>.mtpart` na pasta de destino, o tamanho é conferido e o temporário é
+renomeado sem sobrescrever (se outro programa criar o arquivo final entre a cópia e o rename, ele fica intacto e a
+mídia sai com sufixo). **Regra dos temporários:** a exportação só remove arquivos que ESTA execução criou. O
+temporário nasce com abertura exclusiva (nome já existente: sorteia outro, nunca apaga), fica registrado em memória
+e só os registrados são removidos. Depois de um reinício nada é apagado por padrão de nome: um `.mtpart` pode
+sobrar na pasta e pode ser apagado à mão. Progresso gravado no banco a cada 200 arquivos ou
+1 s (não a cada arquivo). Cancelamento (`POST /api/exports/{id}/cancel`): `pending` vira `cancelled` na hora;
+`running` para entre arquivos ou no próximo bloco de um arquivo grande, remove o temporário e mantém o que já foi
+copiado. Original ausente no storage: conta `missing` e segue. Falha ao gravar um arquivo: conta `failed` e segue;
+25 falhas seguidas param a exportação (`export_write_failed`). Disco de destino cheio: para com `export_disk_full`.
+Pasta de destino sumiu: `export_folder_missing` (durante a cópia) ou `export_dest_missing` (antes de começar).
+Startup: exportação que ficou `running` vira `failed` com `error_code: "interrupted"` (não é retomada sozinha; basta
+exportar de novo para a mesma pasta); as `pending` continuam na fila.
+Limites: uma exportação aberta (`pending`/`running`) por origem (mesmo lote, mesmo grupo, ou qualquer exportação da
+Biblioteca): a segunda recebe 409 `export_already_running`; no máximo 20 `pending` na fila (409 `export_queue_full`).
+O token da pasta só é gasto quando a exportação é criada (pedido vazio ou recusado não obriga a escolher a pasta de
+novo). Ao concluir, `processed == total`: mídia excluída durante a cópia conta em `missing`; mídia com dado inesperado
+conta em `failed` e a exportação segue. Pasta padrão criada pelo servidor para a exportação é removida se ficar VAZIA
+(só `rmdir`) quando a exportação é cancelada, falha, é interrompida ou nem chega a ser criada.
+
+#### Baixar ZIP (`mode: "zip"`)
+
+Variante da exportação: mesma origem (lote, grupo, Biblioteca), mesma consulta de itens (inclui `batch_media` e as
+duplicatas do lote), mesma regra de nomes e o mesmo executor/fila. Em vez de copiar para uma pasta, o servidor gera UM
+`.zip` PLANO (todas as entradas na raiz, sem diretórios) e o painel inicia o download normal do navegador.
+
+- Pedido: `POST /api/exports` com `destination: {"zip": true}` (sem token de pasta, sem caminho). Resposta 202 com
+  `mode: "zip"`, `status: "pending"`, `zip_name` (`importacao-AAAA-MM-DD-HHMM.zip`; Biblioteca:
+  `biblioteca-AAAA-MM-DD-HHMM.zip`). Uma exportação aberta por (origem, modo): ZIP e pasta da mesma origem podem
+  conviver na fila; o segundo ZIP da mesma origem recebe 409 `export_already_running`.
+- Espaço: antes de criar, o servidor soma `file_size` dos itens (consulta agregada) + margem de 1% + 64 MiB e compara
+  com o espaço livre do volume do temporário, descontada a reserva que os downloads já exigem
+  (`services.disk.disk_ok`, só lida) quando o temporário está no mesmo volume do storage. Sem espaço: 507
+  `export_no_space`, com mensagem dizendo quanto precisa e quanto há; nada é criado. `ENOSPC` durante a escrita:
+  `failed` com `export_disk_full` e o temporário removido. O painel avisa que o navegador precisará do mesmo espaço
+  de novo na pasta de Downloads (o app não consegue verificar isso).
+- Geração (`ExportRunner._run_zip`): `zipfile.ZipFile(..., "w", ZIP_STORED, allowZip64=True)`; cada entrada é aberta
+  com `force_zip64=True` e escrita em blocos de 1 MiB lidos do original (nunca o arquivo inteiro em memória; o que
+  cresce em memória é só a ficha do diretório central, da ordem de 1 KB por entrada). Nomes: os de `export_names`,
+  em UTF-8, únicos sem diferenciar maiúsculas/minúsculas (colisão resolvida no nome com ` (2)`, ` (3)`..., contada em
+  `renamed`). Data da entrada = `taken_at` (UTC) quando houver, senão a do arquivo. Original ausente: `missing`, sem
+  entrada. Ao final confere que o ZIP abre e que o número de entradas é igual a `copied`, sem repetição.
+- Temporário: `<data>\exports-tmp\export-<16 hex>.zip.part` durante a preparação, renomeado para `.zip` ao ficar
+  pronto. Pasta exclusiva do servidor, fora de `storage` (a limpeza de `storage\temp` do startup não a alcança),
+  ignorada pelo git. O caminho interno nunca sai pela API (`dest_path` de um ZIP é o `zip_name`).
+- `Export` ganha: `mode: "folder"|"zip"`, `zip_name|null`, `zip_bytes|null` (só pronto), `zip_ready: boolean`,
+  `zip_expires_at|null`, `download_url|null` (só pronto; traz o token de download). `status` ganha `expired`.
+  `LastExport` ganha `mode` e continua sendo a última exportação PARA PASTA concluída (ZIP não entra; "Abrir pasta"
+  de um ZIP responde 409 `export_not_folder`).
+- Download: `GET /api/exports/{id}/download?token=<token>` -> o arquivo em streaming (`FileResponse`),
+  `Content-Type: application/zip`, `Content-Length`, `Content-Disposition: attachment; filename="<zip_name>"`,
+  `Range` aceito (206). A rota é GET (sem o guarda de mutação): o token aleatório por exportação impede que outra
+  página adivinhe ou dispare o download, e a validação de Host continua valendo. Sem token ou token errado: 404
+  `export_not_found`; ainda não pronto: 409 `export_zip_not_ready`; removido/vencido: 410 `export_zip_expired`.
+- Limpeza: o ZIP pronto vale 24 h (`zip_expires_at`). Ele só conta como BAIXADO quando uma resposta que vai até o
+  último byte (200 completo, ou `Range` que termina no fim) acaba de ser transmitida; resposta parcial ou
+  interrompida não conta. A partir do FIM dessa transmissão o ZIP vale no máximo mais 1 h ("Baixar novamente"
+  funciona enquanto existir). Vencido: o arquivo é removido e SÓ ENTÃO o registro vira `expired`; se a remoção
+  falhar (arquivo em uso por um download em andamento, que não é interrompido), o registro continua `completed` e
+  a varredura seguinte tenta de novo. Varredura a cada 10 min no executor e no startup: vencidos; arquivos com o
+  padrão do servidor sem registro vivo; e, com o disco abaixo do mínimo dos downloads, ZIPs prontos que JÁ foram
+  baixados (nunca os ainda não baixados). Cancelamento e falha removem o `.part` na hora. Startup: ZIP `running`
+  vira `failed`/`interrupted` e o `.part` daquele registro é removido.
+- Segurança da pasta de temporários: só se opera se `<data>\exports-tmp` for um diretório REAL dentro de `<data>`
+  (junção, symlink ou outro reparse point: nada é criado, servido nem apagado, e o pedido de ZIP responde 500
+  `internal_error`). Só são apagados/servidos arquivos regulares cujo nome casa exatamente com
+  `export-<16 hex>.zip[.part]` e cujo caminho resolvido fica dentro da pasta; qualquer outro arquivo que esteja
+  ali não é tocado. Os originais nunca são tocados.
+- Espaço com fila: na criação, além do ZIP pedido, entram na conta os bytes que os ZIPs `pending`/`running`
+  ainda vão escrever (reserva lógica). No INÍCIO da preparação a conta é refeita (sem a fila); sem espaço: `failed`
+  com `export_no_space`, sem criar o `.part`. Garantia real: o ZIP não COMEÇA se for deixar o disco abaixo do
+  mínimo dos downloads; se outro programa consumir o disco durante a escrita, a preparação pode levar o disco
+  abaixo desse mínimo até falhar com `export_disk_full` (e o temporário é removido).
+- Outros desfechos: nenhum original disponível (todos ausentes) -> `failed` com `export_empty`, sem ZIP vazio;
+  erro de leitura no meio de um original -> `failed` com `export_read_failed` (a entrada já começou e não pode
+  ser retirada: basta pedir de novo); data fora do intervalo do formato ZIP (1980 a 2107) é limitada ao
+  intervalo; cabeçalho que não pode ser montado para UMA mídia conta `failed` e o ZIP segue.
+- Retomada no painel: ao abrir a tela, `GET /api/exports` da origem (`batch_id`, `group_id` ou `kind=library`)
+  decide: exportação em andamento -> acompanha; ZIP pronto e ainda válido -> oferece "Baixar novamente" (sem
+  download automático); senão nada. 409 `export_already_running` -> o painel acompanha o `export_id` do corpo.
+- Sem limite arbitrário de quantidade: não há teto de mídias na exportação nem no ZIP (só disco e tamanho dos
+  arquivos). `media_ids`/`exclude_ids` não têm mais teto numérico: o limite real é o corpo de 1 MB da API (dezenas de
+  milhares de ids); o painel nunca manda mais que os ids de uma página, porque a seleção ampla ("todos os resultados")
+  vai como filtro, resolvido no servidor. O teto de 20 exportações `pending` NÃO é limite de mídias: é proteção da
+  fila contra abuso.
+
+```json
+POST /api/exports  { "source": { "kind": "group", "id": 7 }, "destination": { "zip": true } }
+{ "id": 9, "kind": "group", "group_id": 7, "mode": "zip", "status": "completed", "dest_path": "importacao-2026-10-06-1143.zip",
+  "total": 10000, "processed": 10000, "copied": 10000, "renamed": 0, "missing": 0, "failed": 0,
+  "zip_name": "importacao-2026-10-06-1143.zip", "zip_bytes": 19756849562, "zip_ready": true,
+  "zip_expires_at": "2026-10-07T14:43:10.000Z", "download_url": "/api/exports/9/download?token=q3J...", "...": "demais campos" }
+```
+
+**Códigos de erro** (mensagens em pt-BR):
+
+| Código | HTTP | Quando |
+|---|---|---|
+| `picker_busy` | 409 | já há um diálogo de pasta aberto |
+| `picker_unavailable` | 501 | nenhum método de diálogo funcionou neste ambiente (ou fora do Windows); use a pasta padrão |
+| `export_token_invalid` | 409 | token inexistente, expirado (10 min) ou já usado |
+| `export_dest_invalid` | 422 | caminho vazio, relativo ou com `..` |
+| `export_dest_missing` | 409 | a pasta não existe (mais) ou não é pasta |
+| `export_dest_drive_root` | 422 | raiz de unidade ou de compartilhamento |
+| `export_dest_too_long` | 422 | caminho longo demais para ser usado neste computador |
+| `export_already_running` | 409 | a mesma origem já tem exportação `pending`/`running` (`export_id` no corpo) |
+| `export_queue_full` | 409 | já há 20 exportações `pending` (proteção da fila; não é limite de mídias) |
+| `export_no_space` | 507 | sem espaço livre para o ZIP temporário (a mensagem traz quanto precisa e quanto há) |
+| `export_zip_not_ready` | 409 | download pedido antes de o ZIP ficar pronto |
+| `export_zip_expired` | 410 | o ZIP já foi removido (prazo vencido) |
+| `export_not_folder` | 409 | "Abrir pasta" de uma exportação em modo ZIP |
+| `export_dest_forbidden` | 422 | dentro (ou pai) das pastas do Media Tool, ou dentro das pastas do sistema |
+| `export_dest_not_writable` | 409 | sem permissão de escrita (ou a pasta padrão não pôde ser criada) |
+| `export_empty` | 409 | a seleção não tem nenhuma mídia |
+| `export_not_found` | 404 | exportação inexistente |
+| `export_finished` | 409 | cancelar exportação já encerrada |
+| `export_folder_missing` | 409 | "Abrir pasta" de exportação cuja pasta não existe mais |
+
+Só no registro da exportação (`Export.error_code`, com `status: "failed"`): `export_disk_full`,
+`export_write_failed`, `export_folder_missing`, `interrupted`, `internal_error` e os `export_dest_*` da revalidação.
 
 ## 9. Processor (`media_processor`)
 

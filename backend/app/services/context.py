@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.db.connection import Database
 from app.db.repositories import (
     BatchRepository,
+    ExportRepository,
     JobRepository,
     MediaRepository,
     PresetRepository,
@@ -19,10 +20,14 @@ from app.db.repositories import (
 from app.integrations.instagram.downloader import InstagramDownloader
 from app.integrations.instagram.session import InstagramSessionProvider
 from app.jobs.locks import KeyedLocks
+from app.services.export_destination import DestinationTokens
 from app.services.processor_provider import ProcessorProvider
 from app.services.storage import Storage
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from app.jobs.export_runner import ExportRunner
     from app.jobs.import_runner import ImportRunner
     from app.jobs.worker import Worker
 
@@ -40,6 +45,7 @@ class AppContext:
     jobs: JobRepository
     batches: BatchRepository
     app_settings: SettingsRepository
+    exports: ExportRepository
     # Serializa "checar duplicata -> promover arquivo -> inserir mídia" entre threads do worker.
     ingest_lock: threading.Lock = field(default_factory=threading.Lock)
     # Serializa o processamento por (mídia, preset, params): jobs simultâneos geram uma única rendition.
@@ -48,8 +54,17 @@ class AppContext:
     session_test_lock: threading.Lock = field(default_factory=threading.Lock)
     # Uma prévia de perfil por vez (mesma regra de liberação).
     profile_preview_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Exportação para pasta: destinos escolhidos no diálogo nativo (token de uso único) e um diálogo por vez.
+    export_tokens: DestinationTokens = field(default_factory=DestinationTokens)
+    picker_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Serializa "conferir exportação aberta/fila -> validar destino -> criar" entre requisições.
+    export_create_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Injetáveis (testes): None = diálogo nativo do Windows e pasta Documentos reais (app.services.export_destination).
+    folder_picker: Callable[[Path | None], Path | None] | None = None
+    documents_dir: Callable[[], Path] | None = None
     worker: Worker | None = None
     import_runner: ImportRunner | None = None
+    export_runner: ExportRunner | None = None
 
     def wake_worker(self) -> None:
         if self.worker is not None:

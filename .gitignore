@@ -73,3 +73,5 @@ scratchpad/
 # Empacotamento Python
 /build/
 *.whl
+# ZIPs temporários do "Baixar ZIP"
+data/exports-tmp/

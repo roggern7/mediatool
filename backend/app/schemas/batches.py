@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.integrations.instagram.downloader import MAX_IMPORT_LIMIT
 from app.schemas.common import PositiveId, StrictModel
+from app.schemas.exports import LastExport
 from app.schemas.jobs import JobOut
 
 # Interface: "all" (Todos), "reels" (Reels) e "photos_carousels" (Publicações do feed). "posts", "videos" e "images"
@@ -116,6 +117,8 @@ class BatchOut(BaseModel):
     # Só em filhos de grupo: waiting (na fila, listagem ainda não começou) | active | attention | completed |
     # failed | cancelled.
     group_state: Literal["waiting", "active", "attention", "completed", "failed", "cancelled"] | None = None
+    # Última exportação para pasta CONCLUÍDA deste lote (None se nunca foi exportado).
+    last_export: LastExport | None = None
     progress: BatchProgress
     counts: dict[str, int]
     # Só com ?include_jobs=true: no máximo 500 jobs (os mais recentes); a lista completa é GET /api/jobs?batch_id=.
@@ -158,6 +161,8 @@ class ImportGroupOut(BaseModel):
     profile_end_count: int
     progress: BatchProgress
     listing_dropped_total: int
+    # Última exportação para pasta CONCLUÍDA do grupo inteiro (None se nunca foi exportado).
+    last_export: LastExport | None = None
 
 
 class ImportGroupList(BaseModel):

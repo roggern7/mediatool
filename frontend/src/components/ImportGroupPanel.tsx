@@ -16,9 +16,11 @@ import {
 } from "../lib/importGroup";
 import { useNow } from "../lib/pause";
 import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
-import { navigate } from "../lib/router";
+import { groupExportOffer } from "../lib/exportFolder";
+import { ROUTES, navigate } from "../lib/router";
 import { useQuery } from "../lib/useQuery";
 import { useToast } from "../lib/toast";
+import { ImportExportBar } from "./ExportPanel";
 import { ConfirmDialog, ErrorLine, Pill, SkeletonRows, Spinner } from "./ui";
 
 /** Perfis por página (keyset `after_position`); o custo no backend não depende do total de perfis. */
@@ -110,6 +112,7 @@ export function ImportGroupPanel({
   // Ao trocar de página, o dado anterior fica na tela até o novo chegar: a paginação espera.
   const pageReady = detail.after === after;
   const status = groupStatusLabel(group);
+  const exportOffer = groupExportOffer(group);
   const attention = groupAttentionText(group);
   const open = group.profiles.waiting + group.profiles.active + group.profiles.attention;
   const first = children[0]?.group_position ?? null;
@@ -259,6 +262,15 @@ export function ImportGroupPanel({
           </>
         ) : null}
       </div>
+
+      <ImportExportBar
+        source={{ kind: "group", id: group.id }}
+        finished={exportOffer.offer}
+        note={exportOffer.note}
+        lastExport={group.last_export}
+        libraryPath={ROUTES.library}
+        onChanged={refresh}
+      />
 
       {confirmCancel ? (
         <ConfirmDialog

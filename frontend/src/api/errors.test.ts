@@ -91,3 +91,44 @@ describe("perfil já em importação", () => {
     expect(errorMessageFor("profile_already_importing", 409, "conflict")).toContain("já está sendo importado");
   });
 });
+
+describe("exportar para pasta", () => {
+  it("cada código novo tem mensagem própria em português", () => {
+    const codes: [string, number, RegExp][] = [
+      ["picker_busy", 409, /janela de escolha de pasta/],
+      ["picker_unavailable", 501, /Não foi possível abrir a janela de escolha de pasta.*pasta padrão/],
+      ["export_token_invalid", 409, /Escolha a pasta de novo/],
+      ["export_dest_invalid", 422, /Pasta de destino inválida/],
+      ["export_dest_missing", 409, /não existe mais/],
+      ["export_dest_not_writable", 409, /Sem permissão para gravar/],
+      ["export_dest_drive_root", 422, /raiz de uma unidade/],
+      ["export_empty", 409, /Não há mídias para exportar/],
+      ["export_dest_too_long", 422, /longo demais/],
+      ["export_already_running", 409, /Já existe uma exportação em andamento/],
+      ["export_queue_full", 409, /exportações demais na fila/],
+      ["export_zip_not_ready", 409, /ainda não está pronto/],
+      ["export_read_failed", 500, /não pôde ser lido/],
+      ["export_zip_expired", 410, /já foi removido/],
+      ["export_not_folder", 409, /é um ZIP/],
+      ["export_not_found", 404, /Exportação não encontrada/],
+      ["export_finished", 409, /já terminou/],
+      ["export_disk_full", 507, /sem espaço/],
+      ["export_write_failed", 500, /falhas seguidas/],
+    ];
+    for (const [code, status, pattern] of codes) {
+      expect(errorMessageFor(code, status, "detalhe técnico")).toMatch(pattern);
+      expect(describeErrorCode(code, null)).toMatch(pattern);
+    }
+  });
+  it("sem espaço para o ZIP mostra os números do backend, com fallback", () => {
+    const detail = "Sem espaço em disco para preparar o ZIP: são necessários 18,6 GB e há 2,0 GB disponíveis.";
+    expect(errorMessageFor("export_no_space", 507, detail)).toBe(detail);
+    expect(errorMessageFor("export_no_space", 507, null)).toMatch(/Sem espaço em disco para preparar o ZIP/);
+  });
+  it("pasta recusada e pasta que sumiu usam o texto preciso do backend, com fallback", () => {
+    const parent = "Esta pasta contém as pastas internas do Media Tool. Escolha ou crie uma subpasta separada.";
+    expect(errorMessageFor("export_dest_forbidden", 422, parent)).toBe(parent);
+    expect(errorMessageFor("export_dest_forbidden", 422, null)).toMatch(/usada pelo Media Tool ou pelo Windows/);
+    expect(errorMessageFor("export_folder_missing", 409, null)).toMatch(/Exporte de novo/);
+  });
+});

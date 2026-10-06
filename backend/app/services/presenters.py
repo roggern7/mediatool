@@ -89,6 +89,14 @@ def _listing_dropped(batch: dict[str, Any]) -> dict[str, Any]:
             "pending": pending}
 
 
+def _last_export(export: dict[str, Any] | None) -> dict[str, Any] | None:
+    if export is None:
+        return None
+    return {key: export[key] for key in ("id", "dest_path", "status", "total", "copied", "skipped_existing",
+                                         "renamed", "missing", "failed", "finished_at")} | {
+        "mode": export.get("mode") or "folder"}
+
+
 def _group_state(batch: dict[str, Any]) -> str | None:
     """Estado apresentado de um filho de grupo (mesma regra do agregado em BatchRepository.group_aggregates)."""
     if batch.get("group_id") is None:
@@ -108,6 +116,7 @@ def _group_state(batch: dict[str, Any]) -> str | None:
 def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Grupos de importação com agregados derivados dos filhos (duas consultas para a lista inteira)."""
     stats = ctx.batches.group_aggregates([g["id"] for g in groups])
+    exports = ctx.exports.last_completed("group_id", [g["id"] for g in groups])
     result = []
     for group in groups:
         row = stats.get(group["id"], {})
@@ -136,6 +145,7 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
             "profile_end_count": int(row.get("profile_end", 0)),
             "progress": {"found": found, **{key: int(row.get(key, 0)) for key in _PROGRESS_KEYS}},
             "listing_dropped_total": int(row.get("dropped", 0)),
+            "last_export": _last_export(exports.get(group["id"])),
         })
     return result
 
@@ -151,6 +161,7 @@ def group_detail(ctx: AppContext, group: dict[str, Any], *, children_limit: int,
 def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bool = False) -> list[dict[str, Any]]:
     # Lote encerrado com contadores congelados não agrega os jobs; lote aberto agrega pelo índice coberto.
     stats = ctx.jobs.batch_stats([b["id"] for b in batches if not _frozen(b)])
+    exports = ctx.exports.last_completed("batch_id", [b["id"] for b in batches])
     result = []
     for batch in batches:
         row = stats.get(batch["id"], {})
@@ -182,6 +193,8 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
         data["group_id"] = batch.get("group_id")
         data["group_position"] = batch.get("group_position")
         data["group_state"] = _group_state(batch)
+        # Última exportação concluída do lote (define o "Abrir pasta" da importação); None se nunca exportou.
+        data["last_export"] = _last_export(exports.get(batch["id"]))
         # Pausa do disjuntor só enquanto vigente; paused_reason é o código que repetiu (o frontend o descreve).
         until = batch.get("paused_until")
         active = until is not None and until > utc_now()

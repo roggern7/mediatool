@@ -68,3 +68,22 @@ def open_path(path: Path, *, allowed_roots: Sequence[Path], target: Literal["fil
         raise
     except OSError as exc:
         raise SystemOpenError("failed", f"Não foi possível abrir ({type(exc).__name__}).") from None
+
+
+def open_folder(path: Path, *, allowed_roots: Sequence[Path]) -> None:
+    """Abre a PASTA no Explorer (o conteúdo dela, sem selecionar item). Só pastas dentro das raízes permitidas.
+
+    Usa a associação do shell para diretórios (`os.startfile`): um diretório nunca é executado, e nomes com vírgula
+    não são interpretados como opções do `explorer.exe`."""
+    try:
+        resolved = ensure_within(Path(path), allowed_roots)
+    except UnsafePathError:
+        raise SystemOpenError("not_allowed", "Caminho fora das pastas permitidas.") from None
+    if not resolved.is_dir():
+        raise SystemOpenError("not_found", "Pasta não encontrada.")
+    if os.name != "nt" or not hasattr(os, "startfile"):
+        raise SystemOpenError("unsupported", "Abrir no sistema só é suportado no Windows com desktop.")
+    try:
+        os.startfile(str(resolved))
+    except OSError as exc:
+        raise SystemOpenError("failed", f"Não foi possível abrir ({type(exc).__name__}).") from None

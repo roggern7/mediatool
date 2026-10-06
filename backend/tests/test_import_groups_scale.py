@@ -109,7 +109,7 @@ def test_group_with_300_profiles_and_an_all_profile_of_2100_pages(harness_factor
 
     one_count, one = queries(h, "/api/import-groups", limit=1)
     two_count, two = queries(h, "/api/import-groups", limit=50)
-    assert len(one["items"]) == 1 and len(two["items"]) == 2 and one_count == two_count <= 4
+    assert len(one["items"]) == 1 and len(two["items"]) == 2 and one_count == two_count <= 5
     page_count, page = queries(h, f"/api/import-groups/{group_id}", children_limit=100, after_position=200)
     assert [c["group_position"] for c in page["children"]] == list(range(201, 301)) and page_count <= big_count
     assert page["next_after_position"] == 300

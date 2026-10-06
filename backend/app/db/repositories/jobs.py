@@ -716,23 +716,36 @@ class JobRepository:
     # ---- retenção -------------------------------------------------------------------------------------------------
     def purge_finished_before(self, cutoff: str, *, chunk: int = 500) -> int:
         """Apaga jobs terminais com `finished_at < cutoff`, preservando o último job de cada mídia (usado pela
-        Biblioteca) e os jobs de lotes ainda abertos (listing/running). Em trechos curtos de escrita."""
+        Biblioteca) e os jobs de lotes ainda abertos (listing/running). Em trechos curtos de escrita.
+
+        Antes de apagar, na mesma transação, a relação lote -> mídia dos ingests concluídos do trecho vai para
+        `batch_media` (migration 0013): a exportação de um lote antigo continua completa depois da retenção."""
         removed = 0
         while True:
             with self.db.transaction() as conn:
-                count = conn.execute(
-                    f"""
-                    DELETE FROM jobs WHERE id IN (
-                        SELECT j.id FROM jobs j
-                        WHERE j.status IN ('completed', 'failed', 'cancelled') AND j.finished_at < :cutoff
-                          AND (j.batch_id IS NULL OR j.batch_id NOT IN
-                               (SELECT b.id FROM batches b WHERE b.status IN ('listing', 'running')))
-                          AND (j.media_id IS NULL
-                               OR j.id <> (SELECT MAX(l.id) FROM jobs l WHERE l.media_id = j.media_id))
-                        LIMIT :chunk)
+                ids = [row["id"] for row in conn.execute(
+                    """
+                    SELECT j.id FROM jobs j
+                    WHERE j.status IN ('completed', 'failed', 'cancelled') AND j.finished_at < :cutoff
+                      AND (j.batch_id IS NULL OR j.batch_id NOT IN
+                           (SELECT b.id FROM batches b WHERE b.status IN ('listing', 'running')))
+                      AND (j.media_id IS NULL
+                           OR j.id <> (SELECT MAX(l.id) FROM jobs l WHERE l.media_id = j.media_id))
+                    LIMIT :chunk
                     """,
                     {"cutoff": cutoff, "chunk": chunk},
-                ).rowcount
+                ).fetchall()]
+                count = len(ids)
+                for start in range(0, count, 500):
+                    part = tuple(ids[start:start + 500])
+                    marks = placeholders(len(part))
+                    conn.execute(
+                        "INSERT OR IGNORE INTO batch_media (batch_id, media_id) SELECT batch_id, media_id FROM jobs"
+                        f" WHERE id IN ({marks}) AND kind = 'ingest' AND status = 'completed'"
+                        " AND media_id IS NOT NULL AND batch_id IS NOT NULL",
+                        part,
+                    )
+                    conn.execute(f"DELETE FROM jobs WHERE id IN ({marks})", part)
             removed += count
             if count < chunk:
                 return removed

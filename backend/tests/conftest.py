@@ -121,6 +121,26 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 10.0, interval: f
 
 
 @pytest.fixture(autouse=True)
+def _no_real_desktop(monkeypatch):
+    """Nenhum teste abre o diálogo nativo de pasta, o Explorer ou toca a pasta Documentos real: quem precisa injeta
+    `ctx.folder_picker`/`ctx.documents_dir` e troca `export_service.open_folder` (ou injeta o próprio falso de
+    `subprocess.Popen`/`os.startfile` sobre as funções reais guardadas na importação do módulo de teste)."""
+    from app.services import export_destination, export_service, system_open
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Teste tentou usar o desktop real (diálogo de pasta, Explorer ou Documentos).")
+
+    monkeypatch.setattr(export_destination, "pick_folder_native", forbidden)
+    monkeypatch.setattr(export_destination, "user_documents_dir", forbidden)
+    monkeypatch.setattr(export_service, "open_folder", forbidden)
+    # Chamadas diretas aos métodos do seletor (Popen real de tkinter/PowerShell) e à abertura real de pastas.
+    for name in ("_pick_with_tk", "_pick_with_powershell", "_run_picker_child"):
+        monkeypatch.setattr(export_destination, name, forbidden)
+    monkeypatch.setattr(system_open, "open_folder", forbidden)
+    monkeypatch.setattr(system_open.os, "startfile", forbidden, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_registered_secrets():
     """O registro de segredos do redator é global no processo; cada teste começa e termina com o mesmo conjunto,
     para que valores FAKE curtos registrados por um teste não redijam texto de outro (dependência de ordem)."""
