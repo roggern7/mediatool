@@ -45,10 +45,10 @@ export function settledPreview(input: {
 }
 
 export const WEB_ONLY_MESSAGE =
-  "“Todos” e “Fotos e carrosséis” exigem o método de importação web. Troque o método em Configurações > Instagram.";
+  "“Todos” e “Publicações do feed” exigem o método de importação web. Troque o método em Configurações > Instagram.";
 
 /**
- * Com o método legado gallery-dl configurado, "Todos" e "Fotos e carrosséis" são recusados pela API
+ * Com o método legado gallery-dl configurado, "Todos" e "Publicações do feed" são recusados pela API
  * (422 not_supported_by_provider): avisa antes de enviar. Com `auto`/`web` (ou sem a informação), null.
  */
 export function providerBlocker(

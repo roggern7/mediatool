@@ -242,7 +242,7 @@ describe("cabeçalho do grupo", () => {
     expect(groupOptionsText(group())).toBe("Reels · Últimos 1.000 por perfil · Somente originais");
     expect(
       groupOptionsText(group({ content_type: "photos_carousels", requested_limit: null, process: true, preset_name: "Anti-duplicidade" })),
-    ).toBe("Fotos e carrosséis · Todos · Anti-duplicidade");
+    ).toBe("Publicações do feed · Todos · Anti-duplicidade");
   });
   it("estado geral", () => {
     expect(groupStatusLabel({ status: "active", attention: false })).toEqual({ label: "Em andamento", tone: "accent" });

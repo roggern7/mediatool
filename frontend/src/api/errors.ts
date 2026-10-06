@@ -25,7 +25,7 @@ const MESSAGES: Record<string, string> = {
   payload_too_large:
     "A lista é grande demais para enviar de uma vez. Divida em partes menores ou cole só os nomes de usuário, sem a URL completa.",
   not_supported_by_provider:
-    "“Todos” e “Fotos e carrosséis” exigem o método de importação web. Troque o método em Configurações > Instagram.",
+    "“Todos” e “Publicações do feed” exigem o método de importação web. Troque o método em Configurações > Instagram.",
   profile_not_found: "Perfil não encontrado.",
   profile_private: "Este perfil é privado e a sessão atual não tem acesso a ele.",
   content_unavailable: "Conteúdo indisponível.",

@@ -402,12 +402,14 @@ pedido ("100 + Reels" = 100 Reels; a listagem continua até achar 100 ou o perfi
 |---|---|---|
 | Todos | `all` | todos os tipos suportados |
 | Reels | `reels` | só publicações classificadas como Reel (item de carrossel nunca entra) |
-| Fotos e carrosséis | `photos_carousels` | fotos simples + TODOS os itens dos carrosséis (inclusive vídeo de carrossel); exclui Reels e vídeo avulso que não é Reel |
+| Publicações do feed | `photos_carousels` | tudo o que não é Reel: fotos simples, vídeos avulsos antigos (não-Reel) e TODOS os itens dos carrosséis (inclusive vídeo de carrossel) |
+
+O valor `photos_carousels` foi mantido na API por compatibilidade; o rótulo da interface é "Publicações do feed".
+`reels` e `photos_carousels` são complementares: toda mídia suportada cai em exatamente um dos dois.
 
 **Vídeo avulso que não é Reel** (publicação de vídeo legada, sem `product_type` `clips` e fora de carrossel): entra
-SÓ em `all` (e no antigo `videos`). Não entra em `reels` nem em `photos_carousels`; nesses filtros é ignorado como
-filtro esperado (`content_filter`), nunca como descarte. (Em qual filtro esse caso deve cair está em aberto com o
-dono.)
+em `all`, em `photos_carousels` e no antigo `videos`. Em `reels` é ignorado como filtro esperado
+(`content_filter`), nunca como descarte.
 
 **Método de importação**: "Todos" (`limit: null`), N acima de 5.000 e `photos_carousels` exigem o método web. Com
 `instagram_provider = "gallery_dl"` configurado, `POST /api/imports` e `POST /api/import-groups` respondem 422

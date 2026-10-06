@@ -46,7 +46,7 @@ describe("errorMessageFor", () => {
   });
   it("not_supported_by_provider orienta a trocar o método de importação", () => {
     expect(errorMessageFor("not_supported_by_provider", 422, "x")).toBe(
-      "“Todos” e “Fotos e carrosséis” exigem o método de importação web. Troque o método em Configurações > Instagram.",
+      "“Todos” e “Publicações do feed” exigem o método de importação web. Troque o método em Configurações > Instagram.",
     );
   });
   it("contract_changed prioriza a mensagem do backend e tem fallback fixo", () => {

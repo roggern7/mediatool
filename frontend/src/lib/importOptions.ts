@@ -8,7 +8,7 @@ export const PROCESS_AFTER_DOWNLOAD_DEFAULT = false;
 export const CONTENT_CHOICES: { value: ContentType; label: string }[] = [
   { value: "all", label: "Todos" },
   { value: "reels", label: "Reels" },
-  { value: "photos_carousels", label: "Fotos e carrosséis" },
+  { value: "photos_carousels", label: "Publicações do feed" },
 ];
 
 export type LimitMode = "last" | "all";
@@ -94,7 +94,7 @@ function contentSummary(content: ContentType, all: boolean): string {
     case "reels":
       return all ? "Todos os Reels" : "Reels";
     case "photos_carousels":
-      return all ? "Todas as fotos e carrosséis" : "Fotos e carrosséis";
+      return all ? "Todas as publicações do feed" : "Publicações do feed";
     case "videos":
       return all ? "Todos os vídeos" : "Vídeos";
     case "images":
@@ -107,7 +107,7 @@ function contentSummary(content: ContentType, all: boolean): string {
 /**
  * Resumo em uma linha do que será importado:
  * "37 perfis • Todos os Reels • Todas as mídias disponíveis" ou
- * "37 perfis • Fotos e carrosséis • Até 1.000 mídias por perfil" (com 1 perfil, sem "por perfil").
+ * "37 perfis • Publicações do feed • Até 1.000 mídias por perfil" (com 1 perfil, sem "por perfil").
  */
 export function importSummary(input: { profiles: number; content: ContentType; limit: number | null }): string {
   const { profiles, content, limit } = input;
@@ -120,7 +120,7 @@ export function importSummary(input: { profiles: number; content: ContentType; l
 
 function filteredNoun(content: ContentType, one: boolean): string | null {
   if (content === "reels") return one ? "Reel" : "Reels";
-  if (content === "photos_carousels") return one ? "foto ou item de carrossel" : "fotos e itens de carrossel";
+  if (content === "photos_carousels") return one ? "mídia de publicação do feed" : "mídias de publicações do feed";
   return null;
 }
 

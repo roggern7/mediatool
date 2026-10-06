@@ -8,7 +8,7 @@ from app.integrations.instagram.downloader import MAX_IMPORT_LIMIT
 from app.schemas.common import PositiveId, StrictModel
 from app.schemas.jobs import JobOut
 
-# Interface: "all" (Todos), "reels" (Reels) e "photos_carousels" (Fotos e carrosséis). "posts", "videos" e "images"
+# Interface: "all" (Todos), "reels" (Reels) e "photos_carousels" (Publicações do feed). "posts", "videos" e "images"
 # continuam aceitos por compatibilidade.
 ContentType = Literal["reels", "posts", "videos", "images", "all", "photos_carousels"]
 # "Últimos N": inteiro positivo livre (o máximo só rejeita lixo). `null` = "Todos": até o fim real do perfil.

@@ -14,14 +14,16 @@ Decisões do dono que substituem o que conflitar nas seções 0, 1, 6 e 9:
   ao fim real. As heurísticas `filter_exhausted` (páginas seguidas sem item compatível) e `low_yield` (rendimento
   baixo) foram REMOVIDAS, com e sem filtro; `ListingBudget` e as variáveis `MEDIA_TOOL_IG_UNPRODUCTIVE_PAGES*`,
   `MEDIA_TOOL_IG_MIN_PAGES_FOR_YIELD` e `MEDIA_TOOL_IG_MIN_YIELD` não existem mais (ignoradas se definidas).
-- **Tipos**: `all`, `reels`, `photos_carousels` (novo: fotos simples + TODOS os itens de carrosséis, inclusive
-  vídeo de carrossel; exclui Reels e vídeo avulso que não é Reel) e os antigos `posts` (= `all` no provider web),
+- **Tipos**: `all`, `reels`, `photos_carousels` (interface: "Publicações do feed" = tudo o que não é Reel: fotos
+  simples, vídeo avulso antigo que não é Reel e TODOS os itens de carrosséis, inclusive vídeo de carrossel) e os
+  antigos `posts` (= `all` no provider web),
   `videos`, `images`. Em `reels` item de carrossel nunca entra. O filtro acontece na normalização, antes de criar
   jobs; o que ele ignora conta em `expected.content_filter`, fora de `listing_dropped.unexpected_total`.
   Carrossel conta por ITEM; se o limite cai no meio de um carrossel, o corte é por mídia (os primeiros itens entram).
-  **Vídeo avulso que não é Reel** (legado: sem `product_type` `clips`, fora de carrossel) entra SÓ em `all` (e no
-  antigo `videos`); em `reels` e `photos_carousels` é ignorado e contado como `content_filter` (esperado), nunca
-  como descarte. Em qual filtro esse caso deve cair está em aberto com o dono.
+  **Vídeo avulso que não é Reel** (legado: sem `product_type` `clips`, fora de carrossel) entra em `all`, em
+  `photos_carousels` ("Publicações do feed") e no antigo `videos`; em `reels` é ignorado e contado como
+  `content_filter` (esperado), nunca como descarte. `reels` e `photos_carousels` são complementares: toda mídia
+  suportada cai em exatamente um dos dois.
 - **Regras de parada da listagem** (únicas):
 
   | Situação | Resultado |

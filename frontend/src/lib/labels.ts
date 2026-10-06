@@ -37,7 +37,7 @@ export const CONTENT_LABEL: Record<ContentType, string> = {
   videos: "Vídeos",
   images: "Imagens",
   all: "Todos os tipos",
-  photos_carousels: "Fotos e carrosséis",
+  photos_carousels: "Publicações do feed",
 };
 
 export const TERMINAL_JOB: ReadonlySet<JobStatus> = new Set(["completed", "failed", "cancelled"]);

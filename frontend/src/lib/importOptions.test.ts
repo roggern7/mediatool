@@ -106,7 +106,7 @@ describe("opções da tela", () => {
     expect(CONTENT_CHOICES).toEqual([
       { value: "all", label: "Todos" },
       { value: "reels", label: "Reels" },
-      { value: "photos_carousels", label: "Fotos e carrosséis" },
+      { value: "photos_carousels", label: "Publicações do feed" },
     ]);
     expect([...LIMIT_SHORTCUTS]).toEqual([100, 500, 1000]);
   });
@@ -133,14 +133,14 @@ describe("importSummary", () => {
       "37 perfis • Todos os Reels • Todas as mídias disponíveis",
     );
     expect(importSummary({ profiles: 37, content: "photos_carousels", limit: 1000 })).toBe(
-      "37 perfis • Fotos e carrosséis • Até 1.000 mídias por perfil",
+      "37 perfis • Publicações do feed • Até 1.000 mídias por perfil",
     );
   });
   it("todas as combinações de perfis x tipo x quantidade", () => {
     const type: Record<string, [string, string]> = {
       all: ["Todos os tipos", "Todos os tipos"],
       reels: ["Reels", "Todos os Reels"],
-      photos_carousels: ["Fotos e carrosséis", "Todas as fotos e carrosséis"],
+      photos_carousels: ["Publicações do feed", "Todas as publicações do feed"],
     };
     for (const content of ["all", "reels", "photos_carousels"] as ContentType[]) {
       const [withN, withAll] = type[content] as [string, string];
@@ -186,7 +186,7 @@ describe("importHints", () => {
       "O app continua procurando até achar 1 Reel ou chegar ao fim do perfil.",
     ]);
     expect(importHints({ profiles: 1, content: "photos_carousels", limit: 50 })).toEqual([
-      "O app continua procurando até achar 50 fotos e itens de carrossel ou chegar ao fim do perfil.",
+      "O app continua procurando até achar 50 mídias de publicações do feed ou chegar ao fim do perfil.",
     ]);
   });
   it("vários perfis: a quantidade vale para cada um, um de cada vez", () => {

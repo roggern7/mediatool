@@ -617,7 +617,7 @@ def test_gallery_dl_method_refuses_all_and_photos_carousels_at_creation(harness,
         assert response.status_code == 422
         body = response.json()
         assert body["code"] == "not_supported_by_provider"
-        assert "Todos" in body["detail"] and "Fotos e carrosséis" in body["detail"] and "web" in body["detail"]
+        assert "Todos" in body["detail"] and "Publicações do feed" in body["detail"] and "web" in body["detail"]
         assert "5.000" in body["detail"]
     assert harness.ctx.db.scalar("SELECT COUNT(*) FROM batches") == 0
     assert harness.ctx.db.scalar("SELECT COUNT(*) FROM import_groups") == 0

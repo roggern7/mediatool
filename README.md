@@ -371,7 +371,9 @@ Na tela **Importar** (rota `/`):
    ficam de fora e o botão de início avisa isso. Com um único perfil na lista, **Consultar perfil** mostra a prévia
    (nome, avatar, quantidade de posts, privado/verificado). Sem sessão configurada a tela mostra
    **Configurar em Configurações**.
-2. **Tipo de mídia:** **Todos**, **Reels** ou **Fotos e carrosséis** (`all`, `reels`, `photos_carousels`).
+2. **Tipo de mídia:** **Todos**, **Reels** ou **Publicações do feed** (`all`, `reels`, `photos_carousels`).
+   **Reels** traz só publicações classificadas como Reel. **Publicações do feed** traz todo o resto: fotos simples,
+   vídeos avulsos antigos que não são Reels e todos os itens dos carrosséis (fotos e vídeos).
 3. **Quantidade por perfil:** **Últimos N** (N inteiro livre de 1 a 1.000.000, com atalhos 100, 500 e 1.000) ou
    **Todos** (`limit` nulo), que percorre o perfil até o fim real da paginação; em perfis grandes isso pode levar
    horas por causa do limite de requisições por hora, e o lote continua sozinho. A quantidade conta mídias do tipo

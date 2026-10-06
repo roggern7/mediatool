@@ -42,7 +42,7 @@ NO_FALLBACK_DETAILS: frozenset[str] = frozenset({"cursor_missing_with_errors"}) 
 
 # "Todos" (limit None) e `photos_carousels` só existem no provider web: o gallery-dl truncaria em 5.000 itens
 # (fingindo fim de perfil) e recusa o filtro. Nunca são atendidos pelo legado, nem por fallback.
-WEB_ONLY_MESSAGE = ("\"Todos\", \"Fotos e carrosséis\" e quantidades acima de 5.000 exigem o método de importação web; "
+WEB_ONLY_MESSAGE = ("\"Todos\", \"Publicações do feed\" e quantidades acima de 5.000 exigem o método de importação web; "
                     "o método gallery-dl não lista o perfil até o fim, para em 5.000 mídias e não conhece esse "
                     "filtro.")
 

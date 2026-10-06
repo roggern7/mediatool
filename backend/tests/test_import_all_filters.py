@@ -116,10 +116,23 @@ def test_photos_and_carousels_takes_every_carousel_item_and_excludes_reels(harne
     h = web_app(harness_factory, site)
     batch = finish(h, start(h, "photos_carousels", 100))
     code = "PERFILTESTEP00001N"
-    # Foto simples + os 3 itens do carrossel, inclusive o VÍDEO do carrossel; Reel e vídeo avulso ficam de fora.
+    # "Publicações do feed": foto simples + os 3 itens do carrossel (inclusive o VÍDEO do carrossel) + o vídeo
+    # avulso antigo que não é Reel; só o Reel fica de fora.
     assert jobs_of(batch) == [(f"{code}00", 0, "image"), (f"{code}02", 0, "image"), (f"{code}02", 1, "video"),
-                              (f"{code}02", 2, "image")]
-    assert batch["listing_end"] == "profile_end" and batch["progress"]["downloaded"] == 4
+                              (f"{code}02", 2, "image"), (f"{code}03", 0, "video")]
+    assert batch["listing_end"] == "profile_end" and batch["progress"]["downloaded"] == 5
+
+
+def test_reels_and_feed_posts_are_complementary(harness_factory):
+    # Toda mídia suportada cai em exatamente um dos dois filtros: Reels + Publicações do feed = Todos.
+    profiles = {name: Profile(3, mixed, per_page=4) for name in ("perfil_reels", "perfil_feed", "perfil_todos")}
+    h = web_app(harness_factory, MultiProfileSite(profiles))
+    reels = jobs_of(finish(h, start(h, "reels", None, profile="perfil_reels")))
+    feed = jobs_of(finish(h, start(h, "photos_carousels", None, profile="perfil_feed")))
+    everything = jobs_of(finish(h, start(h, "all", None, profile="perfil_todos")))
+    strip = lambda jobs: sorted((code[-3:], index, kind) for code, index, kind in jobs)  # noqa: E731
+    assert len(reels) == 3 and len(feed) == 15 and len(everything) == 18
+    assert sorted(strip(reels) + strip(feed)) == strip(everything)
 
 
 def test_reels_excludes_carousels_and_all_takes_everything(harness_factory):
@@ -156,10 +169,11 @@ def test_content_filter_is_not_counted_as_dropped(harness_factory):
     assert reasons == {"expected": {"content_filter": 24}}, "ignorado pelo filtro: esperado, fora do total de perdas"
 
 
-@pytest.mark.parametrize("content, found", [("reels", 0), ("photos_carousels", 0), ("all", 6), ("videos", 6)])
-def test_standalone_non_reel_video_is_only_in_all_and_counts_as_content_filter(harness_factory, content, found):
-    # Vídeo avulso legado (sem product_type "clips", fora de carrossel): não é Reel nem foto/carrossel. Fica só em
-    # "all" (e no antigo "videos"); nos filtros é ignorado como `content_filter` (esperado), nunca como descarte.
+@pytest.mark.parametrize("content, found", [("reels", 0), ("photos_carousels", 6), ("all", 6), ("videos", 6)])
+def test_standalone_non_reel_video_is_a_feed_post_not_a_reel(harness_factory, content, found):
+    # Vídeo avulso legado (sem product_type "clips", fora de carrossel): não é Reel. Entra em "Publicações do feed"
+    # (`photos_carousels`), em "all" e no antigo "videos"; em "reels" é ignorado como `content_filter` (esperado),
+    # nunca como descarte.
     site = MultiProfileSite({USER: Profile(2, lambda page, i: "feed_video", per_page=3)})
     h = web_app(harness_factory, site)
     batch_id = start(h, content, 100)

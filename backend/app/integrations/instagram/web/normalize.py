@@ -217,8 +217,9 @@ def filter_by_content(items: list[RemoteMedia], content: ContentType) -> list[Re
     if content == "reels":
         return [item for item in items if item.is_reel and not item.in_carousel]
     if content == "photos_carousels":
-        # Fotos simples + TODOS os itens de carrossel (inclusive vídeos de carrossel); Reels e vídeos avulsos fora.
-        return [item for item in items if item.in_carousel or item.media_type == "image"]
+        # "Publicações do feed": tudo o que não é Reel — fotos simples, vídeos avulsos antigos (não-Reel) e TODOS
+        # os itens de carrossel (inclusive vídeos de carrossel). É o complemento exato do filtro "reels".
+        return [item for item in items if not item.is_reel or item.in_carousel]
     if content == "videos":
         return [item for item in items if item.media_type == "video"]
     if content == "images":

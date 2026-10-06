@@ -74,7 +74,7 @@ describe("pode iniciar?", () => {
 });
 
 describe("providerBlocker", () => {
-  it("gallery-dl não aceita Todos nem Fotos e carrosséis", () => {
+  it("gallery-dl não aceita Todos nem Publicações do feed", () => {
     expect(providerBlocker("gallery_dl", "all", true)).toBe(WEB_ONLY_MESSAGE);
     expect(providerBlocker("gallery_dl", "photos_carousels", false)).toBe(WEB_ONLY_MESSAGE);
     expect(providerBlocker("gallery_dl", "reels", false)).toBeNull();

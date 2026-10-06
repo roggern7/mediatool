@@ -46,7 +46,7 @@ def resolve_preset(ctx: AppContext, preset_id: int | None) -> dict[str, Any]:
 
 
 WEB_ONLY_MESSAGE = (
-    "\"Todos\", \"Fotos e carrosséis\" e quantidades acima de 5.000 exigem o método de importação web. O método "
+    "\"Todos\", \"Publicações do feed\" e quantidades acima de 5.000 exigem o método de importação web. O método "
     "configurado (gallery-dl) não lista o perfil até o fim, para em 5.000 mídias e não conhece esse filtro. Troque o "
     "método em Configurações ou escolha outra opção."
 )

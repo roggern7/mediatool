@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-# "photos_carousels" = fotos simples + todos os itens de carrosséis (inclusive vídeos de carrossel), sem Reels.
+# "photos_carousels" (interface: "Publicações do feed") = tudo o que não é Reel: fotos simples, vídeos avulsos
+# antigos (não-Reel) e todos os itens de carrosséis (inclusive vídeos de carrossel).
 ContentType = Literal["reels", "posts", "videos", "images", "all", "photos_carousels"]
 CONTENT_TYPES: tuple[str, ...] = ("reels", "posts", "videos", "images", "all", "photos_carousels")
 
