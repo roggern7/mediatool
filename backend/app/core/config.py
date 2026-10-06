@@ -128,6 +128,8 @@ class Settings:
     # Padrão da estratégia do provider do Instagram; o setting `instagram_provider` gravado tem precedência.
     # "web" (sem fallback automático): os dois caminhos de listagem do gallery-dl já foram recusados para a conta.
     instagram_provider: str = "web"
+    # Fuso (nome IANA) da data nos nomes da exportação; None = fuso do sistema (app.services.export_time).
+    timezone: str | None = None
 
     @property
     def database_path(self) -> Path:
@@ -187,5 +189,6 @@ def load_settings(environ: Mapping[str, str] | None = None, *, root: Path | None
         disable_worker=_bool(env.get("MEDIA_TOOL_DISABLE_WORKER")),
         dev_mode=_bool(env.get("MEDIA_TOOL_DEV")),
         instagram_provider=_choice(env.get("MEDIA_TOOL_INSTAGRAM_PROVIDER"), INSTAGRAM_PROVIDERS, "web"),
+        timezone=(env.get("MEDIA_TOOL_TIMEZONE") or "").strip() or None,
         env=env,
     )

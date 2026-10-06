@@ -62,6 +62,7 @@ Ambiente (opcionais; defaults relativos à raiz do projeto; `.env` na raiz é li
 `MEDIA_TOOL_SECRETS_DIR` (data\secrets), `MEDIA_TOOL_HOST` (127.0.0.1), `MEDIA_TOOL_PORT` (8765),
 `MEDIA_TOOL_FFMPEG`, `MEDIA_TOOL_FFPROBE`, `MEDIA_TOOL_CONCURRENCY` (1), `MEDIA_TOOL_MAX_DOWNLOAD_BYTES` (2147483648),
 `MEDIA_TOOL_DISABLE_WORKER` (testes), `INSTAGRAM_SESSIONID` (fallback; o caminho principal é o arquivo protegido),
+`MEDIA_TOOL_TIMEZONE` (fuso IANA da data nos nomes exportados; padrão: fuso do sistema),
 `MEDIA_TOOL_INSTAGRAM_PROVIDER` (`web` padrão, `auto`, `gallery_dl`), `MEDIA_TOOL_IG_DOC_<NOME>` (override de doc_id;
 ver `docs/INSTAGRAM_WEB_CONTRACT.md`).
 
@@ -699,7 +700,12 @@ por keyset sobre `media.id`, sem materializar a lista. Mídia excluída da Bibli
 por `ON DELETE CASCADE`.
 
 **Nomes dos arquivos** (`app/services/export_names.py`): `{perfil}_{AAAA-MM-DD}_{codigo_do_post}[_{n}].{ext}`. Data =
-`taken_at` (UTC); `n` (1-based) só em item de carrossel (post com mais de um item na Biblioteca, ou item de índice
+a de `taken_at` no fuso do Media Tool (`app/services/export_time.py`: `MEDIA_TOOL_TIMEZONE` (IANA, via `zoneinfo`
++ `tzdata`) > fuso do sistema (no Windows com as regras de horário de verão do ano do instante, via
+`SystemTimeToTzSpecificLocalTimeEx`; regras históricas a partir do primeiro ano registrado no Windows, 2004) > UTC;
+resolvido uma vez por processo (mudar a variável ou o fuso do sistema exige reiniciar); `taken_at` guardado não
+muda; o mtime das entradas do ZIP usa a hora local do mesmo fuso e o mtime do arquivo copiado para pasta é o
+instante da publicação; data fora do calendário representável -> nome sem data); `n` (1-based) só em item de carrossel (post com mais de um item na Biblioteca, ou item de índice
 maior que zero); sem código do post: `{perfil}_{AAAA-MM-DD}_{id da mídia}`; sem perfil: prefixo `midia`; sem perfil
 nem código: `midia_{12 primeiros caracteres do SHA-256}`. Extensão = a do original no storage. Sanitização: Unicode
 NFC; `<>:"/\|?*` e caracteres de controle viram `_`; sem ponto/espaço nas pontas; nome reservado do Windows (`CON`,
@@ -787,6 +793,11 @@ duplicatas do lote), mesma regra de nomes e o mesmo executor/fila. Em vez de cop
   com `export_no_space`, sem criar o `.part`. Garantia real: o ZIP não COMEÇA se for deixar o disco abaixo do
   mínimo dos downloads; se outro programa consumir o disco durante a escrita, a preparação pode levar o disco
   abaixo desse mínimo até falhar com `export_disk_full` (e o temporário é removido).
+- Download interrompido: a resposta (`ZipFileResponse`) conta os bytes enviados e observa `http.disconnect`; só
+  marca como baixado se a faixa foi até o último byte, todos os bytes foram enviados e o cliente não desconectou.
+- Falhas por mídia (pasta e ZIP): nada pôde ser gravado -> `failed` com `export_write_failed` ou
+  `export_read_failed` e a causa predominante; parte gravada -> `completed` com `error_code`/`error_message`
+  informativos (ex.: "3 arquivos não puderam ser gravados na pasta de destino: acesso negado...").
 - Outros desfechos: nenhum original disponível (todos ausentes) -> `failed` com `export_empty`, sem ZIP vazio;
   erro de leitura no meio de um original -> `failed` com `export_read_failed` (a entrada já começou e não pode
   ser retirada: basta pedir de novo); data fora do intervalo do formato ZIP (1980 a 2107) é limitada ao

@@ -22,13 +22,14 @@ import struct
 import threading
 import time
 import zipfile
-from datetime import datetime
+from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.db.connection import parse_utc, utc_now
+from app.db.connection import utc_now
 from app.db.repositories.exports import COUNT_COLUMNS
-from app.services import export_zip
+from app.services import export_time, export_zip
 from app.services.export_destination import (
     DestinationError,
     file_identity,
@@ -91,12 +92,21 @@ def _open_zip_part(path: Path):
     return open(path, "xb")
 
 
-def _zip_time(media: dict[str, Any], src: Path) -> tuple[int, int, int, int, int, int]:
-    """Data de modificação da entrada: `taken_at` (UTC) quando houver e for válida; senão a do arquivo. O formato
-    ZIP só representa de 1980-01-01 a 2107-12-31: fora disso a data é limitada ao intervalo."""
-    moment = parse_utc(media.get("taken_at")) if isinstance(media.get("taken_at"), str) else None
-    if moment is None:
-        moment = datetime.fromtimestamp(src.stat().st_mtime)
+def _zip_time(media: dict[str, Any], src: Path,
+              zone: export_time.Zone | None = None) -> tuple[int, int, int, int, int, int]:
+    """Data de modificação da entrada: a da publicação (`taken_at`) quando houver e for válida; senão a do arquivo.
+    O ZIP guarda hora LOCAL sem fuso: é a hora no mesmo fuso usado na data do nome (`zone`; None = UTC). O formato só
+    representa de 1980-01-01 a 2107-12-31: fora disso a data é limitada ao intervalo."""
+    try:
+        moment = export_time.publication_moment(media.get("taken_at"))
+        if moment is None:
+            moment = datetime.fromtimestamp(src.stat().st_mtime, UTC)
+        moment = (zone or export_time.utc_zone)(moment)
+    except Exception:  # noqa: BLE001 - data nos limites do calendário: cai para a do arquivo, senão 1980
+        try:
+            moment = datetime.fromtimestamp(src.stat().st_mtime, UTC).replace(tzinfo=None)
+        except Exception:  # noqa: BLE001
+            return (ZIP_MIN_YEAR, 1, 1, 0, 0, 0)
     if moment.year < ZIP_MIN_YEAR:
         return (ZIP_MIN_YEAR, 1, 1, 0, 0, 0)
     if moment.year > ZIP_MAX_YEAR:
@@ -153,6 +163,8 @@ class ExportRunner:
         self._temps: set[Path] = set()
         self._dest_identity: tuple[int, int] | None = None
         self.progress_writes = 0
+        self._failures: Counter = Counter()
+        self._zone: export_time.Zone | None = None
         self._last_sweep = time.monotonic()
 
     # ---- ciclo de vida -----------------------------------------------------------------------------------------
@@ -224,6 +236,9 @@ class ExportRunner:
         total = None
         zip_bytes = None
         self._temps = set()
+        self._failures = Counter()
+        # Fuso da data nos nomes (e do mtime das entradas do ZIP): resolvido uma vez por valor configurado.
+        self._zone = export_time.resolve_zone(self.ctx.settings.timezone)
         try:
             if export.get("mode") == "zip":
                 zip_bytes = self._run_zip(export, counts)
@@ -240,6 +255,7 @@ class ExportRunner:
                 counts["missing"] += export["total"] - processed
             elif processed > export["total"]:
                 total = processed
+            status, code, message = self._failure_summary(export, counts)
         except ExportCancelled:
             status, message = "cancelled", CANCELLED_MESSAGE
         except ExportAborted as exc:
@@ -266,6 +282,31 @@ class ExportRunner:
             export["id"], status, counts["copied"], counts["skipped_existing"], counts["renamed"],
             counts["missing"], counts["failed"],
         )
+
+    def _note_failure(self, exc: OSError, src: Path) -> None:
+        """Guarda o motivo de uma mídia não copiada (leitura do original x gravação no destino + causa)."""
+        reading = getattr(exc, "reading_original", False) or getattr(exc, "filename", None) == str(src)
+        cause = ("acesso negado" if isinstance(exc, PermissionError)
+                 else "arquivo não encontrado" if isinstance(exc, FileNotFoundError) else "erro de leitura/gravação")
+        self._failures[("read" if reading else "write", cause)] += 1
+
+    def _failure_summary(self, export: dict[str, Any], counts: dict[str, int]) -> tuple[str, str | None, str | None]:
+        """Desfecho quando houve mídias com falha: nada gravado -> `failed` com código e mensagem; parte gravada ->
+        `completed` com código/mensagem informativos do motivo predominante."""
+        if counts["failed"] == 0 or not self._failures:
+            return "completed", None, None
+        (kind, cause), _ = self._failures.most_common(1)[0]
+        code = "export_read_failed" if kind == "read" else "export_write_failed"
+        one, many = ("lido do original", "lidos do original") if kind == "read" else (
+            ("incluído no ZIP", "incluídos no ZIP") if export.get("mode") == "zip"
+            else ("gravado na pasta de destino", "gravados na pasta de destino"))
+        if counts["copied"] + counts["skipped_existing"] == 0:
+            return "failed", code, f"Nenhum arquivo pôde ser {one}: {cause}. A Biblioteca não foi alterada."
+        failed = counts["failed"]
+        amount = "1 arquivo não pôde ser" if failed == 1 else f"{failed} arquivos não puderam ser"
+        ending = one if failed == 1 else many
+        return "completed", code, (
+            f"{amount} {ending}: {cause}. Exporte de novo para o mesmo destino para copiar só o que faltou.")
 
     def _flush(self, export_id: int, counts: dict[str, int]) -> None:
         self.ctx.exports.update_progress(export_id, counts)
@@ -330,7 +371,7 @@ class ExportRunner:
         except (StorageError, OSError, TypeError):
             return "missing"
         try:
-            stem = export_stem(media, carousel=carousel)
+            stem = export_stem(media, carousel=carousel, zone=self._zone)
             ext = export_extension(media["original_path"])
             file_name(stem, ext)
         except Exception:  # noqa: BLE001 - dado inesperado numa mídia não derruba a exportação inteira
@@ -356,6 +397,7 @@ class ExportRunner:
                     self._discard(part)
                     continue
                 self._temps.discard(part)
+                self._set_mtime(final, media, src)
             except (ExportCancelled, ExportAborted):
                 raise
             except OSError as exc:
@@ -371,9 +413,21 @@ class ExportRunner:
                     raise ExportAborted("export_folder_missing", FOLDER_GONE_MESSAGE) from None
                 logger.warning("Exportação %s: mídia %s não copiada (%s)", export_id, media["id"],
                                type(exc).__name__)
+                self._note_failure(exc, src)
                 return "failed"
             return "copied" if attempt == 1 else "renamed"
         return "failed"
+
+    @staticmethod
+    def _set_mtime(final: Path, media: dict[str, Any], src: Path) -> None:
+        """Data de modificação do arquivo exportado = horário da publicação (instante absoluto de `taken_at`); sem
+        `taken_at`, a do original. Falha aqui nunca falha a cópia."""
+        try:
+            moment = export_time.publication_moment(media.get("taken_at"))
+            stamp = moment.timestamp() if moment is not None else src.stat().st_mtime
+            os.utime(io_path(final), (stamp, stamp))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _identical(self, path: Path, size: int, sha256: str) -> bool:
         """Mesmo conteúdo do original: mesmo tamanho e mesmo SHA-256 (o hash só é lido se o tamanho bate)."""
@@ -412,7 +466,11 @@ class ExportRunner:
             with target, open(src, "rb") as source:
                 while True:
                     self._check_cancel()
-                    chunk = source.read(CHUNK_SIZE)
+                    try:
+                        chunk = source.read(CHUNK_SIZE)
+                    except OSError as exc:
+                        exc.reading_original = True   # erro ao LER o original (não ao gravar no destino)
+                        raise
                     if not chunk:
                         break
                     target.write(chunk)
@@ -484,9 +542,9 @@ class ExportRunner:
         except (StorageError, OSError, TypeError):
             return "missing"
         try:
-            stem = export_stem(media, carousel=carousel)
+            stem = export_stem(media, carousel=carousel, zone=self._zone)
             ext = export_extension(media["original_path"])
-            stamp = _zip_time(media, src)
+            stamp = _zip_time(media, src, self._zone)
             # Nome único no arquivo, sem diferenciar maiúsculas/minúsculas (o ZIP extrai bem no Windows).
             name, attempt = None, 0
             for attempt in range(1, MAX_NAME_ATTEMPTS + 1):
@@ -503,7 +561,8 @@ class ExportRunner:
             return "failed"
         try:
             source = open(src, "rb")
-        except OSError:
+        except OSError as exc:
+            self._note_failure(exc, src)
             return "failed"
         with source:
             try:

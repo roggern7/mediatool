@@ -622,8 +622,8 @@ def test_dates_outside_the_zip_range_do_not_break_the_zip(harness, tmp_path, mon
 
     # Cabeçalho que não pode ser montado para UMA mídia: ela conta como falha e o ZIP segue.
     real_time = export_runner._zip_time
-    monkeypatch.setattr(export_runner, "_zip_time", lambda media, src: (
-        (2200, 1, 1, 0, 0, 0) if media["source_profile"] == "futuro" else real_time(media, src)))
+    monkeypatch.setattr(export_runner, "_zip_time", lambda media, src, zone=None: (
+        (2200, 1, 1, 0, 0, 0) if media["source_profile"] == "futuro" else real_time(media, src, zone)))
     again = zip_export(harness, library(ids))
     assert (again["status"], again["copied"], again["failed"], again["processed"]) == ("completed", 3, 1, 4)
     with zipfile.ZipFile(stored_zip(harness, again["id"])) as archive:

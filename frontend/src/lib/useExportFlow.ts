@@ -5,6 +5,7 @@ import {
   EXPORT_POLL_MS,
   ZIP_READY_POLL_MS,
   buildExportRequest,
+  createSingleFlight,
   isExportActive,
   pickResumeExport,
   runningExportId,
@@ -53,6 +54,8 @@ export function useExportFlow(opts: {
   const [fallback, setFallback] = useState<{ source: ExportSource; message: string } | null>(null);
   // ZIP pedido NESTA tela: quando ficar pronto, o download começa sozinho (uma vez).
   const autoDownload = useRef<number | null>(null);
+  // Pedido em andamento: barra o segundo clique no mesmo instante, antes de o botão aparecer desabilitado.
+  const inFlight = useRef(createSingleFlight());
   const [autoDownloadedId, setAutoDownloadedId] = useState<number | null>(null);
   // onFinished é avisado uma vez por exportação (o ZIP pronto continua sendo consultado em ritmo lento).
   const finishedFor = useRef<number | null>(null);
@@ -101,7 +104,8 @@ export function useExportFlow(opts: {
   const current = loaded ?? (created && created.id === exportId ? created : null);
 
   async function start(source: ExportSource, mode: "pick" | "default" | "zip") {
-    if (picking || starting) return;
+    if (picking || starting || !inFlight.current.tryEnter()) return;
+    setStarting(mode !== "pick");
     setFallback(null);
     try {
       let request = buildExportRequest(source, { kind: mode === "zip" ? "zip" : "default" });
@@ -131,6 +135,7 @@ export function useExportFlow(opts: {
         toast.push("err", messageOf(err));
       }
     } finally {
+      inFlight.current.leave();
       setPicking(false);
       setStarting(false);
     }

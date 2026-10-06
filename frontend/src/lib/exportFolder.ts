@@ -80,6 +80,47 @@ export function exportExtrasText(job: Counts): string {
 
 const LIBRARY_SAFE = "A Biblioteca não foi alterada.";
 
+/** Guarda de "um pedido por vez": recusa a segunda entrada enquanto a primeira não saiu (duplo clique). */
+export interface SingleFlight {
+  tryEnter: () => boolean;
+  leave: () => void;
+}
+
+export function createSingleFlight(): SingleFlight {
+  let busy = false;
+  return {
+    tryEnter: () => {
+      if (busy) return false;
+      busy = true;
+      return true;
+    },
+    leave: () => {
+      busy = false;
+    },
+  };
+}
+
+/** Roda `task` se a guarda estiver livre (devolve null sem rodar, se ocupada) e libera ao fim, com sucesso ou erro. */
+export async function runExclusive<T>(flight: SingleFlight, task: () => Promise<T>): Promise<T | null> {
+  if (!flight.tryEnter()) return null;
+  try {
+    return await task();
+  } finally {
+    flight.leave();
+  }
+}
+
+/**
+ * Exportação concluída com parte das mídias não copiadas: o motivo informado pelo backend (ex.: "3 arquivos não
+ * puderam ser gravados na pasta de destino: acesso negado. Exporte de novo..."). null se não há o que avisar.
+ */
+export function exportPartialText(
+  job: Pick<ExportJob, "status" | "failed" | "error_message">,
+): string | null {
+  if (job.status !== "completed" || job.failed <= 0) return null;
+  return (job.error_message ?? "").trim() || null;
+}
+
 // ---- Baixar ZIP ----
 
 export const ZIP_SPACE_NOTE =

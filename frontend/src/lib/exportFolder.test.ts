@@ -10,7 +10,10 @@ import {
   ZIP_SPACE_NOTE,
   batchExportOffer,
   buildExportRequest,
+  createSingleFlight,
   exportActions,
+  exportPartialText,
+  runExclusive,
   exportEndedText,
   exportExtrasText,
   exportFraction,
@@ -472,5 +475,84 @@ describe("retomada ao abrir a tela", () => {
     expect(runningExportId("export_already_running", { export_id: "31" })).toBeNull();
     expect(runningExportId("export_queue_full", { export_id: 31 })).toBeNull();
     expect(runningExportId("export_already_running", null)).toBeNull();
+  });
+});
+
+describe("depois de falha, cancelamento ou expiração dá para tentar de novo", () => {
+  const ended = (patch: Partial<ExportJob>) => job({ processed: 10, copied: 10, ...patch });
+
+  it("os botões voltam a ficar habilitados (pasta e ZIP)", () => {
+    for (const mode of ["folder", "zip"] as const) {
+      for (const status of ["failed", "cancelled", "expired"] as const) {
+        const actions = exportActions({ finished: true, lastExport: null, current: ended({ mode, status }), busy: false });
+        expect(actions.showExport).toBe(true);
+        expect(actions.canExport).toBe(true);
+        expect(actions.canOpen).toBe(false);
+        expect(isExportActive(ended({ mode, status }))).toBe(false);
+      }
+    }
+    // Enquanto o pedido está saindo (primeiro clique), o segundo clique não passa.
+    expect(exportActions({ finished: true, lastExport: null, current: null, busy: true }).canExport).toBe(false);
+  });
+
+  it("cada desfecho tem mensagem clara, sem sugerir problema na Biblioteca", () => {
+    const messages: [Partial<ExportJob>, RegExp][] = [
+      [{ mode: "zip", status: "failed", error_code: "export_no_space", error_message: "Sem espaço em disco para preparar o ZIP: são necessários 18,6 GB e há 2,0 GB disponíveis." }, /necessários 18,6 GB/],
+      [{ mode: "zip", status: "failed", error_code: "export_disk_full", error_message: "O disco ficou sem espaço enquanto o ZIP era preparado." }, /sem espaço/],
+      [{ mode: "zip", status: "failed", error_code: "export_read_failed", error_message: "Um arquivo original não pôde ser lido durante a preparação do ZIP. Tente de novo." }, /Tente de novo/],
+      [{ mode: "zip", status: "failed", error_code: "export_empty", error_message: "Nenhum arquivo original disponível para o ZIP." }, /Nenhum arquivo original/],
+      [{ mode: "zip", status: "failed", error_code: "interrupted", error_message: null }, /não pôde ser preparado/],
+      [{ mode: "zip", status: "cancelled" }, /Preparação do ZIP cancelada/],
+      [{ mode: "zip", status: "expired" }, /Baixar ZIP/],
+      [{ mode: "folder", status: "failed", error_code: "export_disk_full", error_message: "O disco de destino ficou sem espaço." }, /disco de destino/],
+      [{ mode: "folder", status: "failed", error_code: "export_folder_missing", error_message: "A pasta de destino deixou de existir." }, /deixou de existir/],
+      [{ mode: "folder", status: "cancelled" }, /Exportação cancelada/],
+    ];
+    for (const [patch, pattern] of messages) {
+      const text = exportEndedText(ended(patch));
+      expect(text).toMatch(pattern);
+      if (patch.status !== "expired") expect(text).toContain("A Biblioteca não foi alterada.");
+    }
+  });
+});
+
+describe("um pedido por vez (duplo clique)", () => {
+  it("duas chamadas seguidas no mesmo instante fazem uma só requisição", async () => {
+    const flight = createSingleFlight();
+    let requests = 0;
+    let release: () => void = () => undefined;
+    const task = () =>
+      new Promise<string>((resolve) => {
+        requests += 1;
+        release = () => resolve("ok");
+      });
+    const first = runExclusive(flight, task);
+    const second = runExclusive(flight, task); // segundo clique antes de qualquer resposta
+    expect(requests).toBe(1);
+    expect(await second).toBeNull();
+    expect(flight.tryEnter()).toBe(false);
+    release();
+    expect(await first).toBe("ok");
+    expect(await runExclusive(flight, async () => "de novo")).toBe("de novo"); // liberou depois do fim
+  });
+
+  it("libera também quando o pedido falha", async () => {
+    const flight = createSingleFlight();
+    await expect(runExclusive(flight, () => Promise.reject(new Error("falhou")))).rejects.toThrow("falhou");
+    expect(flight.tryEnter()).toBe(true);
+    flight.leave();
+    expect(flight.tryEnter()).toBe(true);
+  });
+});
+
+describe("concluída com parte das mídias não copiadas", () => {
+  it("mostra o motivo informado pelo backend junto do resultado", () => {
+    const reason = "3 arquivos não puderam ser gravados na pasta de destino: acesso negado. Exporte de novo para o mesmo destino para copiar só o que faltou.";
+    const partial = job({ status: "completed", copied: 7, failed: 3, error_code: "export_write_failed", error_message: reason });
+    expect(exportPartialText(partial)).toBe(reason);
+    expect(exportActions({ finished: true, lastExport: null, current: partial, busy: false }).canExport).toBe(true);
+    expect(exportPartialText(job({ status: "completed", failed: 0, error_message: reason }))).toBeNull();
+    expect(exportPartialText(job({ status: "completed", failed: 2, error_message: null }))).toBeNull();
+    expect(exportPartialText(job({ status: "failed", failed: 2, error_message: reason }))).toBeNull();
   });
 });

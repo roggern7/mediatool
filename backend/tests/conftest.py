@@ -31,6 +31,7 @@ def make_settings(root: Path, **overrides) -> Settings:
         poll_interval=0.05,
         heartbeat_interval=0.2,
         instagram_request_interval=(0.0, 0.0),  # portão sem espera nos testes (relógio real)
+        timezone="UTC",  # data nos nomes da exportação independente do fuso da máquina
     )
     return replace(settings, **overrides)
 

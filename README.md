@@ -561,7 +561,7 @@ pasta** e **Abrir pasta da Biblioteca**. O armazenamento interno não muda e con
   pasta de Downloads, e isso o Media Tool não consegue conferir. Para acervos muito grandes, **Exportar para pasta**
   copia direto para o destino, sem o arquivo intermediário.
 - **Limpeza automática**: o ZIP pronto fica guardado por 24 horas; depois que um download termina por inteiro, por
-  no máximo mais 1 hora (um download em andamento nunca é interrompido pela limpeza). Cancelar ou falhar apaga o
+  no máximo mais 1 hora (um download em andamento nunca é interrompido pela limpeza, e um download interrompido não conta). Cancelar ou falhar apaga o
   arquivo parcial na hora. Se o disco apertar para os downloads, ZIPs que já foram baixados saem antes do prazo.
   O Media Tool só apaga os arquivos que ele mesmo criou em `data\exports-tmp`; os originais nunca são tocados.
 - **Saiu da tela?** A preparação continua. Ao voltar para a importação ou para a Biblioteca, o progresso reaparece;
@@ -594,9 +594,24 @@ O que esperar:
   Você pode mover, renomear ou apagar a pasta exportada (ou copiá-la para outro computador) sem afetar nada.
 - **São os originais**, não as versões processadas.
 - **Nomes**: `perfil_AAAA-MM-DD_codigo-do-post.ext` (item de carrossel ganha `_1`, `_2`...), com a extensão do
-  original. Caracteres que o Windows não aceita são trocados por `_`. A data é a da publicação em UTC (horário
-  universal), para o nome ser sempre o mesmo em qualquer computador; uma publicação feita à noite no Brasil pode
-  aparecer com a data do dia seguinte.
+  original. Caracteres que o Windows não aceita são trocados por `_`.
+- **Data no nome**: é a data da publicação no SEU fuso, não em UTC: uma publicação feita às 22h no Brasil sai com
+  a data daquele dia. O fuso é resolvido nesta ordem: (1) a variável opcional `MEDIA_TOOL_TIMEZONE` (nome IANA,
+  ex.: `America/Sao_Paulo`, no `.env`; exige o pacote `tzdata`, instalado pelo `setup.ps1`); (2) o fuso do
+  Windows, com as regras de horário de verão do ano de cada publicação (datas antigas saem certas, inclusive o
+  horário de verão do Brasil até 2019); (3) UTC, se nada puder ser determinado. Valor inválido na variável gera um
+  aviso no log e vale o fuso do Windows. Dentro do ZIP, a data de modificação de cada arquivo é a hora da
+  publicação nesse mesmo fuso; na exportação para pasta, a data de modificação do arquivo copiado também é o
+  horário da publicação (sem data de publicação, a do original), o que permite ordenar por data no Explorer. Nada
+  é alterado na Biblioteca: é só o que é exportado. Mudar `MEDIA_TOOL_TIMEZONE` ou o fuso do Windows só vale
+  depois de REINICIAR o Media Tool. Pelo fuso do Windows, o horário de verão antigo vale a partir do primeiro ano
+  com regra registrada no sistema (2004 no Windows atual; antes disso a data pode divergir em publicações perto da
+  meia-noite); com `MEDIA_TOOL_TIMEZONE` + `tzdata` vale para qualquer data.
+- **O que muda nos nomes**: exportações feitas antes desta regra usavam a data em UTC, então uma mídia publicada à
+  noite pode ter saído com o dia seguinte (ex.: antes `perfil_2026-03-05_ABC.jpg`, agora
+  `perfil_2026-03-04_ABC.jpg`). O mesmo vale se você trocar o fuso. Como "já está na pasta" é decidido pelo nome,
+  reexportar para uma pasta antiga pode gravar essas mídias de novo com o nome novo, ao lado das antigas (nada é
+  sobrescrito). Para evitar repetição, exporte para uma pasta nova.
 - **Nada é sobrescrito.** Se a pasta já tem um arquivo com o mesmo nome: sendo o mesmo conteúdo, ele não é copiado de
   novo ("já estavam na pasta"); sendo outro arquivo, a mídia é gravada com ` (2)`, ` (3)`... ("renomeadas"). Exportar
   de novo para a mesma pasta só completa o que faltava.

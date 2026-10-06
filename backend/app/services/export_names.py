@@ -1,7 +1,7 @@
 """Nomes de arquivo da exportação para pasta: amigáveis, estáveis e válidos no Windows (funções puras).
 
-Formato: `{perfil}_{AAAA-MM-DD}_{codigo_do_post}[_{n}].{ext}`. A data é a de `taken_at` (UTC); `n` (1-based) só
-aparece em item de carrossel. Sem código do post: `{perfil}_{id da mídia}`; sem perfil nem código: prefixo do SHA-256.
+Formato: `{perfil}_{AAAA-MM-DD}_{codigo_do_post}[_{n}].{ext}`. A data é a da publicação (`taken_at`) no fuso do
+Media Tool (`app.services.export_time`; sem zona informada, UTC); `n` (1-based) só aparece em item de carrossel. Sem código do post: `{perfil}_{id da mídia}`; sem perfil nem código: prefixo do SHA-256.
 A extensão é sempre a do original guardado no storage.
 """
 
@@ -11,6 +11,8 @@ import re
 import unicodedata
 from pathlib import PurePosixPath
 from typing import Any
+
+from app.services.export_time import Zone, local_date_text
 
 # Comprimento máximo do NOME do arquivo (com extensão e sufixo de colisão).
 MAX_NAME_LENGTH = 120
@@ -24,7 +26,6 @@ _RESERVED = frozenset(
     | {f"LPT{c}" for c in "¹²³"}
 )
 _EXTENSION = re.compile(r"^\.[a-z0-9]{1,5}$")
-_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
 def sanitize_component(value: Any) -> str:
@@ -45,13 +46,13 @@ def safe_stem(stem: str) -> str:
     return stem
 
 
-def export_stem(media: dict[str, Any], *, carousel: bool = False) -> str:
+def export_stem(media: dict[str, Any], *, carousel: bool = False, zone: Zone | None = None) -> str:
     profile = sanitize_component(media.get("source_profile"))
     code = sanitize_component(media.get("source_post_id"))
-    date = _DATE.match(str(media.get("taken_at") or ""))
+    date = local_date_text(media.get("taken_at"), zone)
     parts = [profile or FALLBACK_STEM]
     if date:
-        parts.append(date.group(0))
+        parts.append(date)
     if code:
         parts.append(code)
         index = int(media.get("source_media_index") or 0)

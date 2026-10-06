@@ -10,6 +10,7 @@ import {
   exportEndedText,
   exportExtrasText,
   exportFraction,
+  exportPartialText,
   exportProgressText,
   exportResultText,
   exportRunningText,
@@ -141,6 +142,7 @@ export function ExportStatus({ flow }: { flow: ExportFlow }) {
       <div className="grow" style={{ minWidth: 0 }}>
         <div style={{ overflowWrap: "anywhere" }}>{exportResultText(job)}</div>
         {extras ? <div className="muted small">{extras}</div> : null}
+        {exportPartialText(job) ? <div className="tone-warn small">{exportPartialText(job)}</div> : null}
       </div>
       <button type="button" className="btn btn-sm" onClick={() => void flow.open(job.id)}>
         Abrir pasta

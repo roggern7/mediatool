@@ -28,11 +28,18 @@ def test_ten_thousand_files_with_flat_memory_and_batched_progress(harness, tmp_p
     pages: list[int] = []
     real_flush, real_page = runner._flush, harness.ctx.exports.page
 
+    def traced_bytes() -> int:
+        # Fora da conta: a tabela de strings internadas do CPython, que o pathlib alimenta com cada nome de arquivo
+        # distinto e que cresce em poucos blocos grandes (redimensionamento), em momentos que dependem do que o
+        # processo já fez antes. Não é memória retida pela exportação.
+        snapshot = tracemalloc.take_snapshot().filter_traces([tracemalloc.Filter(False, "*pathlib*")])
+        return sum(stat.size for stat in snapshot.statistics("filename"))
+
     def flush(export_id, counts):
         real_flush(export_id, counts)
         shown = harness.client.get(f"/api/exports/{export_id}").json()   # o que a tela veria agora
         assert shown["status"] == "running"
-        samples.append((shown["processed"], tracemalloc.get_traced_memory()[0]))
+        samples.append((shown["processed"], traced_bytes()))
 
     def page(export, **kwargs):
         rows = real_page(export, **kwargs)
@@ -47,6 +54,7 @@ def test_ten_thousand_files_with_flat_memory_and_batched_progress(harness, tmp_p
         run_exports(harness)
     finally:
         elapsed = time.monotonic() - started
+        top = [str(stat) for stat in tracemalloc.take_snapshot().statistics("lineno")[:8]]
         tracemalloc.stop()
 
     export = harness.client.get(f"/api/exports/{created['id']}").json()
@@ -62,6 +70,6 @@ def test_ten_thousand_files_with_flat_memory_and_batched_progress(harness, tmp_p
     # Memória plana: o uso no fim não cresce com o número de arquivos já copiados.
     early = samples[len(samples) // 10][1]
     late = max(used for _, used in samples[len(samples) // 2:])
-    assert late - early < 2 * 1024 * 1024, (early, late)
+    assert late - early < 2 * 1024 * 1024, (early, late, top)
     print(f"\n{TOTAL} arquivos exportados em {elapsed:.1f} s; {len(samples)} escritas de progresso;"
           f" memória {early / 1024:.0f} KiB -> {late / 1024:.0f} KiB")
