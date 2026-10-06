@@ -1,0 +1,75 @@
+# Upstream gallery-dl: repositório git próprio, mantido localmente (ver README)
+/gallery-dl/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / builds
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.vite/
+
+# Dados locais
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+data/backups/
+storage/originals/*
+storage/processed/*
+storage/temp/*
+storage/thumbs/*
+!storage/**/.gitkeep
+logs/
+*.log
+
+# Segredos e sessões (nunca versionar)
+.env
+.env.*
+!.env.example
+data/secrets/
+*.secret
+*.secrets
+secrets/
+cookies.txt
+cookies*.txt
+cookies.sqlite
+*.cookies
+*cookies*.json
+*session*.bin
+*.session
+credentials*
+tokens*
+*.pem
+*.key
+.runtime/
+
+# SO / editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Pasta de dados inteira (banco, backups, sessão, estado de execução)
+data/*
+!data/.gitkeep
+
+# Artefatos e relatórios de prova de conceito
+poc*.json
+poc*.err
+poc*.out
+*.poc.json
+scratchpad/
+
+# Empacotamento Python
+/build/
+*.whl

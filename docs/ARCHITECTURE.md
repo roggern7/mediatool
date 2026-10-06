@@ -1,0 +1,256 @@
+# Media Tool: arquitetura técnica (V1)
+
+Complementa o [README](../README.md). A fonte da verdade das interfaces é [CONTRACTS.md](CONTRACTS.md); este
+documento explica como as peças se encaixam.
+
+## 1. Visão geral
+
+```
+                         +-------------------- processo do backend (uvicorn, 127.0.0.1:8765) --------------------+
+ navegador               |                                                                                        |
+ (painel React) --HTTP-->|  app.api (routers /api)  --->  services / import_service  --->  app.jobs (fila, worker)|
+                         |        |                               |                                 |              |
+                         |        v                               v                                 v              |
+                         |   app.core.security          app.db (SQLite WAL)            media_processor (FFmpeg)    |
+                         |   (host, header, CORS)       migrations, repositórios       subprocess, shell=False     |
+                         |                                        ^                                 |              |
+                         |   LocalInstagramSessionProvider        |                                 v              |
+                         |   (DPAPI, data\secrets)                |                     storage\processed, thumbs  |
+                         |        | InstagramSession              |                                                |
+                         |        v                               |                                                |
+                         |   CompositeInstagramDownloader --------+--> cdn_downloader --> storage\temp -> originals|
+                         |        | web, gallery_dl ou auto               (sem cookies, HTTPS, hosts permitidos)   |
+                         +--------|-------------------------------------------------------------------------------+
+                                  v
+                    web (padrão): InstagramWebDownloader, no próprio processo: HTTPS só para
+                    www.instagram.com (página inicial + POST /graphql/query com doc_id); cookies e tokens
+                    só em memória
+                    gallery_dl (ou fallback de auto): processo filho
+                    python -m app.integrations.instagram.gallerydl_runner
+                    (gallery-dl in-process; pedido e cookies pelo stdin; stdout = JSON lines; stderr redigido)
+```
+
+## 2. Módulos
+
+| Módulo | Responsabilidade |
+|---|---|
+| `app.main` | `create_app(settings=None)`; monta middlewares, routers, arquivos estáticos de `frontend\dist` com fallback SPA, startup (migrations, recovery, worker). |
+| `app.core.config` | `Settings` a partir de ambiente > `.env` > padrões; o `.env` não é copiado para `os.environ`. |
+| `app.core.logging` | Logging com filtro global que redige segredos conhecidos e padrões de `sessionid`/cookies. |
+| `app.core.security` | Headers de segurança e CSP, validação de Host, guarda de mutações (Origin + `X-Media-Tool-Client`), CORS (só em modo dev), `safe_join`/`ensure_within`. |
+| `app.api.limits` | Limite de 1 MB no corpo das requisições. |
+| `app.services.settings_service` | Settings editáveis pelo painel, incluindo a validação dos caminhos do FFmpeg/ffprobe, a estratégia `instagram_provider` (setting > env `MEDIA_TOOL_INSTAGRAM_PROVIDER` > `web`), os overrides `instagram_web_doc_ids` e o registro do último teste de sessão. |
+| `app.db` | Conexão SQLite (WAL, `foreign_keys=ON`), migrations numeradas em `app\db\migrations`, repositórios. |
+| `app.schemas` | Modelos Pydantic de entrada e saída da API. |
+| `app.services.storage` | Caminhos de storage, promoção atômica temp -> originals, nomes internos. |
+| `app.services.cdn_downloader` | Download seguro das URLs de CDN (validação de URL, DNS, redirects, tamanho, magic bytes). |
+| `app.services.import_service` | Cria lotes de importação e de processamento. |
+| `app.services.diagnostics` | Monta o relatório de `/api/diagnostics`. |
+| `app.services.system_open` | Abre arquivo ou pasta no Explorer (só caminhos dentro do storage). |
+| `app.jobs` | `worker` (claim com lease, heartbeat, pausa de downloads, manutenção), `pipeline` (etapas de ingest e process), `import_runner` (listagem), `recovery` (startup), `errors` (classificação retryable). |
+| `app.integrations.instagram.session` | `InstagramSession` (opaca), `LocalInstagramSessionProvider`, DPAPI via ctypes. |
+| `app.integrations.instagram.validation` | `parse_profile_input`, validação de shortcode e URL. |
+| `app.integrations.instagram.downloader` | Interface `InstagramDownloader`, `RemoteMedia`, `ProfileInfo`, `InstagramError`. |
+| `app.integrations.instagram.web` | Provider moderno (padrão), no próprio processo, em camadas: `http` (cliente httpx com host fixo, sem redirect automático, cookies só em memória) -> `errors` (classificação de respostas, mensagens sem jargão, `detail`) -> `bootstrap` (1 GET da página inicial; extrai `fb_dtsg`/`lsd`/viewer e calcula `jazoest`) -> `queries` (`doc_id` centralizado, `KNOWN_QUERIES`, overrides) -> `graphql` (`POST /graphql/query`, paginação com ritmo de 2 a 4 s, 1 re-bootstrap por operação) -> `normalize` (nó -> `RemoteMedia`) -> `provider` (`InstagramWebDownloader`). Contrato: [INSTAGRAM_WEB_CONTRACT.md](INSTAGRAM_WEB_CONTRACT.md). |
+| `app.integrations.instagram.composite` | `CompositeInstagramDownloader`: escolhe o provider pela estratégia (`web` padrão, `gallery_dl`, `auto` com fallback ao gallery-dl só em `contract_changed`/`unsupported_media`). |
+| `app.integrations.instagram.gallerydl` / `gallerydl_runner` | Implementação legada com gallery-dl em processo filho (estratégia `gallery_dl` ou fallback de `auto`). |
+| `media_processor` | `MediaProcessor` (probe, build_command, process, make_thumbnail), `ProcessingOptions`, `sha256_file`. |
+| `frontend` | Painel: Importar, Biblioteca, Fila, Presets, Configurações. |
+
+## 3. Fluxo de importação
+
+1. `POST /api/imports` valida o perfil (`parse_profile_input`) e cria um batch `listing`.
+2. O runner de importação (uma listagem por vez) chama `iter_profile_media(username, content, limit)` do adapter,
+   criado por operação (`downloader_factory` em `app.main`) como `CompositeInstagramDownloader`.
+   - Estratégia `web` (padrão): o `InstagramWebDownloader` abre a página inicial (1 GET), consulta as publicações por
+     `POST /graphql/query` com `doc_id`, página a página (2 a 4 s entre páginas; para após 2 páginas sem nós novos),
+     normaliza cada nó em `RemoteMedia` e para ao atingir o limite. Tokens e cookies vivem só nos objetos da operação.
+     Paginação comprovada no real em 2026-10-03 (1 GET + 2 POST; variáveis `after`/`before`/`first`/`last`
+     aceitas). Orçamento de paginação (`web/budget.py`): a listagem para por quantidade atingida, cancelamento, erro,
+     páginas seguidas sem item compatível com o filtro, rendimento baixo ou um teto de segurança proporcional ao
+     limite; parar por orçamento ou filtro não é erro. Números, checkpoint de retomada e backpressure:
+     [BATCH_ROBUSTNESS.md](BATCH_ROBUSTNESS.md). O limite "Todos" (`limit` nulo) está desabilitado (422
+     `limit_all_disabled`).
+   - Estratégia `gallery_dl` (ou fallback de `auto` em `contract_changed`/`unsupported_media`): o adapter inicia o
+     runner do gallery-dl como processo filho, envia o pedido JSON (com os cookies) pelo stdin e lê
+     `{"type": "item" | "profile" | "error" | "done"}` em JSON lines do stdout.
+3. Para cada `RemoteMedia` é criado um job `ingest` (`pending`), único por `(batch_id, source_post_id,
+   source_media_index)`. Ao terminar a listagem o batch vai para `running` (ou `failed` se falhou sem itens).
+   Se a mídia já existe pela origem, o job já nasce marcado como duplicado (`source_id`); se o lote não pede
+   processamento, ele é concluído direto com `stage=skipped`.
+4. O worker reivindica jobs `pending` com `next_attempt_at` vencido por um claim atômico com lease (`claimed_by`,
+   migration `0002`), respeitando a concorrência configurada. Com o Instagram pausado (seção 7), só não são
+   reivindicados ingests que ainda precisam baixar; jobs de processamento seguem.
+5. Ingest (`app.jobs.pipeline`): checagem por origem de novo -> `downloading` (adapter/cdn_downloader para
+   `storage\temp`) -> `hashing` (SHA-256) -> deduplicação por hash -> `probing` -> promoção atômica para
+   `storage\originals` -> `thumbnail` -> `downloaded`. No download puro (padrão, sem `params`) as etapas `probing`
+   e `thumbnail` não chamam ffprobe/FFmpeg: só validação por assinatura, sem miniatura nem metadados; a análise
+   fica para o processamento opcional (BATCH_ROBUSTNESS.md seção 10). Se a URL de CDN expirou (403/404/410), a URL é renovada uma
+   vez e o download é tentado uma vez de novo. Web: renovação por página (`refresh_page`: bootstrap + 1 POST da
+   página de origem do item, guardada no job; a página renovada atualiza todos os jobs pendentes dela, no máximo uma
+   vez a cada 10 min); ver [BATCH_ROBUSTNESS.md](BATCH_ROBUSTNESS.md) seção 2. gallery-dl:
+   `resolve_post(shortcode)`.
+6. Se o batch pede processamento: `processing` com o preset (ver seção 6) -> `completed`. Senão, `completed`.
+
+## 4. Estados
+
+Job (`status`):
+
+```
+ingest:   pending -> downloading -> completed                              (download-only, o padrão)
+ingest:   pending -> downloading -> downloaded -> processing -> completed  (com process: true)
+process:  pending -> processing -> completed
+qualquer: -> failed | cancelled
+```
+
+`stage` detalha a etapa: `queued`, `waiting_retry`, `downloading`, `hashing`, `probing`, `thumbnail`, `processing`,
+`finalizing`, `done`, `skipped`. `progress` vai de 0 a 1 ou é `null` quando não há medida real (nunca é inventado).
+
+Batch (`status`): `listing` -> `running` -> `completed` (todos os jobs terminais, mesmo com falhas parciais),
+`failed` (listagem falhou sem itens) ou `cancelled`. Progresso agregado: `{found, downloaded, processed, skipped,
+failed, pending, active}`.
+
+## 4.1 Lotes grandes (resumo de docs/BATCH_ROBUSTNESS.md)
+
+Contrato completo em `docs/BATCH_ROBUSTNESS.md`; aqui só o resumo:
+
+- Escala (seção 0): lotes de até 10.000 mídias. Listagem incremental com checkpoint persistido em `batches`
+  (`listing_cursor`, contadores, `listing_state` = `pending|running|waiting_backpressure|paused|needs_attention|done`).
+  Backpressure: para com `MAX_PENDING_INGEST` (100) por lote ou `MAX_PENDING_INGEST_GLOBAL` (200), volta abaixo de 40.
+  Na espera pelo teto de páginas por hora a API apresenta `waiting_rate_limit` (lote ativo, retoma sozinho).
+- Paginação (seção 1): para por improdutividade (`filter_exhausted`, `low_yield`), com teto de segurança proporcional
+  (`web/budget.py`); parar por orçamento ou filtro não é erro.
+- URL expirada (seção 2): renovação única da página de origem por (lote, página), registrada em `listing_pages`;
+  falha recente faz os irmãos falharem sem nova requisição. URLs e cursor em `job_remote_refs`, nunca na API ou log.
+- Autenticação (seções 3 e 7): `request_auth_failed` pausa 15 min e é recuperável; `session_invalid` só com
+  evidência forte. Nada apaga a sessão DPAPI.
+- Pausas (seções 4 e 8): controlador único `services/instagram_recovery.py` com backoff por motivo persistido em
+  `app_state` e verificação mínima no vencimento; portão global `InstagramRequestGate` (1 requisição em voo,
+  2-4 s entre páginas; 6-12 s por 1 h após 429; teto de 300 páginas por hora).
+- API e banco (seção 6): `GET /api/batches/{id}` sem jobs por padrão, keyset (`before_id`/`next_before_id`) em jobs e
+  mídia, `POST /api/media/process-by-filter`, índices de cobertura, retenção de 30 dias, `journal_size_limit`.
+- Revisão de 10.000 (seção 9): erros de rede na listagem pausam o lote com backoff (1m, 5m, 15m, 1h);
+  `access_refused`/`contract_changed` -> `needs_attention` e `POST /api/batches/{id}/resume-listing`; 409
+  `profile_already_importing`; disjuntor por lote (`batches.paused_reason`/`paused_until`); dois pools
+  (`download_concurrency` 1-4, `processing_concurrency` 1-2); pausa local `disk_full` (`services/disk.py`, mínimo
+  5 GB + 2 x max_download_bytes x download_concurrency, verificação a cada 1 min, sem consumir tentativa); FFmpeg em
+  Job Object; `SetThreadExecutionState` com lote ativo.
+- Operação (M6): em segundo plano o log da aplicação vai só para `logs\media-tool.log` (`MEDIA_TOOL_LOG_CONSOLE=0`
+  definido pelo `start.ps1`), uvicorn com `--no-access-log`, e `JobDetailFilter` (`app/core/logging.py`) rebaixa os
+  detalhes de etapa do logger `media_tool.jobs` (`Job N: ...`, `Job N iniciado`) para DEBUG, deixando uma linha por
+  job concluído, cancelado ou falho.
+- Interface: faixa global de disco insuficiente (lê `disk` de `GET /api/settings`), espaço livre em Configurações,
+  aviso de lote "Precisa de atenção" com **Retomar importação**, lote pausado com horário de retomada, mensagem para
+  `profile_already_importing` e os dois campos de concorrência.
+
+## 5. Deduplicação
+
+1. **Por origem, antes de baixar:** se já existe `media` com o mesmo `(source_platform, source_post_id,
+   source_media_index)`, o download não acontece; o job é marcado `is_duplicate=1`, `duplicate_reason=source_id`.
+2. **Por conteúdo, depois de baixar:** se o SHA-256 já existe (`media.original_sha256` é UNIQUE), o temporário é
+   descartado e o job é ligado à mídia existente com `duplicate_reason=sha256`.
+3. **Processamento:** se a mídia já tem rendition do mesmo preset com os mesmos params, o job termina `completed`
+   com `stage=skipped`; senão o original existente é processado.
+
+## 6. Processamento
+
+`ProcessingOptions` (`metadata_cleanup`, `trim_start`, `mirror`, `speed`, `auto_adjust`, `reencode`) vem dos params
+do preset. O `MediaProcessor` faz probe com ffprobe, monta o comando FFmpeg como lista (sem shell), escreve num
+temporário e renomeia; o original nunca é tocado. Vídeo: libx264 (crf ~20), yuv420p, dimensões pares, SAR 1, AAC se
+houver áudio, `+faststart`, sem metadados/capítulos, `setpts`/`atempo` para velocidade, corte com A/V sincronizados.
+Imagem: JPEG de alta qualidade (PNG continua PNG), hflip, sem EXIF, orientação aplicada. O resultado vai para
+`storage\processed\<yyyy>\<mm>\<media_id>_<job_id>_<sha8>.<ext>` e vira uma linha em `renditions`.
+
+## 7. Retry, cancelamento e recuperação
+
+- Erros `retryable` (classificados em `app.jobs.errors`; por exemplo `network_error`, `rate_limited`,
+  `download_failed` transitório) fazem `attempts+1`; se `attempts < max_attempts` (3) o job volta a `pending` com
+  `stage=waiting_retry` e `next_attempt_at` conforme `retry_delays` (30 s na 1a falha, 2 min na 2a); na 3a tentativa
+  o job vai para `failed`. O terceiro valor da tupla (10 min) só seria usado com `max_attempts` maior.
+- Pausa do Instagram (`Worker.pause_for` / `pause_downloads`, motivos em `worker.PAUSE_REASONS`): `rate_limited`
+  pausa por `rate_limit_pause_seconds` (600 s); `action_blocked` (resultado `restricted`: `feedback_*`, `spam`,
+  `restriction_enrollment_data` nesta chamada) não é retryable e aplica a pausa de proteção do Media Tool de
+  `action_blocked_pause_seconds` (1 h); `checkpoint_required` pausa por 24 h (`LONG_PAUSE_SECONDS`) até o usuário
+  concluir a verificação no navegador e liberar a pausa; `session_invalid` (só com evidência explícita) pausa com
+  teto de 24 h e é liberada automaticamente ao salvar a sessão (`PUT /api/settings/instagram/session`) ou atualizar
+  os cookies (`PATCH .../session/cookies`), via `clear_pause(only_reason="session_invalid")`, que não toca pausas de
+  outro motivo. `session_expired` não pausa. Todas são liberáveis em Configurações e nenhuma cria retry novo.
+  `access_refused` (302 para a home; no teste de sessão, `api_refused` + `detail=redirect_home`) não é retryable e
+  não pausa: `pause_for` ignora códigos fora de `PAUSE_REASONS`.
+  Origens que podem disparar a pausa: falha de job (pipeline), erro de listagem (import runner), prévia de perfil e
+  teste de sessão (todas via `pause_for(code)`). O fim e o motivo ficam em `app_state`
+  (`instagram_downloads_paused_until`, `instagram_pause_reason`), são relidos no startup (pausa com motivo antigo
+  `access_refused` é descartada) e uma pausa nova sempre persiste o maior fim entre a vigente (memória ou banco) e a
+  nova.
+- Teste de sessão: uma requisição ao endpoint que o downloader usa (`feed/user`). O resultado separa
+  `session_recognized` (Set-Cookie apagando o `sessionid`, redirect para login ou `require_login` = false) e
+  `listing_api` (`ok`/`refused`/`rate_limited`/`unknown`); `api_refused` = sessão reconhecida e listagem recusada.
+- Durante a pausa nada automático fala com o Instagram: o claim não pega ingests que precisam baixar,
+  `POST /api/imports` e `POST /api/instagram/profile` respondem 409 `instagram_paused` (mensagem com horário local de
+  fim e motivo), e o import runner não inicia listagens (lotes em `listing` esperam a pausa terminar; não falham).
+  O teste de sessão continua permitido (ação manual, uma por vez) e devolve `paused_until`/`pause_reason`.
+  Liberação manual: `DELETE /api/settings/instagram/pause` limpa a pausa e acorda worker e import runner.
+- Cancelamento: `cancel_requested` é sinalizado ao job ativo (o evento de cancelamento é repassado à listagem, ao
+  download e ao `MediaProcessor.process`); a manutenção do worker conclui cancelamentos de jobs ociosos.
+- Heartbeat: o worker atualiza `heartbeat_at` dos jobs ativos; job com lease e sem heartbeat por mais de
+  `stale_job_seconds` (600 s) é considerado travado e reenfileirado pela manutenção.
+- Recovery no startup (`app.jobs.recovery`, antes do worker e do import runner): jobs `downloading`, `processing` ou
+  com lease voltam para a fila (`downloading` -> `pending`, `processing` -> `downloaded`), com `attempts+1` e
+  `error_code=interrupted`; esgotado -> `failed`; os que tinham cancelamento pedido viram `cancelled`. Batches
+  `listing` continuam em `listing` e o import runner retoma a listagem sem duplicar jobs. Temporários órfãos em
+  `storage\temp` são removidos (somente dentro de temp). Nenhum job é marcado `completed` sem arquivo verificado.
+
+## 8. Banco
+
+SQLite em `data\media-tool.db`, WAL, `foreign_keys=ON`, migrations em `backend\app\db\migrations\NNNN_nome.sql`
+registradas em `schema_migrations`: `0001_initial.sql` (schema e seed dos presets Padrão e Anti-duplicidade) e
+`0002_job_lease.sql` (coluna `jobs.claimed_by` e índice parcial para o lease). Tabelas: `presets`, `media`, `renditions`, `batches`, `jobs`, `settings`,
+`app_state`. Nenhuma tabela guarda sessão ou cookies; `app_state.instagram_session_last_test` guarda só o resultado
+do último teste (`ok`, `code`, `message`, `username`, `tested_at`). Datas em ISO 8601 UTC com `Z`.
+
+## 9. Segurança
+
+- **Rede:** bind só em `127.0.0.1`; Host aceito `127.0.0.1:<porta>` e `localhost:<porta>` (proteção contra DNS
+  rebinding, `invalid_host`). Mutações (POST, PUT, PATCH, DELETE) exigem `X-Media-Tool-Client` não vazio (o painel
+  envia `panel`; senão 403 `client_header_required`) e, se vier `Origin`, ela precisa estar na lista permitida
+  (senão 403 `origin_not_allowed`).
+- **Modo dev:** a lista permitida é só a do próprio backend (`http://127.0.0.1:<porta>`, `http://localhost:<porta>`).
+  Com `MEDIA_TOOL_DEV=1` (`Settings.dev_mode`) entram também `http://127.0.0.1:5173` e `http://localhost:5173`, com
+  CORS para essas origens; sem ele não há CORS. O `start.ps1 -Dev` define a variável só no processo do backend.
+- **Limites e headers:** corpo de requisição até 1 MB (`app.api.limits`, 413 `payload_too_large`);
+  Content-Security-Policy `default-src 'self'` com `script-src 'self'`, `object-src 'none'`, `base-uri 'none'`,
+  `frame-ancestors 'none'`, `form-action 'self'` e imagens só locais ou da CDN do Instagram (`/docs` e
+  `/openapi.json` ficam sem CSP por causa do Swagger); `nosniff`, `no-referrer`, `X-Frame-Options: DENY`.
+- **FFmpeg configurável:** `app.services.settings_service` só aceita caminho absoluto, local (sem UNC nem unidade de
+  rede), arquivo existente chamado `ffmpeg.exe`/`ffprobe.exe` que responde a `-version` como a ferramenta certa.
+- **Sessão:** `data\secrets\instagram-session.bin` com JSON cifrado por DPAPI (`CryptProtectData`, escopo do usuário
+  atual), escrita atômica, ACL restringida ao usuário atual (`icacls /inheritance:r /grant:r`, sem shell).
+  Precedência: arquivo; senão `INSTAGRAM_SESSIONID` (ambiente ou `.env`). `InstagramSession` tem `repr` redigido e não é serializável; só o adapter chama
+  `cookies()`. Os cookies chegam ao gallery-dl pelo stdin do processo filho, nunca por argv, variável de ambiente do
+  filho ou arquivo em texto puro. `INSTAGRAM_SESSIONID` é só fallback. No provider web, cookies e tokens da página
+  (`fb_dtsg`, `lsd`, `jazoest`) ficam só em memória, em objetos com `__slots__`, `repr` redigido e sem serialização,
+  descartados no fim da operação; diagnósticos têm só status, path, nomes de chaves/marcadores e `detail`.
+- **Logs:** filtro global redige valores de segredo conhecidos e padrões de `sessionid`/cookies; o stderr do
+  gallery-dl é redigido antes de ser logado.
+- **Downloads:** só `https` na porta 443, hosts `*.cdninstagram.com` / `*.fbcdn.net`, sem userinfo, DNS resolvido
+  com IPs privados/loopback/link-local/reservados rejeitados, redirects revalidados (máx. 3), limite de tamanho,
+  sem cookies, verificação de magic bytes.
+- **Arquivos:** nomes internos derivados de hash/ids (nunca da origem), nada é sobrescrito; `system_open` só abre
+  caminhos dentro das raízes permitidas (`ensure_within`) e, pelo aplicativo padrão, só extensões de mídia
+  (`.mp4`, `.mov`, `.jpg`, `.png`, `.webp`...), nunca executáveis.
+- **Processos:** FFmpeg, ffprobe e o runner rodam com lista de argumentos e `shell=False`.
+
+## 10. Scripts
+
+| Script | Função |
+|---|---|
+| `scripts\setup.ps1` | Pastas, `.venv` (reusa se existir), requirements, processor editable, gallery-dl editable (só se ausente), npm ci/install + build, checagem de FFmpeg. `-SkipPython`, `-SkipFrontend`. |
+| `scripts\start.ps1` | Valida ambiente e porta, inicia uvicorn em segundo plano com `--no-access-log` e `MEDIA_TOOL_LOG_CONSOLE=0` (log da aplicação só em `logs\media-tool.log`; `logs\backend.*.log` só com mensagens do servidor; PID em `data\.runtime\backend.pid`), espera `/api/health`. `-Dev`, `-Foreground`, `-Open`, `-Port`, `-NoBuild`. Ambiente só dos filhos: backend recebe `MEDIA_TOOL_HOST`/`MEDIA_TOOL_PORT`, `MEDIA_TOOL_DEV=1` só com `-Dev` (removido sem `-Dev`) e nenhuma `INSTAGRAM_*` exceto `INSTAGRAM_SESSIONID`; o Vite recebe `MEDIA_TOOL_PORT` (alvo do proxy) e nenhuma `INSTAGRAM_*`. |
+| `scripts\stop.ps1` | Encerra por PID file com árvore de processos (confirmando a linha de comando); fallback pela porta só para `uvicorn app.main:app`; idempotente. |
+| `scripts\set-instagram-session.ps1` | Salva (sem parâmetros, entrada oculta, valor só pelo stdin), `-Status` ou `-Clear`. |
+| `scripts\poc-instagram.ps1` | Prova de conceito do adapter gallery-dl (legado) com 1 mídia: `-Username <perfil>` (obrigatório), `-Content reels\|posts\|videos\|images\|all` (padrão `reels`). |
+| `scripts\poc-instagram-web.ps1` | Prova de conceito do provider web sobre o app real (SQLite e storage reais): `-Username <perfil>` (obrigatório), `-Content` (padrão `all`), `-Process`. Usa 1 mídia, para no primeiro erro e recusa rodar com o app aberto ou com a fila ocupada. |
+| `scripts\lib\common.ps1` | Funções comuns (processos, PID files, porta, HTTP local, logs). |
+
+Observação: no Windows, `.venv\Scripts\python.exe` é um lançador que cria o processo do Python base; por isso o PID
+gravado é o do lançador e o `stop.ps1` encerra a árvore inteira (`taskkill /T /F`).

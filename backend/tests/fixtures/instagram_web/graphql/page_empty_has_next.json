@@ -1,0 +1,17 @@
+{
+ "data": {
+  "xdt_api__v1__feed__user_timeline_graphql_connection": {
+   "edges": [],
+   "page_info": {
+    "end_cursor": "FAKE_CURSOR_PAGE_2",
+    "has_next_page": true,
+    "has_previous_page": false,
+    "start_cursor": null
+   }
+  }
+ },
+ "extensions": {
+  "is_final": true
+ },
+ "status": "ok"
+}

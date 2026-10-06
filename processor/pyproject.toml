@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "media-processor"
+version = "0.1.0"
+description = "Media Tool: processamento de mídia via FFmpeg/ffprobe (V1)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["media_processor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

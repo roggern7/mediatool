@@ -1,0 +1,10 @@
+{
+ "errors": [
+  {
+   "message": "PersistedQueryNotFound: document \"FAKE\" not found",
+   "severity": "CRITICAL",
+   "code": 1675002
+  }
+ ],
+ "status": "ok"
+}

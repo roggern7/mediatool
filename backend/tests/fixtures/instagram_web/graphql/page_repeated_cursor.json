@@ -1,0 +1,61 @@
+{
+ "data": {
+  "xdt_api__v1__feed__user_timeline_graphql_connection": {
+   "edges": [
+    {
+     "node": {
+      "code": "FAKEIMG0002",
+      "pk": "3100000000000000005",
+      "id": "3100000000000000005_900000001",
+      "caption": {
+       "text": "legenda falsa #fake",
+       "pk": "31000000000000000059"
+      },
+      "carousel_media": null,
+      "carousel_media_count": null,
+      "has_audio": null,
+      "image_versions2": {
+       "candidates": [
+        {
+         "url": "https://scontent-fake.cdninstagram.com/v/t51.fake/img2_1080x1080.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "width": 1080,
+         "height": 1080
+        }
+       ]
+      },
+      "media_type": 1,
+      "original_height": 1350,
+      "original_width": 1080,
+      "owner": {
+       "id": "900000001",
+       "pk": "900000001"
+      },
+      "product_type": "feed",
+      "taken_at": 1699990000,
+      "user": {
+       "pk": "900000001",
+       "id": "900000001",
+       "username": "perfil_fake",
+       "full_name": "Perfil Fake",
+       "profile_pic_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/avatar.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+       "is_private": false
+      },
+      "video_dash_manifest": null,
+      "video_versions": null
+     },
+     "cursor": null
+    }
+   ],
+   "page_info": {
+    "end_cursor": "FAKE_CURSOR_PAGE_1",
+    "has_next_page": true,
+    "has_previous_page": false,
+    "start_cursor": null
+   }
+  }
+ },
+ "extensions": {
+  "is_final": true
+ },
+ "status": "ok"
+}

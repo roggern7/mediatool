@@ -1,0 +1,543 @@
+# Contrato: provider moderno do Instagram Web (GraphQL persistido)
+
+Complementa `docs/CONTRACTS.md` (seções 3, 4 e 8) e `docs/instagram-gallerydl-notes.md` (histórico). Código em
+`backend/app/integrations/instagram/web/` e `backend/app/integrations/instagram/composite.py`. O gallery-dl upstream
+não é modificado.
+
+## Por que existe
+
+O gallery-dl 1.32.14 lista posts por `GET /api/v1/feed/user/<id>/` (REST, recebeu 302 para `/`) ou por
+GraphQL legado `GET /graphql/query/?query_hash=...` (recebeu 400). O Instagram Web atual (evidência do Chrome do
+dono, mesma conta e IP) carrega o perfil por `POST /graphql/query` com `doc_id` persistido; a consulta de posts é
+`PolarisProfilePostsQuery` e responde `data.xdt_api__v1__feed__user_timeline_graphql_connection` com `edges[].node`
+e `page_info`, já contendo URLs de mídia (`image_versions2`, `video_versions`, `carousel_media`).
+
+## Camadas (um dono por arquivo)
+
+```
+InstagramSessionProvider (existente, DPAPI)
+  -> web/http.py        InstagramWebHttp       cliente httpx em memória, host fixo, sem redirect automático
+  -> web/errors.py      InstagramWebError      classificação de respostas (classify_response) e mensagens
+  -> web/bootstrap.py   WebBootstrap           GET do documento, extrai fb_dtsg/lsd (viewer só como pista), calcula jazoest
+  -> web/queries.py     QuerySpec + registro   doc_id versionado e centralizado, overrides, variáveis por consulta
+  -> web/graphql.py     InstagramWebGraphQL    POST mínimo, paginação, ritmo, detecção de contrato quebrado
+  -> web/normalize.py   node -> RemoteMedia    imagem, vídeo/reel, carrossel (contrato interno existente)
+  -> web/provider.py    InstagramWebDownloader implementa InstagramDownloader (downloader.py)
+  -> composite.py       CompositeInstagramDownloader  estratégia web (padrão) | gallery_dl | auto
+  -> pipeline existente (cdn_downloader -> temp -> SHA-256 -> dedupe -> originals -> SQLite -> fila -> FFmpeg)
+```
+`app/main.py` cria, por operação, um `InstagramWebDownloader` (com `doc_id_overrides` do setting e `env=Settings.env`)
+e um `GalleryDlInstagramDownloader`, e devolve o `CompositeInstagramDownloader` com a estratégia efetiva. Os objetos
+http/bootstrap/graphql do provider web também são criados por operação e descartados (o cliente HTTP é fechado) no
+fim dela.
+
+Donos: `builder-web-core` = http.py, bootstrap.py, errors.py + testes/fixtures deles;
+`builder-web-graphql` = queries.py, graphql.py, normalize.py + testes/fixtures deles;
+`builder-web-provider` = provider.py, composite.py, `downloader.py` (códigos e SessionTestResult), main.py/config/
+settings/schemas/settings_service (estratégia e teste de sessão), testes de integração;
+`frontend` = exibição do teste de sessão e do método de importação.
+
+## Regras de segredo (todas as camadas)
+
+Valores de `sessionid`, `csrftoken`, `ds_user_id`, `mid`, `ig_did`, `fb_dtsg`, `lsd`, `jazoest`, claims e qualquer
+token: só em memória; nunca em logs, stdout/stderr, exceções, SQLite, respostas de API, argv, arquivos, fixtures.
+Objetos que carregam tokens têm `__repr__` redigido e não são serializáveis. Corpo HTML/JSON de resposta nunca é
+logado; diagnósticos usam apenas: status, path sem query, content-type, tamanho, nomes de chaves, nomes de
+marcadores encontrados/ausentes, códigos de erro do Instagram e um `detail` curto (ver "Detail codes"). Valores de
+tokens extraídos e de cookies do jar são registrados em `app.core.logging.register_secret` para redação defensiva.
+Fixtures usam valores obviamente falsos (`FAKE_DTSG_...`, `FAKE_LSD_...`). O `doc_id` não é segredo.
+
+## Mensagens ao usuário
+
+Mensagens em português simples, sem jargão (sem "token", "bootstrap", "GraphQL", "doc_id"); o detalhe técnico vai só
+em `diagnostic["detail"]` e nos logs. Exemplos de `web/errors.py` e `web/bootstrap.py`:
+- `contract_changed`: "O Instagram mudou a forma de responder e o Media Tool precisa ser atualizado." (no bootstrap:
+  "O Instagram mudou a forma de carregar a página e o Media Tool precisa ser atualizado.").
+- `access_refused`: "O Instagram recusou esta consulta. Isso não indica sessão inválida."
+- `session_invalid`: "O Instagram não reconheceu a sessão salva. Salve uma sessão nova em Configurações."
+
+As mensagens de `web/graphql.py` seguem a mesma regra: `contract_changed` usa o texto acima e a recusa da sessão
+após a única renovação diz "O Instagram não aceitou a sessão salva para consultar publicações. Salve uma sessão nova
+em Configurações." (detail `web_token_rejected`).
+
+## web/errors.py (builder-web-core)
+
+```python
+class InstagramWebError(InstagramError):   # subclasse do erro existente; pipeline já entende .code/.retryable
+    def __init__(self, code: str, message: str, *, retryable: bool = False, stage: str = "",
+                 diagnostic: Mapping[str, object] | None = None)
+    code: str          # preservado mesmo fora de ERROR_CODES
+    stage: str         # bootstrap, document, graphql, topsearch, http, normalize
+    diagnostic: dict   # só dados seguros; strings redigidas e truncadas, listas limitadas
+
+def classify_response(resp: WebResponse, *, stage: str) -> InstagramWebError | None   # None = resposta utilizável
+def redirect_kind(location_path: str | None) -> str
+def loads_json(text: str) -> object       # aceita o prefixo anti-hijacking "for (;;);"
+DOCUMENT_STAGES = frozenset({"bootstrap", "document"})   # stages que esperam HTML; os outros esperam JSON
+```
+Códigos (os novos estão em `downloader.ERROR_CODES`): `contract_changed` (novo; formato esperado sumiu),
+`unsupported_media` (novo; só tipos de mídia que o app não baixa), `session_invalid`, `session_expired`,
+`checkpoint_required`, `rate_limited` (retryable), `action_blocked`, `access_refused`, `network_error` (retryable),
+`timeout` (retryable), `content_unavailable`, `profile_not_found`, `profile_private`.
+
+Ordem de `classify_response`: checkpoint/challenge > 429 > login/require_login/sessionid apagado/"please wait a few
+minutes" > feedback/restriction (campos de topo) > outros 3xx > 401/403 > 5xx > 2xx com JSON inválido quando o stage
+espera JSON (`contract_changed`) > qualquer outro status (`contract_changed`, ex.: 400, 404). Corpo HTML nunca é
+varrido em busca de marcadores (o JavaScript embutido daria falso positivo).
+
+### Detail codes (`diagnostic["detail"]`; também vão para `last_test.detail`)
+
+| Origem | code | detail |
+|---|---|---|
+| errors.py | `checkpoint_required` | `redirect_challenge`, `redirect_checkpoint`, `checkpoint_marker` |
+| errors.py | `rate_limited` | `http_429`, `please_wait` |
+| errors.py | `session_expired` | `redirect_login` |
+| errors.py | `session_invalid` | `require_login`, `sessionid_deleted`, `http_401` |
+| errors.py | `action_blocked` | `restriction_fields` |
+| errors.py | `access_refused` | `redirect_home`, `redirect_consent`, `redirect_other`, `http_403` |
+| errors.py | `network_error` | `http_<5xx>` |
+| errors.py | `contract_changed` | `invalid_json`, `http_<status>` |
+| bootstrap.py | `contract_changed` | `token_marker_missing` |
+| graphql.py | `session_invalid` | `web_token_rejected` |
+| graphql.py | `profile_private` / `content_unavailable` | `root_null_private` / `root_null_authenticated` |
+| graphql.py | `contract_changed` | `invalid_json`, `not_object`, `persisted_query_error`, `missing_data`, `missing_root_field`, `root_not_object`, `edges_not_list`, `page_info_missing`, `repeated_cursor`, `cursor_missing_with_errors` |
+| provider.py | `unsupported_media` | `unsupported_media` |
+
+`timeout` e `network_error` do cliente HTTP (stage `http`) não têm `detail`; o diagnóstico traz método, path e o nome
+da exceção. Só nos logs (não são erros): `empty_page`, `no_new_items`, `max_pages`,
+`cursor_missing_end_of_profile`.
+
+## web/http.py (builder-web-core)
+
+```python
+@dataclass(frozen=True)
+class WebHttpConfig:
+    timeout: float = 15.0                 # prazo total por requisição; retries 0
+    user_agent: str = <USERAGENT_CHROME do gallery-dl, ou um Chrome fixo se ausente>
+    app_id: str = "936619743392459"
+    asbd_id: str = "359341"               # aceito no real (2026-10-03); necessidade não isolada; configurável
+    accept_language: str = "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+
+class WebResponse:      # classe com __slots__ (sem __dict__): vars/asdict não a expõem
+    __slots__ = ("status", "location_path", "content_type", "elapsed_ms", "set_cookie_names",
+                 "sessionid_deleted", "text", "path")
+    text: str           # NUNCA logar; repr não mostra
+    path: str           # path da requisição, sem query (diagnósticos)
+    def json(self) -> object   # aceita "for (;;);"; ValueError se inválido
+    # repr/str/format redigidos; pickle e copy/deepcopy levantam TypeError
+
+class InstagramWebHttp:
+    BASE = "https://www.instagram.com"
+    def __init__(self, session: InstagramSession, config: WebHttpConfig = WebHttpConfig(), *,
+                 transport: httpx.BaseTransport | None = None)    # transport para testes
+    def get_document(self, path: str, *, referer: str | None = None) -> WebResponse   # headers de navegação
+    def get_api(self, path: str, params: Mapping[str, str] | None = None, *, referer: str | None = None) -> WebResponse
+    def post_form(self, path: str, form: Mapping[str, str], headers: Mapping[str, str]) -> WebResponse
+    def csrftoken(self) -> str | None      # do jar (pode ser renovado por Set-Cookie); nunca logado
+    def account_id(self) -> str | None     # cookie ds_user_id do jar; nunca logado, registrado no redator
+    def close(self) -> None
+```
+Sempre `follow_redirects=False`, host fixo (path deve começar com `/`, sem `//`, `\`, esquema, host ou caracteres de
+controle), `trust_env=False`, cookies da sessão no jar com domínio `.instagram.com` e path `/`; Set-Cookie de resposta
+atualiza só o jar em memória (um cookie por nome; Set-Cookie que apaga o `sessionid` remove todas as cópias e marca
+`sessionid_deleted`). Cancelamento é verificado entre requisições pelo chamador; cada requisição tem prazo total
+(checado entre chunks).
+
+## web/bootstrap.py (builder-web-core)
+
+```python
+class WebState:         # classe com __slots__ (sem __dict__): vars/asdict não a expõem
+    __slots__ = ("fb_dtsg", "lsd", "jazoest", "viewer_id", "app_id", "created_at")
+    # viewer_id: viewer do HTML quando real (!= "0"), senão None; NÃO prova sessão (só pista)
+    # repr/str/format redigidos ("WebState(<redacted>, html_viewer=...)"); pickle e copy/deepcopy levantam TypeError
+
+@dataclass
+class BootstrapParse:              # seguro para log: só nomes/booleanos
+    markers_found: list[str]; markers_missing: list[str]
+    html_viewer_hint: str          # "real" | "zero" | "absent" (pista, nunca o valor)
+
+def parse_bootstrap(html: str) -> tuple[WebState | None, BootstrapParse]
+def compute_jazoest(fb_dtsg: str) -> str   # "2" + soma dos códigos dos caracteres
+
+class WebBootstrap:
+    def __init__(self, http: InstagramWebHttp, *, ttl: float = 900.0, path: str = "/")
+    def get(self, *, force: bool = False) -> WebState   # 1 GET do documento; cache em memória com TTL
+    def invalidate(self) -> None
+```
+Marcadores aceitos (vários formatos, aspas opcionalmente escapadas, primeiro que casar): fb_dtsg em
+`"DTSGInitialData",[],{"token":"..."}`, `"DTSGInitData",[],{"token":"..."}`, `{"name":"fb_dtsg","value":"..."}` (em
+qualquer ordem), `"dtsg":{"token":"..."}`; lsd em `"LSD",[],{"token":"..."}` ou `"lsd":"..."`; viewer em
+`"USER_ID":"..."`, `"viewerId":"..."`, `"actorID":"..."`; app id (opcional) em `"APP_ID"` ou `"appId"`.
+
+Erros, nesta ordem: status/redirect via `classify_response` (stage `bootstrap`; login, `require_login`,
+`sessionid` apagado etc.); sem fb_dtsg ou lsd -> `contract_changed` (`token_marker_missing`). O diagnóstico traz
+`markers_found`, `markers_missing`, `size` e `html_viewer_hint`.
+
+**O viewer do HTML inicial NÃO classifica a sessão.** Evidência do navegador do dono, com sessão LOGADA: o HTML
+inicial de instagram.com trouxe `"USER_ID":"0"` e, no mesmo navegador, `PolarisProfilePostsQuery` respondeu HTTP 200
+com `data.xdt_api__v1__feed__user_timeline_graphql_connection.edges` preenchido e `data.xdt_viewer.user.id` presente
+(a identidade chega depois, na hidratação/respostas GraphQL). A POC real também recebeu documento 200 com
+DTSGInitialData, LSD, USER_ID `"0"` e APP_ID. Por isso viewer `"0"` ou ausente com fb_dtsg+lsd presentes é um
+`WebState` normal (`viewer_id` None); o viewer fica só como pista (`html_viewer_hint`) no diagnóstico e no log.
+
+## web/queries.py (builder-web-graphql)
+
+```python
+@dataclass(frozen=True)
+class QuerySpec:
+    name: str              # fb_api_req_friendly_name
+    doc_id: str
+    root_field: str        # chave esperada dentro de data
+    observed_at: str       # data da evidência
+    relay_providers: Mapping[str, bool]
+
+PROFILE_POSTS = QuerySpec("PolarisProfilePostsQuery", "28991540097136703",
+    "xdt_api__v1__feed__user_timeline_graphql_connection", "2026-10-03",
+    {"__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider": False,
+     "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": False,
+     "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": False})
+
+KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name,)   # nomes aceitos em instagram_web_doc_ids
+DOC_ID_RE = re.compile(r"[0-9]{5,25}")                    # só dígitos ASCII, com fullmatch
+ENV_PREFIX = "MEDIA_TOOL_IG_DOC_"
+
+def resolve_spec(spec: QuerySpec, overrides: Mapping[str, str], env: Mapping[str, str] | None = None) -> QuerySpec
+def profile_posts_variables(spec: QuerySpec, username: str, count: int, after: str | None) -> dict
+```
+`queries.py` é o único arquivo de código com `doc_id`.
+
+Precedência do `doc_id` (por nome, sem diferenciar maiúsculas): setting `instagram_web_doc_ids` > env
+`MEDIA_TOOL_IG_DOC_<NAME>` (ex.: `MEDIA_TOOL_IG_DOC_POLARISPROFILEPOSTSQUERY`), lida de `Settings.env`, que junta o
+ambiente do processo e o `.env` (o ambiente vence o `.env`; `os.environ` não é lido direto) > valor embutido.
+Override inválido (fora de `[0-9]{5,25}`) cai para a próxima fonte, com aviso que não mostra o valor. Nomes fora de
+`KNOWN_QUERIES` são ignorados com aviso que não mostra nome nem valor. A API (`PUT /api/settings`) já rejeita nome
+desconhecido, nome repetido e `doc_id` inválido com 422.
+
+Variáveis da 1a página exatamente como observado: `data={count, include_reel_media_seen_timestamp: true,
+include_relationship_info: true, latest_besties_reel_media: true, latest_reel_media: true}`, `username`, e os
+relay providers. Páginas seguintes: acrescentar `after=<cursor>`, `before=None`, `first=<count>`, `last=None`
+(padrão Relay de conexão; **verificado no Instagram real em 2026-10-03**: página 2 HTTP 200 com itens novos e sem
+duplicatas).
+
+## web/graphql.py (builder-web-graphql)
+
+```python
+DEFAULT_PAGE_DELAY = (2.0, 4.0)   # segundos entre páginas (a partir da 2a), sorteado no intervalo
+NO_NEW_PAGES_LIMIT = 2            # páginas seguidas só com nós já vistos antes de parar
+TOKEN_ERROR_CODES = frozenset({1357001, 1357004})
+
+class InstagramWebGraphQL:
+    def __init__(self, http: InstagramWebHttp, bootstrap: WebBootstrap, *, overrides: Mapping[str, str] = {},
+                 env: Mapping[str, str] | None = None, page_delay: tuple[float, float] = DEFAULT_PAGE_DELAY,
+                 sleep: Callable[[float], None] | None = None)
+    def query(self, spec: QuerySpec, variables: Mapping[str, object], *, referer_path: str = "/") -> dict
+        # retorna data[spec.root_field]
+    def iter_profile_posts(self, username: str, *, max_media: int | None, page_size: int = 12,
+                           max_pages: int = 500, cancel: threading.Event | None = None,
+                           on_page: Callable[[dict], None] | None = None) -> Iterator[dict]
+        # gera nós sob demanda; max_media só reduz o count da 1a página; quem conta mídias e para é o chamador
+    last_viewer_id: str | None                 # xdt_viewer.user.id da última resposta com dados
+    listing_account_confirmation: str | None   # estado da conta na 1a resposta da última listagem
+
+def account_confirmation(viewer_id: object, account_id: object) -> str
+    # "confirmed" | "different_account" | "not_confirmed"
+```
+Formulário mínimo do POST `/graphql/query` (cada campo justificado; nada de dezenas de `__*`):
+`av` (id da conta: viewer do HTML quando real, != `"0"`; senão o `ds_user_id` dos cookies da sessão,
+`InstagramWebHttp.account_id()`; senão `"0"`), `__user`=`0`, `__a`=`1`, `__comet_req`=`7`, `fb_dtsg`, `jazoest`, `lsd`,
+`fb_api_caller_class`=`RelayModern`, `fb_api_req_friendly_name`, `variables` (JSON compacto),
+`server_timestamps`=`true`, `doc_id`. Headers: `Content-Type: application/x-www-form-urlencoded`,
+`X-CSRFToken` (cookie `csrftoken`, se houver), `X-IG-App-ID` (do documento, senão o de `WebHttpConfig`), `X-FB-LSD`,
+`X-FB-Friendly-Name`, `X-ASBD-ID` (de `WebHttpConfig`), `X-Root-Field-Name`, `Origin: https://www.instagram.com`,
+`Referer: https://www.instagram.com/<username>/`, `Sec-Fetch-*` de cors same-origin.
+
+**Situação dos campos no Instagram real (2026-10-03):** as variáveis de paginação (`after`, `before`, `first`,
+`last`) foram verificadas (POC de paginação e POCs de 10/20). `av` (= ds_user_id), `__a`, `__comet_req`, o header
+`X-Root-Field-Name` e o valor de `X-ASBD-ID` foram ACEITOS nas requisições reais bem-sucedidas, mas a necessidade de
+cada um não foi isolada (não testamos removê-los), e o valor exato de `av` que o navegador envia não foi capturado.
+
+Re-bootstrap: no máximo **1 por operação** (não por página; a listagem inteira compartilha o mesmo controle). Dispara
+quando a resposta indica token/sessão web recusado (códigos 1357001/1357004, mensagem de `errors` com
+`fb_dtsg`/`csrf`/`lsd`/`login`, ou 403 em JSON com esses termos em `message`/`errorSummary`/`errorDescription`;
+403 com corpo HTML ou texto nunca conta e segue `access_refused` sem re-bootstrap) e a classificação foi "utilizável",
+`session_invalid`, `contract_changed` ou `access_refused` vindo de 403. Se recusar de novo: `session_invalid`
+(`web_token_rejected`). Só é avaliado quando `data[root_field]` útil está ausente: com dados, `errors` parciais
+(mesmo citando login) só geram aviso no log e os dados são usados. Resposta 200 com raiz null/ausente cujo
+`data.xdt_viewer.user.id` é igual ao `ds_user_id` da sessão (sessão comprovadamente autenticada) não é token/sessão
+recusada: vira `profile_private` (`root_null_private`, se `errors` cita privado) ou `content_unavailable`
+(`root_null_authenticated`), sem re-bootstrap.
+
+Contrato quebrado (`contract_changed`): JSON inválido ou não-objeto, JSON sem `data`, `data` sem `root_field`,
+`errors` com mensagem de documento/consulta persistida inexistente (só sem dados úteis), raiz não-objeto, `edges`
+não-lista, `page_info` ausente, cursor repetido. `errors` parcial junto com dados úteis só gera aviso no log.
+Diagnóstico seguro: status, chaves de topo, chaves de `data`, códigos e mensagens curtas de `errors` (sem trechos
+entre aspas, sem tokens).
+
+Paginação e ritmo: nunca espera antes da 1a página; entre páginas espera de 2 a 4 s (sorteado; acorda na hora se
+`cancel` for acionado); `cancel` checado antes de cada requisição; `has_next_page` false ou cursor nulo encerra (exceção: `has_next_page` true sem cursor numa resposta com `errors` -> `contract_changed`/`cursor_missing_with_errors`; sem `errors` encerra com o aviso `cursor_missing_end_of_profile`);
+página vazia com `has_next_page` true encerra com aviso (`empty_page`); ids (`pk`/`id`) já vistos são pulados;
+**2 páginas seguidas sem nós novos** encerram com aviso (`no_new_items`); cursor repetido -> `contract_changed`
+(`repeated_cursor`); `max_pages` defensivo (500; 3 na renovação de URL; 1 no teste de sessão).
+
+Prova de autenticação pela resposta: `InstagramWebGraphQL.last_viewer_id` = `data.xdt_viewer.user.id` da última
+resposta com dados (None se `xdt_viewer` faltar, for null, `user` for null ou o id for vazio/`"0"`). Nunca é logado;
+fica registrado no redator.
+
+Estado semântico da conta (`account_confirmation(viewer_id, account_id)`, função única usada pela listagem, pelo
+`on_page` e pelo teste de sessão): compara `str(...).strip()` de `xdt_viewer.user.id` com o `ds_user_id` da sessão.
+`confirmed` = iguais; `different_account` = ambos presentes e diferentes; `not_confirmed` = algum ausente, null, vazio
+ou `"0"`. Só o estado vai para log/saída; os ids nunca. Na listagem, `listing_account_confirmation` é calculado da
+**primeira** resposta de `iter_profile_posts` (sem chamada extra; None antes dela).
+
+Observação de páginas (`on_page`, opcional; sem custo quando None): chamado após cada resposta válida, antes de os nós
+da página serem entregues (também é chamado quando o consumidor para no meio da página), com metadados seguros:
+`page_index` (1..), `http_status`, `edges_count`, `has_next_page`, `end_cursor_present` (bool; nunca o valor),
+`cursor_changed` (bool: cursor presente e diferente do `after` enviado), `variables_keys` (nomes das variáveis
+enviadas; na página 2 inclui `after`, `before`, `first`, `last` do padrão Relay, verificado no real), `new_nodes`, `duplicate_nodes`
+(ids já vistos na listagem, descartados) e `account_confirmation` da página.
+
+### Respostas 200 com `errors`
+
+**Aceito (sem falha, sem nova tentativa):** HTTP 200 com `data[root_field]` objeto, `edges` lista e `page_info`
+objeto, mesmo com `errors` junto (em qualquer formato: lista, objeto, texto, itens não-objeto). Os dados recebidos são
+usados, o cursor de `page_info` é seguido e o checkpoint da página é gravado normalmente. Sem dados úteis nada muda:
+`data` nulo/ausente, raiz ausente ou não-objeto, `edges` não-lista e `page_info` ausente continuam `contract_changed`
+(ou `profile_private`/`content_unavailable` com a conta confirmada), sem checkpoint da página.
+
+**Única mudança de comportamento:** `has_next_page` true **sem** `end_cursor` numa resposta **com** `errors` ->
+`contract_changed` (`cursor_missing_with_errors`) depois de entregar os nós da página, sem checkpoint dela (no meio do
+lote a listagem fica `needs_attention` com o checkpoint anterior). Na 1a página do lote não há checkpoint: os itens
+da página viram jobs e a listagem termina (`done`) com `contract_changed` visível no lote (lote `failed` se não houve
+item). Na 1a página de um trecho **retomado** vale a regra já existente do cursor recusado: listagem `paused` com
+uma nova tentativa em 60 s com o mesmo cursor e, repetindo, `needs_attention` com o checkpoint mantido. Na estratégia
+`auto` esse detalhe não aciona o fallback para o gallery-dl (`composite.NO_FALLBACK_DETAILS`). Sem `errors`, esse
+caso continua encerrando a listagem como fim do perfil, agora com o aviso `GraphQL: página N com has_next_page=true
+sem cursor; ... (cursor_missing_end_of_profile)` e o contador `cursor_missing_end_of_profile`; página vazia com
+`has_next_page` true continua encerrando (`empty_page`), com ou sem `errors`.
+
+**Contado e registrado:** uma linha WARNING por página que veio com `errors` ou teve descarte inesperado (emitida ao
+fim da página, também quando o consumidor para no meio dela):
+`GraphQL <consulta>: página N com errors parciais|descartes inesperados: errors=N groups=[{... count=N edges_at=...}
+{...}] [other_groups=K other_errors=M] requested=N edges=N new_nodes=N media_normalized=N has_next_page=<bool>
+cursor_present=<bool> dropped_unexpected={motivo:n,...} skipped_expected={motivo:n,...}
+dropped_at={motivo:[posições],...}`. `requested` é o `count` pedido, só informativo:
+`edges < requested` sozinho não gera aviso (no real as páginas trazem menos que o pedido normalmente).
+
+**Erros agrupados (sem corte nos 5 primeiros):** TODOS os itens de `errors` são examinados (custo linear) e agrupados
+pela chave já sanitizada; cada grupo sai uma vez com `count=` (ocorrências) e, quando o `path` cita `edges`,
+`edges_at=` com as posições dos edges afetados em faixas (`0-4,7`; posição na página, não é id). O teto é de
+**grupos distintos** (12 por página, e 2.400 caracteres para a lista), nunca de ocorrências. Quem entra, em ordem de
+prioridade: (1) todo grupo cujo `edges_at` coincide com a posição de um descarte inesperado da página (`dropped_at`)
+e o grupo com mais ocorrências: nunca são omitidos (passam do teto se preciso) e saem na frente, na ordem de
+chegada; (2) um grupo por `path` distinto, do path mais raro para o dominante (o campo que mais falha não esconde os
+raros); (3) o resto por ocorrências. Depois dos de (1), a lista sai por ocorrências decrescentes. O que não couber
+aparece explicitamente como `other_groups=K other_errors=M other_paths=[a,b,c]`: quantos tipos e ocorrências ficaram
+fora e os paths sanitizados distintos deles (`-` = erro sem path; até 8 paths/300 caracteres, o resto como `+N`).
+Exemplo com 14 tipos (fictício): `... {keys=message,path path=edges[].node.owner message=[rare last failed] count=1
+edges_at=9}] other_groups=2 other_errors=6 other_paths=[edges[].node.kilo,edges[].node.lima] requested=12 ...`.
+A linha inteira tem corte duro de 3.000 caracteres com o marcador
+` …[truncated]`. `dropped_at` traz a posição do edge de cada descarte inesperado, para cruzar na mesma linha o erro
+(`edges_at`) com a mídia descartada. Exemplo (valores fictícios):
+`errors=10 groups=[{severity=ERROR keys=message,path,severity path=edges[].node.location.profile_pic_url message=[A
+server error field_exception occured. Check server logs for details.] count=9 edges_at=0-8} {severity=ERROR
+keys=message,path,severity path=edges[].node.image_versions2 message=[...] count=1 edges_at=5}] requested=12 edges=10
+new_nodes=10 media_normalized=9 has_next_page=True cursor_present=True dropped_unexpected={image_no_url:1}
+skipped_expected={} dropped_at={image_no_url:[5]}`. A chave do grupo é calculada DEPOIS da sanitização (valores
+sensíveis diferentes caem no mesmo grupo e não vazam pela quantidade de grupos) e traz só:
+`code`/`api_error_code`/`error_code`/`severity`/`classification` do erro e de `extensions` quando são enum em
+MAIÚSCULAS e `_` (até 3 dígitos só no fim, até 40 caracteres) ou inteiro de até 7 dígitos; `keys` (nomes das chaves
+do erro); `path` só com nomes de campo, sem o campo raiz da consulta e com todo índice de lista como `[]`
+(`edges[].node.carousel_media[].image_versions2`; valor vira `<?>`, no máximo 8 segmentos); `message` como abaixo. Na CHAVE todo trecho citado da message vira `"…"` (30 erros
+com um nome citado diferente cada são um grupo só); o texto exibido é o do primeiro erro do grupo, com a message
+sanitizada de sempre. Números curtos (até 4 dígitos) ficam na chave: `returned 404` e `returned 500` são grupos
+diferentes (números longos já viram `<id>`/`<num>` na sanitização). Palavra NÃO citada com cara de nome de campo que
+mude a cada erro ainda cria um grupo por valor; o teto de grupos e `other_*` limitam o efeito. Item de `errors` que
+não é objeto vira `invalid=<tipo>`. A `message` sai em uma linha de até 160 caracteres, por **lista de
+permissão**: ficam
+só palavras alfabéticas de até 19 letras (com maiúsculas no meio, até 8), nomes de campo em minúsculas com `_`, enums
+em MAIÚSCULAS, números de até 4 dígitos e pontuação básica; URL vira `<url>`, valor citado vira `"…"` (só nome de
+campo citado fica), dígitos em grupos que somam 9+ viram `<num>` e todo o resto vira `<id>` (e-mail, token, base64,
+cookie com `:`, percent-encoding depois de até 3 decodificações, shortcode, id). Caracteres de controle, de largura
+zero, de direção de texto e BOM são removidos; o texto também passa pelo `redact`. Motivos inesperados
+(`dropped_unexpected`): `edge_null`, `edge_not_object`, `node_null`, `node_not_object` (GraphQL) e `node_no_code`,
+`media_type_missing`, `carousel_no_children`, `carousel_child_invalid`, `carousel_children_missing` (menos filhos em
+`carousel_media` que `carousel_media_count`; soma a diferença), `video_no_url`, `image_no_url` e
+`rendition_candidates_invalid` (item entregue numa versão menor porque uma versão declarada maior veio sem URL
+utilizável; candidato nulo não declara tamanho e não é detectado) (normalização). De propósito (`skipped_expected`):
+`duplicate`, `unsupported_type`, `content_filter`. Totais do trecho de listagem: `InstagramWebGraphQL.listing_totals`
+(só o que o GraphQL vê) e `InstagramWebDownloader.last_listing_anomalies` (`pages_with_errors`, `errors`,
+`cursor_missing_end_of_profile`, `dropped_unexpected`, `skipped_expected` com os três motivos de propósito), com a
+linha `Listagem web (este trecho): ...` no fim do trecho quando há `errors`, descarte inesperado ou cursor ausente.
+Esses totais são por trecho; o total do LOTE fica nas colunas `batches.listing_dropped_*` (migration 0011), somado
+por página junto do checkpoint: cada `ListingCheckpoint` leva `page_counts` (`unexpected`/`expected`/`degraded` da
+página que ele encerra) e cada `RemoteMedia` leva `listing_dropped` (descartes inesperados da página até o nó dela),
+ver docs/BATCH_ROBUSTNESS.md, "Descartes da listagem visíveis no lote". A linha da página sai também quando o
+callback `on_page` levanta. A renovação de página (`profile_page`) e `query()` registram os mesmos grupos de erros,
+sem os dados de paginação.
+
+**Nunca registrado:** cookies, tokens, headers, URLs (assinadas ou não), ids de conta/mídia/post, shortcodes,
+cursores e valores de variáveis ou de campos da resposta. Do payload só saem nomes de campo/chave, códigos tipo enum
+e os trechos da `message` que passam pela lista de permissão acima (palavras comuns); valores nunca.
+
+## web/normalize.py (builder-web-graphql)
+
+```python
+@dataclass
+class NormalizeStats:   # contadores seguros para log
+    nodes: int; items: int; skipped_no_url: int; skipped_unsupported: int; skipped_invalid_node: int
+    reasons: dict[str, int]   # os mesmos descartes por motivo (ver "Respostas 200 com `errors`")
+
+def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
+                   stats: NormalizeStats | None = None) -> list[RemoteMedia]
+def filter_by_content(items: list[RemoteMedia], content: ContentType) -> list[RemoteMedia]
+```
+`media_type` 1 imagem, 2 vídeo, 8 carrossel (`carousel_media` em ordem, índice 0-based). Imagem: maior candidato
+de `image_versions2.candidates` por largura*altura. Vídeo: maior de `video_versions` por largura*altura (empate:
+primeiro); thumbnail = maior candidato de imagem; `duration` de `video_duration` se houver; `has_audio` não está
+no RemoteMedia (o ffprobe mede depois). `is_reel` = post `product_type == "clips"` e item vídeo. `source_url`
+`/reel/<code>/` para reels, `/p/<code>/` para o resto. `taken_at` ISO UTC com `Z`. `post_id`=`pk` do post,
+`media_id`=`pk`/`id` do item. Só URLs `https://` contam. Nó sem `code` -> pulado. Item sem URL utilizável -> pulado
+com contagem (não derruba a listagem); `media_type` desconhecido -> pulado e contado em `skipped_unsupported`.
+Conteúdo: reels = só itens `is_reel`; videos = itens vídeo; images = itens imagem; posts/all = tudo.
+
+## web/provider.py (builder-web-provider)
+
+`InstagramWebDownloader(InstagramDownloader)`, construtor com `session_provider`, `max_download_bytes`,
+`cdn_downloader`, `doc_id_overrides`, `env`, `page_delay`, `http_config`, `transport`, `page_size` (12), fábricas
+injetáveis para testes, `on_page` e `max_pages` (None = padrão do graphql), ambos repassados a
+`iter_profile_posts` na listagem. Sem `sessionid` na sessão:
+`session_missing`.
+- `get_profile(username)`: `GET /web/search/topsearch/?query=<username>` (stage `topsearch`), casa o username exato;
+  JSON inválido ou sem `users` -> `contract_changed`; sem resultado -> `profile_not_found`. **Não verificado no
+  real:** a prévia de perfil por topsearch só tem testes com respostas falsas; a importação não depende dela.
+- `iter_profile_media(username, content, limit, cancel)`: bootstrap (sem olhar o viewer do HTML) +
+  `iter_profile_posts`; só falha pelas respostas reais; normaliza; filtra;
+  conta mídias (limit None = teto 5000); para de pedir páginas ao atingir o limite. Se nenhuma mídia foi entregue e
+  houve itens de tipo desconhecido: `unsupported_media` (stage `normalize`). Ao fim da listagem,
+  `last_account_confirmation` (atributo público; `confirmed`/`different_account`/`not_confirmed`; None se a listagem
+  não chegou à consulta) traz o estado da conta pela 1a resposta, e o log seguro
+  `Listagem web de <perfil>: N posts, N mídias normalizadas, N entregues, N sem URL, N não suportadas, conta <estado>`
+  conta como "entregues" os itens efetivamente entregues ao consumidor, inclusive quando ele para no limite e fecha
+  o gerador.
+- `download(item, dest_dir, ...)`: `cdn_download` existente (sem cookies, allowlist de CDN, SSRF); se
+  `forbidden/not_found` (URL expirada), refaz UMA listagem do `source_profile` (no máximo 3 páginas) para achar o
+  mesmo `source_post_id` (por `media_id`, senão índice e tipo) e tenta de novo uma vez; não achou ->
+  `content_unavailable`.
+- `resolve_post(shortcode)`: sem perfil não há consulta moderna comprovada -> `content_unavailable` explícito.
+- `test_session()`: nunca lança; sem download. Etapas:
+  1. `session_present`: há sessão salva com `sessionid`? Senão `session_missing` (demais etapas `unknown`).
+  2. `bootstrap` (1 GET de `/`): `ok` quando fb_dtsg e lsd foram extraídos; o viewer do HTML não conta.
+  3. `graphql`: `PolarisProfilePostsQuery` com `count=1` (1 página) do perfil público **`instagram`**
+     (`TEST_PROFILE`), sempre esse perfil. `ok` quando HTTP 200 com o campo raiz (também quando a falha foi só
+     `edges_not_list`/`page_info_missing`).
+  4. `listing_api`: `ok` quando `edges` é lista; `rate_limited` em 429; `refused` em `access_refused`/
+     `action_blocked` na etapa GraphQL; senão `unknown`.
+  5. `session_recognized` (via `account_confirmation`: `confirmed` -> `true`, `different_account` -> `false`,
+     `not_confirmed` -> `null`): `true` se `last_viewer_id` == `ds_user_id` da sessão; `false` se os dois existem e
+     diferem (outra conta) ou se houve evidência confiável de deslogado (redirect para login, 401, `require_login`,
+     `sessionid` apagado, token recusado depois do re-bootstrap único: `session_invalid`/`session_expired`); `null`
+     quando não deu para confirmar (resposta sem `xdt_viewer`, sem `ds_user_id` nos cookies, ou outras falhas).
+  `valid` só quando a consulta moderna funcionou (listagem `ok`). **Decisão:** com a listagem `ok`, `result` é
+  `valid` (`code` `ok`) nos três casos de `session_recognized`, porque a operação pode ser feita; a mensagem diz o que
+  falta: `true` -> "Sessão funcionando: ..."; `null` -> "A consulta de publicações funcionou, mas o Instagram não
+  confirmou a conta da sessão."; `false` (outra conta) -> "A sessão salva pertence a outra conta: ...".
+  `session_invalid` só sai com evidência confiável de que a operação não pode ser feita. Mapeamento de `code` -> `result`: `session_invalid`=`invalid`,
+  `session_expired`=`expired`, `checkpoint_required`, `rate_limited`, `action_blocked`=`restricted`,
+  `access_refused`=`api_refused`, `timeout`, `network_error`, `session_missing`; qualquer outro (incluindo
+  `contract_changed`) = `instagram_error` com o `code` original. `http_status` e `detail` vêm do diagnóstico do erro.
+
+| Situação | session_present | session_recognized | bootstrap | graphql | listing_api |
+|---|---|---|---|---|---|
+| Sem sessão | false | null | unknown | unknown | unknown |
+| Falha no bootstrap (login/sessionid apagado/require_login) | true | false | failed | unknown | unknown |
+| Falha no bootstrap (outro motivo) | true | null | failed | unknown | unknown ou rate_limited |
+| Falha na consulta (sessão recusada) | true | false | ok | failed | unknown |
+| Falha na consulta (outro motivo) | true | null | ok | failed | refused, rate_limited ou unknown |
+| Sucesso, conta confirmada (`xdt_viewer.user.id` == `ds_user_id`) | true | true | ok | ok | ok |
+| Sucesso, conta não confirmada | true | null | ok | ok | ok |
+| Sucesso, outra conta | true | false | ok | ok | ok |
+
+## composite.py (builder-web-provider)
+
+`CompositeInstagramDownloader(primary=web, fallback=gallery_dl, strategy)`. Estratégia efetiva: setting
+`instagram_provider` gravado > env `MEDIA_TOOL_INSTAGRAM_PROVIDER` (`Settings.instagram_provider`, inclui o `.env`) >
+`web`. Valor desconhecido vira `web`.
+- `web` (**padrão**): só o provider web, sem fallback.
+- `gallery_dl`: só o provider legado.
+- `auto` (opcional, explícito): usa o web e cai para o gallery-dl SOMENTE quando o web responde `contract_changed`
+  ou `unsupported_media` (`FALLBACK_CODES`), uma vez por operação e com log. Na listagem, só cai se o web ainda não
+  entregou nenhum item (depois disso o erro sobe e o lote fica parcial). Nunca há fallback em 429, checkpoint,
+  restrição, sessão inválida/expirada, rede ou timeout: esses erros sobem como estão (pausas do worker continuam
+  valendo).
+- `test_session()`: em `web` e `auto` testa o provider web (sem trocar o resultado pelo do gallery-dl); em
+  `gallery_dl`, o teste legado (etapas web ficam `null`).
+
+`contract_changed` e `unsupported_media` não são retryable e não pausam o worker. Na prévia de perfil
+(`POST /api/instagram/profile`) eles respondem 502.
+
+## Prova de conceito real (`scripts/poc-instagram-web.ps1`)
+
+`backend/tools/poc_instagram_web.py --profile <perfil> [--content all] [--process]`, chamado pelo script
+`scripts\poc-instagram-web.ps1 -Username <perfil> [-Content all] [-Process]`. Usa o SQLite e o storage reais e o
+provider web direto (sem composite). Recusa rodar se o backend responde na porta configurada (`app_running`) ou se há
+lote listando/job aberto (`queue_busy`). Cria UM lote (limit 1, process false), roda a listagem e UMA ingestão; com
+`--process`, processa com o preset "Anti-duplicidade" e confere que o SHA-256 do original não mudou. Para no primeiro
+erro, sem nova tentativa, e imprime relatório JSON sem segredos (`code`, `message`, `stage`, `detail` seguros).
+Saída: 0 ok, 1 falha, 2 pré-condição (app aberto, fila ocupada, preset ausente).
+
+## POC de paginação (`scripts/poc-instagram-pagination.ps1`)
+
+`backend/tools/poc_instagram_pagination.py --profile <perfil> [--page-size 1] [--limit 2]`, chamado por
+`scripts\poc-instagram-pagination.ps1 -Username <perfil> [-PageSize 1] [-Limit 2]`. **Só listagem**: sem banco, sem
+download, sem processamento. Usa a sessão salva (`LocalInstagramSessionProvider`) e o `InstagramWebDownloader` real
+com conteúdo `all`, retries 0 e sem re-bootstrap (token recusado vira `session_invalid`/`web_token_rejected` na hora).
+O padrão (page_size 1, limit 2) força exatamente 2 páginas com o mínimo de tráfego (1 GET `/` + 2 POST
+`/graphql/query`). Teto duro `max_pages=2`: nunca mais de 2 POSTs, mesmo com posts sem URL/não suportados. Se só
+houve 1 página (ex.: carrossel na 1a página já atinge o limite), `outcome` = `inconclusive_single_page`, sem requisição
+adicional; se o limite não foi atingido em 2 páginas, `inconclusive_limit_not_reached` (ambos saída 3). Ctrl+C ->
+`interrupted` (saída 130), ainda com o JSON. `profile` no relatório é o username normalizado (null se a entrada for
+inválida; a entrada crua nunca é impressa). Token recusado não refaz o bootstrap nem anuncia isso no log. O override de `doc_id` gravado no banco (setting) não é lido; vale o env/`.env` ou o valor embutido.
+Recusa rodar com o app escutando na porta (`app_running`, saída 2). Para no primeiro erro (`rate_limited`,
+`checkpoint_required`, `action_blocked`, `access_refused`, `contract_changed`, `session_invalid` ou qualquer exceção,
+saída 1) com só `code`/`message`/`stage`/`detail` seguros. Relatório JSON (stdout): `requests` (todas as requisições
+ao instagram.com: método, path sem query, status), `instagram_requests`, `cdn_requests` (deve ser 0),
+`other_requests`, `pages` (metadados do `on_page`), `items` (na ordem: `shortcode`, `media_type`, `is_reel`,
+`source_media_index`, `taken_at`, `cdn_url_valid` = a URL normalizada passa `validate_cdn_url`, `cdn_domain_suffix` =
+sufixo permitido do host ou null), `duplicates_across_pages` (soma de `duplicate_nodes` das páginas 2+),
+`stopped_at_limit` (atingiu o limite sem pedir página extra) e `account_confirmation`. Nunca imprime ids, cookies,
+tokens, cursores ou URLs.
+
+### Paginação comprovada no real (2026-10-03)
+
+A POC acima rodou contra o Instagram real em 2026-10-03 e comprovou a paginação: 1 GET `/` + 2 POST
+`/graphql/query`, com a 2a página pedida pelo cursor da 1a. As variáveis Relay `after`, `before`, `first` e `last`
+foram aceitas como descritas em `web/queries.py`. O orçamento de paginação, o checkpoint de retomada e a renovação de
+URL por página estão em [BATCH_ROBUSTNESS.md](BATCH_ROBUSTNESS.md). A prévia de perfil (`topsearch`) segue não
+verificada no real.
+
+## Como atualizar quando o Instagram mudar
+
+Sintoma: operações ou o teste de sessão terminam em `contract_changed`. Leia o `detail` (no cartão do teste de sessão,
+em `last_test.detail`, no relatório da POC ou nos logs) para saber qual parte mudou:
+- `token_marker_missing`: o HTML do documento mudou (sem fb_dtsg ou lsd). Ajuste os marcadores em
+  `web/bootstrap.py` (`_FB_DTSG_MARKERS`, `_LSD_MARKERS`; `_VIEWER_MARKERS` é só pista) e adicione uma fixture nova em
+  `backend/tests/fixtures/instagram_web/` (valores falsos) com o caso em `tests/test_web_bootstrap.py`.
+- `persisted_query_error`, `missing_root_field`, `missing_data`, `http_400`/`http_404`: provavelmente o `doc_id` ou
+  o nome da consulta mudou. Pegue o `doc_id` atual no DevTools do navegador (aba Network, `POST /graphql/query` com
+  `fb_api_req_friendly_name=PolarisProfilePostsQuery`; copie só `doc_id`, nunca `fb_dtsg`/`lsd`/cookies).
+- `edges_not_list`, `page_info_missing`, `root_not_object`, `repeated_cursor`: o formato da resposta ou a paginação
+  mudou; ajuste `web/graphql.py` e/ou `profile_posts_variables` em `web/queries.py`.
+
+Trocar o `doc_id` sem nova versão (vale a primeira fonte válida):
+1. Setting (aplica na próxima operação, sem reiniciar): `PUT /api/settings` com header `X-Media-Tool-Client: panel`
+   e corpo `{"instagram_web_doc_ids": {"PolarisProfilePostsQuery": "<doc_id>"}}`. `{}` ou `null` remove o override.
+2. Env ou `.env` (vale após reiniciar o backend): `MEDIA_TOOL_IG_DOC_POLARISPROFILEPOSTSQUERY=<doc_id>`.
+3. Valor embutido: edite `PROFILE_POSTS` em `web/queries.py` (atualize também `observed_at`) e ajuste os testes que
+   conferem o valor: `tests/test_web_queries.py`, `tests/test_web_graphql.py` e
+   `tests/test_review_web_pipeline_e2e.py`.
+
+Se o root field mudar, edite `root_field` em `PROFILE_POSTS` e as fixtures/testes que o usam
+(`tests/test_web_queries.py`, `tests/test_web_normalize.py`, `tests/test_review_web_pipeline_e2e.py` e as fixtures
+em `backend/tests/fixtures/instagram_web/graphql/`). Consulta nova: crie o `QuerySpec` em `web/queries.py` e inclua o
+nome em `KNOWN_QUERIES` (o schema de settings valida contra essa lista). Depois de qualquer ajuste: rode a suíte
+offline do backend e, só então, a POC com 1 mídia.
