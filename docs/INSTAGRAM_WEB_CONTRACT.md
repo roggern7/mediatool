@@ -104,8 +104,9 @@ varrido em busca de marcadores (o JavaScript embutido daria falso positivo).
 | provider.py | `unsupported_media` | `unsupported_media` |
 
 `timeout` e `network_error` do cliente HTTP (stage `http`) não têm `detail`; o diagnóstico traz método, path e o nome
-da exceção. Só nos logs (não são erros): `empty_page`, `no_new_items`, `max_pages`,
-`cursor_missing_end_of_profile`.
+da exceção. Fim anômalo da paginação (`contract_changed`, graphql.py): `detail` em `empty_page`, `cursor_missing`,
+`cursor_missing_with_errors`, `repeated_cursor`, `no_new_items`, `has_next_invalid`
+(`downloader.LISTING_ANOMALY_DETAILS`). Só nos logs (não é erro): `max_pages`.
 
 ## web/http.py (builder-web-core)
 
@@ -233,8 +234,8 @@ class InstagramWebGraphQL:
     def query(self, spec: QuerySpec, variables: Mapping[str, object], *, referer_path: str = "/") -> dict
         # retorna data[spec.root_field]
     def iter_profile_posts(self, username: str, *, max_media: int | None, page_size: int = 12,
-                           max_pages: int = 500, cancel: threading.Event | None = None,
-                           on_page: Callable[[dict], None] | None = None) -> Iterator[dict]
+                           max_pages: int | None = 500, cancel: threading.Event | None = None,
+                           on_page: Callable[[dict], None] | None = None) -> Iterator[dict]   # None = sem teto
         # gera nós sob demanda; max_media só reduz o count da 1a página; quem conta mídias e para é o chamador
     last_viewer_id: str | None                 # xdt_viewer.user.id da última resposta com dados
     listing_account_confirmation: str | None   # estado da conta na 1a resposta da última listagem
@@ -274,10 +275,13 @@ Diagnóstico seguro: status, chaves de topo, chaves de `data`, códigos e mensag
 entre aspas, sem tokens).
 
 Paginação e ritmo: nunca espera antes da 1a página; entre páginas espera de 2 a 4 s (sorteado; acorda na hora se
-`cancel` for acionado); `cancel` checado antes de cada requisição; `has_next_page` false ou cursor nulo encerra (exceção: `has_next_page` true sem cursor numa resposta com `errors` -> `contract_changed`/`cursor_missing_with_errors`; sem `errors` encerra com o aviso `cursor_missing_end_of_profile`);
-página vazia com `has_next_page` true encerra com aviso (`empty_page`); ids (`pk`/`id`) já vistos são pulados;
-**2 páginas seguidas sem nós novos** encerram com aviso (`no_new_items`); cursor repetido -> `contract_changed`
-(`repeated_cursor`); `max_pages` defensivo (500; 3 na renovação de URL; 1 no teste de sessão).
+`cancel` for acionado); `cancel` checado antes de cada requisição. **Só `has_next_page` false (resposta válida) é fim do perfil.** Com
+`has_next_page` true, qualquer resposta sem continuação utilizável é FIM ANÔMALO e sobe `contract_changed` depois de
+entregar os nós da página, sem checkpoint dela e sem requisição extra: sem cursor (`cursor_missing`, ou
+`cursor_missing_with_errors` quando há `errors`), página vazia (`empty_page`), cursor repetido (`repeated_cursor`),
+**2 páginas seguidas sem nós novos** (`no_new_items`); `has_next_page` que não é booleano -> `has_next_invalid`. Ids
+(`pk`/`id`) já vistos são pulados. `max_pages`: None na listagem do app (sem teto de páginas; o construtor do provider
+aceita um teto por TRECHO só para testes/POC, e atingi-lo não é fim do perfil); 1 no teste de sessão.
 
 Prova de autenticação pela resposta: `InstagramWebGraphQL.last_viewer_id` = `data.xdt_viewer.user.id` da última
 resposta com dados (None se `xdt_viewer` faltar, for null, `user` for null ou o id for vazio/`"0"`). Nunca é logado;
@@ -304,16 +308,17 @@ usados, o cursor de `page_info` é seguido e o checkpoint da página é gravado 
 `data` nulo/ausente, raiz ausente ou não-objeto, `edges` não-lista e `page_info` ausente continuam `contract_changed`
 (ou `profile_private`/`content_unavailable` com a conta confirmada), sem checkpoint da página.
 
-**Única mudança de comportamento:** `has_next_page` true **sem** `end_cursor` numa resposta **com** `errors` ->
-`contract_changed` (`cursor_missing_with_errors`) depois de entregar os nós da página, sem checkpoint dela (no meio do
-lote a listagem fica `needs_attention` com o checkpoint anterior). Na 1a página do lote não há checkpoint: os itens
-da página viram jobs e a listagem termina (`done`) com `contract_changed` visível no lote (lote `failed` se não houve
-item). Na 1a página de um trecho **retomado** vale a regra já existente do cursor recusado: listagem `paused` com
-uma nova tentativa em 60 s com o mesmo cursor e, repetindo, `needs_attention` com o checkpoint mantido. Na estratégia
-`auto` esse detalhe não aciona o fallback para o gallery-dl (`composite.NO_FALLBACK_DETAILS`). Sem `errors`, esse
-caso continua encerrando a listagem como fim do perfil, agora com o aviso `GraphQL: página N com has_next_page=true
-sem cursor; ... (cursor_missing_end_of_profile)` e o contador `cursor_missing_end_of_profile`; página vazia com
-`has_next_page` true continua encerrando (`empty_page`), com ou sem `errors`.
+**Fim anômalo da paginação (revisado; prevalece):** `has_next_page` true sem `end_cursor` (com ou sem `errors`),
+página vazia com `has_next_page` true, cursor repetido e 2 páginas seguidas sem nó novo -> `contract_changed` com o
+`detail` correspondente, depois de entregar os nós da página e sem checkpoint dela. NUNCA é fim do perfil. No lote
+(import runner): com checkpoint (meio do lote, inclusive na 1a página de um trecho retomado) a listagem vai direto
+para `needs_attention` com o checkpoint anterior (sem a nova tentativa de 60 s do "cursor recusado": nenhuma
+requisição extra; depois, 1 tentativa automática a cada 6 h, no máximo 4, ou `resume-listing`). Na 1a página do lote
+(sem checkpoint): sem nenhum item o lote termina `failed` com o erro visível; com itens já listados eles viram jobs e
+a listagem fica `needs_attention` (a nova tentativa pede a página 1 de novo e o índice único descarta os repetidos).
+Na estratégia `auto` o detalhe `cursor_missing_with_errors` não aciona o fallback para o gallery-dl
+(`composite.NO_FALLBACK_DETAILS`). O aviso de log é `GraphQL: página N com fim anômalo da paginação (<detail>); não é
+fim do perfil`. O contador `cursor_missing_end_of_profile` deixou de existir.
 
 **Contado e registrado:** uma linha WARNING por página que veio com `errors` ou teve descarte inesperado (emitida ao
 fim da página, também quando o consumidor para no meio dela):
@@ -366,8 +371,8 @@ zero, de direção de texto e BOM são removidos; o texto também passa pelo `re
 utilizável; candidato nulo não declara tamanho e não é detectado) (normalização). De propósito (`skipped_expected`):
 `duplicate`, `unsupported_type`, `content_filter`. Totais do trecho de listagem: `InstagramWebGraphQL.listing_totals`
 (só o que o GraphQL vê) e `InstagramWebDownloader.last_listing_anomalies` (`pages_with_errors`, `errors`,
-`cursor_missing_end_of_profile`, `dropped_unexpected`, `skipped_expected` com os três motivos de propósito), com a
-linha `Listagem web (este trecho): ...` no fim do trecho quando há `errors`, descarte inesperado ou cursor ausente.
+`dropped_unexpected`, `skipped_expected` com os três motivos de propósito), com a
+linha `Listagem web (este trecho): ...` no fim do trecho quando há `errors` ou descarte inesperado.
 Esses totais são por trecho; o total do LOTE fica nas colunas `batches.listing_dropped_*` (migration 0011), somado
 por página junto do checkpoint: cada `ListingCheckpoint` leva `page_counts` (`unexpected`/`expected`/`degraded` da
 página que ele encerra) e cada `RemoteMedia` leva `listing_dropped` (descartes inesperados da página até o nó dela),
@@ -404,7 +409,8 @@ Conteúdo: reels = só itens `is_reel`; videos = itens vídeo; images = itens im
 
 `InstagramWebDownloader(InstagramDownloader)`, construtor com `session_provider`, `max_download_bytes`,
 `cdn_downloader`, `doc_id_overrides`, `env`, `page_delay`, `http_config`, `transport`, `page_size` (12), fábricas
-injetáveis para testes, `on_page` e `max_pages` (None = padrão do graphql), ambos repassados a
+injetáveis para testes, `on_page` e `max_pages` (teto de páginas por trecho, só testes/POC; None = sem teto, o
+padrão do app), ambos repassados a
 `iter_profile_posts` na listagem. Sem `sessionid` na sessão:
 `session_missing`.
 - `get_profile(username)`: `GET /web/search/topsearch/?query=<username>` (stage `topsearch`), casa o username exato;

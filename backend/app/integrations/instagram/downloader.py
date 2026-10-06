@@ -9,11 +9,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-ContentType = Literal["reels", "posts", "videos", "images", "all"]
-CONTENT_TYPES: tuple[str, ...] = ("reels", "posts", "videos", "images", "all")
+# "photos_carousels" = fotos simples + todos os itens de carrosséis (inclusive vídeos de carrossel), sem Reels.
+ContentType = Literal["reels", "posts", "videos", "images", "all", "photos_carousels"]
+CONTENT_TYPES: tuple[str, ...] = ("reels", "posts", "videos", "images", "all", "photos_carousels")
 
-# Teto de segurança da quantidade por listagem (lotes de até 10.000 mídias; limit=None usa este teto).
-MAX_ITEMS = 10000
+# Máximo de VALIDAÇÃO de "Últimos N" (só rejeita lixo; não é teto de listagem). ``limit=None`` ("Todos") lista até o
+# fim real do perfil (has_next_page=false), sem teto de quantidade nem de páginas.
+MAX_IMPORT_LIMIT = 1_000_000
+# Teto interno do provider legado gallery-dl (gallerydl.GALLERY_DL_MAX_ITEMS): acima disso ele truncaria a listagem.
+LEGACY_MAX_ITEMS = 5000
+
+# ``diagnostic["detail"]`` dos erros de FIM ANÔMALO da paginação (não é fim do perfil): página vazia, cursor ausente
+# ou repetido, ou páginas seguidas sem publicação nova com has_next_page=true, e has_next_page que não é booleano.
+# Quem lista NÃO conclui o lote: mantém o checkpoint e deixa em `needs_attention` (import runner).
+LISTING_ANOMALY_DETAILS = frozenset({
+    "empty_page", "cursor_missing", "cursor_missing_with_errors", "repeated_cursor", "no_new_items",
+    "has_next_invalid",
+})
 
 ERROR_CODES: dict[str, tuple[str, bool]] = {
     # code: (mensagem padrão, retryable)
@@ -158,6 +170,8 @@ class RemoteMedia:
     # Descartes inesperados (motivo -> quantidade) da página desta mídia até o nó dela, inclusive; None = nenhum.
     # Só serve para a página que termina sem checkpoint (limite atingido no meio dela); nunca ids/URLs.
     listing_dropped: dict[str, int] | None = field(default=None, compare=False, repr=False)
+    # A mídia é item de um carrossel (filtro "photos_carousels"; vídeo de carrossel não é Reel).
+    in_carousel: bool = field(default=False, compare=False)
 
 
 SessionTestOutcome = Literal[

@@ -15,6 +15,7 @@ import {
   batchTitle,
   batchToneOf,
   isDownloadOnly,
+  isQueuedInGroup,
   jobKindLabel,
   jobTone,
   showDuplicate,
@@ -370,7 +371,7 @@ function BatchHeader({
         <div className="row">
           <strong style={{ fontSize: 14 }}>{batch ? batchTitle(batch) : `Importação ${batchId}`}</strong>
           {batch ? <Pill tone={batchToneOf(batch)}>{batchLabel(batch)}</Pill> : null}
-          {batch && ACTIVE_BATCH.has(batch.status) ? <Spinner /> : null}
+          {batch && ACTIVE_BATCH.has(batch.status) && !isQueuedInGroup(batch) ? <Spinner /> : null}
         </div>
         <button type="button" className="btn btn-sm btn-ghost" onClick={onClear}>
           Ver toda a fila

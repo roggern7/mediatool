@@ -97,9 +97,13 @@ class FakeGraphQL:
                            start_cursor=None, start_page=1, on_page_end=None):
         from app.integrations.instagram.web.graphql import PageState
 
+        import itertools
+
         after = start_cursor
-        last = start_page + max_pages - 1
-        for number in range(start_page, last + 1):
+        last = None if max_pages is None else start_page + max_pages - 1
+        for number in itertools.count(start_page):
+            if last is not None and number > last:
+                return
             if cancel is not None and cancel.is_set():
                 return
             self.requests.append({"username": username, "page": number, "max_media": max_media,
@@ -196,6 +200,8 @@ def test_image_video_and_carousel_are_normalized():
     ("reels", ["VID1"]),
     ("videos", ["VID1", "CAR1"]),
     ("images", ["IMG1", "CAR1", "CAR1"]),
+    ("photos_carousels", ["IMG1", "CAR1", "CAR1", "CAR1"]),   # vídeo do carrossel entra; o Reel não
+    ("all", ["IMG1", "VID1", "CAR1", "CAR1", "CAR1"]),
 ])
 def test_content_filter(content, expected):
     dl, *_ = build([[image_node("IMG1"), video_node("VID1"), carousel_node("CAR1")]])
@@ -223,15 +229,13 @@ def test_limit_counts_carousel_media_not_posts():
     assert len(graphql.requests) == 1
 
 
-def test_limit_none_reads_everything_up_to_safety_cap(monkeypatch):
-    dl, _, _, graphql = build([images("a", 3), images("b", 3)])
-    assert len(list(dl.iter_profile_media("perfil_teste", "all", None))) == 6
-    assert graphql.requests[0]["max_media"] == downloader_mod.MAX_ITEMS == 10000
-
-    monkeypatch.setattr(provider_mod, "MAX_ITEMS", 4)
+def test_limit_none_reads_everything_without_cap():
+    # "Todos": sem teto de quantidade (max_media None) nem de páginas (max_pages None); só o fim real encerra.
     dl, _, _, graphql = build([images("a", 3), images("b", 3), images("c", 3)])
-    assert len(list(dl.iter_profile_media("perfil_teste", "all", None))) == 4
-    assert len(graphql.requests) == 2
+    assert len(list(dl.iter_profile_media("perfil_teste", "all", None))) == 9
+    assert graphql.requests[0]["max_media"] is None and graphql.requests[0]["max_pages"] is None
+    assert not hasattr(downloader_mod, "MAX_ITEMS") and downloader_mod.MAX_IMPORT_LIMIT == 1_000_000
+    assert dl.last_listing_stats["stop_reason"] == "end_of_profile"
 
 
 def test_cancel_stops_listing_between_requests():

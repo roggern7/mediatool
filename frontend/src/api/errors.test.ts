@@ -25,9 +25,28 @@ describe("errorMessageFor", () => {
       "A sessão precisa ser verificada. Teste a sessão ou salve a sessão de novo em Configurações.",
     );
   });
-  it("limit_all_disabled explica que Todos está indisponível", () => {
-    expect(errorMessageFor("limit_all_disabled", 422, "Unprocessable")).toBe(
-      "A opção Todos está indisponível por enquanto. Escolha 10, 20, 50 ou 100.",
+  it("limit_all_disabled não existe mais: cai no detalhe do backend", () => {
+    expect(errorMessageFor("limit_all_disabled", 422, "Unprocessable")).toBe("Unprocessable");
+  });
+  it("erros da importação de vários perfis têm texto fixo em português", () => {
+    expect(errorMessageFor("invalid_profiles", 422, "x")).toBe(
+      "Há entradas inválidas na lista de perfis. Corrija ou remova as entradas indicadas e tente de novo.",
+    );
+    expect(errorMessageFor("no_profiles", 422, "x")).toBe("Informe ao menos um perfil.");
+    expect(errorMessageFor("too_many_profiles", 422, "x")).toBe(
+      "Perfis demais de uma vez. O máximo é 10.000 por importação.",
+    );
+    expect(errorMessageFor("group_finished", 409, "x")).toBe("Esta importação já terminou; não há nada para cancelar.");
+    expect(errorMessageFor("group_not_found", 404, "x")).toBe("Importação não encontrada.");
+  });
+  it("413 payload_too_large orienta a dividir a lista", () => {
+    expect(errorMessageFor("payload_too_large", 413, "Corpo da requisição maior que o limite de 1 MB.")).toBe(
+      "A lista é grande demais para enviar de uma vez. Divida em partes menores ou cole só os nomes de usuário, sem a URL completa.",
+    );
+  });
+  it("not_supported_by_provider orienta a trocar o método de importação", () => {
+    expect(errorMessageFor("not_supported_by_provider", 422, "x")).toBe(
+      "“Todos” e “Fotos e carrosséis” exigem o método de importação web. Troque o método em Configurações > Instagram.",
     );
   });
   it("contract_changed prioriza a mensagem do backend e tem fallback fixo", () => {

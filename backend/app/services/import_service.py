@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.core.errors import AppError, not_found
 from app.db.connection import utc_now
+from app.integrations.instagram.composite import web_only
 from app.integrations.instagram.validation import parse_profile_input
 from app.services.context import AppContext
 from app.services.instagram_pause import ensure_not_paused
+from app.services.settings_service import instagram_provider
 
 logger = logging.getLogger("media_tool.imports")
 
@@ -41,13 +45,26 @@ def resolve_preset(ctx: AppContext, preset_id: int | None) -> dict[str, Any]:
     return preset
 
 
+WEB_ONLY_MESSAGE = (
+    "\"Todos\", \"Fotos e carrosséis\" e quantidades acima de 5.000 exigem o método de importação web. O método "
+    "configurado (gallery-dl) não lista o perfil até o fim, para em 5.000 mídias e não conhece esse filtro. Troque o "
+    "método em Configurações ou escolha outra opção."
+)
+
+
+def ensure_provider_supports(ctx: AppContext, content_type: str, limit: int | None) -> None:
+    """ "Todos" (`limit=None`), N acima de 5.000 e `photos_carousels` só existem no provider web: com o método
+    `gallery_dl` configurado a criação é recusada com erro claro (o legado truncaria em 5.000 itens, fingindo fim de
+    perfil, e recusa o filtro)."""
+    if web_only(content_type, limit) and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl":
+        raise AppError(422, "not_supported_by_provider", WEB_ONLY_MESSAGE)
+
+
 def create_import(
     ctx: AppContext, *, profile: str, content_type: str, limit: int | None, preset_id: int | None, process: bool
 ) -> int:
-    if limit is None:
-        # "Todos" fica desabilitado até ter política própria (docs/BATCH_ROBUSTNESS.md, seção 1).
-        raise AppError(422, "limit_all_disabled",
-                       "A opção \"Todos\" está desativada por enquanto. Escolha uma quantidade de mídias.")
+    # `limit=None` = "Todos": a listagem vai até o fim real do perfil (docs/BATCH_ROBUSTNESS.md, seção 0.1).
+    ensure_provider_supports(ctx, content_type, limit)
     try:
         username = parse_profile_input(profile)
     except ValueError as exc:
@@ -76,6 +93,130 @@ def create_import(
     return batch_id
 
 
+# Teto de sanidade de perfis por grupo (não é limite de produto) e separadores de uma lista colada: UM PERFIL POR
+# LINHA (vírgula e ponto e vírgula também separam, por conveniência). Espaço NÃO separa: entrada com espaço interno
+# é inválida.
+MAX_GROUP_PROFILES = 10_000
+_ENTRY_SPLIT_RE = re.compile(r"[\r\n,;]+")
+_MAX_ENTRY_ECHO = 200
+# Abas do próprio perfil aceitas depois do usuário numa URL (`/usuario/reels/`, `/usuario/tagged/`).
+_PROFILE_TABS = frozenset({"reels", "tagged"})
+
+
+def normalize_profile_entry(entry: str) -> str:
+    """Uma entrada da lista -> username. Além de `parse_profile_input`: aceita `http://` e só URLs claramente de
+    perfil (`/usuario`, `/usuario/`, `/usuario/reels/`, `/usuario/tagged/`); outros caminhos são inválidos."""
+    value = "https://" + entry[7:] if entry[:7].lower() == "http://" else entry
+    if value.lower().startswith(("instagram.com/", "www.instagram.com/")):
+        value = "https://" + value
+    if "://" in value:
+        try:
+            segments = [segment for segment in urlsplit(value).path.split("/") if segment]
+        except ValueError:
+            segments = []
+        if len(segments) > 2 or (len(segments) == 2 and segments[1].lower() not in _PROFILE_TABS):
+            raise ValueError("a URL não aponta para um perfil")
+    return parse_profile_input(value)
+
+
+def parse_profile_entries(entries: list[str]) -> tuple[list[str], list[dict[str, str]], int]:
+    """Lista de perfis (`usuario`, `@usuario` ou URL do perfil; http/https, com/sem www, barra final, query ou
+    fragmento) -> (usernames válidos em minúsculas, na ordem e sem repetição; inválidas `{entry, reason}`;
+    quantas repetições foram removidas). Sem efeitos e sem nenhuma requisição ao Instagram. Um perfil por linha
+    (vírgula e ponto e vírgula também separam); linhas vazias são ignoradas e espaços nas pontas aparados; entrada
+    com espaço interno é inválida (espaço não separa perfis)."""
+    valid: list[str] = []
+    invalid: list[dict[str, str]] = []
+    seen: set[str] = set()
+    seen_invalid: set[str] = set()
+    duplicates = 0
+    count = 0
+    for raw in entries:
+        for token in _ENTRY_SPLIT_RE.split(raw):
+            token = token.strip()
+            if not token:
+                continue
+            count += 1
+            if count > MAX_GROUP_PROFILES:
+                raise AppError(422, "too_many_profiles",
+                               f"A lista tem mais de {MAX_GROUP_PROFILES} perfis; divida em mais de uma importação.")
+            try:
+                username = normalize_profile_entry(token)
+            except ValueError as exc:
+                if token in seen_invalid:
+                    duplicates += 1
+                else:
+                    seen_invalid.add(token)
+                    invalid.append({"entry": token[:_MAX_ENTRY_ECHO], "reason": str(exc)})
+                continue
+            if username in seen:
+                duplicates += 1
+            else:
+                seen.add(username)
+                valid.append(username)
+    return valid, invalid, duplicates
+
+
+def create_import_group(
+    ctx: AppContext, *, profiles: list[str], content_type: str, limit: int | None, preset_id: int | None,
+    process: bool,
+) -> tuple[int, list[dict[str, str]], int]:
+    """Uma importação pai e um lote filho por perfil (na ordem da lista; `limit` é POR PERFIL). Retorna
+    (id do grupo, perfis pulados por já terem importação ativa, repetições removidas)."""
+    ensure_provider_supports(ctx, content_type, limit)
+    valid, invalid, duplicates = parse_profile_entries(profiles)
+    if invalid:
+        raise AppError(422, "invalid_profiles",
+                       f"{len(invalid)} entrada(s) da lista não são perfis válidos; corrija ou remova antes de iniciar.",
+                       extra={"invalid": invalid, "valid": valid, "duplicates": duplicates})
+    if not valid:
+        raise AppError(422, "no_profiles", "Informe ao menos um perfil.")
+    if not ctx.session_provider.status().configured:
+        raise AppError(409, "session_missing", SESSION_MISSING_MESSAGE)
+    ensure_not_paused(ctx)
+    preset = resolve_preset(ctx, preset_id) if (process or preset_id is not None) else None
+    fields: dict[str, Any] = {
+        "content_type": content_type,
+        "requested_limit": limit,
+        "preset_id": preset["id"] if preset else None,
+        "preset_name": preset["name"] if preset else None,
+        "params": preset["params"] if (preset and process) else None,
+        "process": process,
+    }
+    # Conferência e criação na mesma transação (como em create_import): um perfil nunca ganha duas listagens.
+    with ctx.db.transaction():
+        importing = ctx.batches.open_listing_profiles()
+        skipped = [{"profile": name, "reason": "profile_already_importing"} for name in valid if name in importing]
+        pending = [name for name in valid if name not in importing]
+        if not pending:
+            raise AppError(409, "profile_already_importing",
+                           "Todos os perfis da lista já têm uma importação em andamento.", extra={"skipped": skipped})
+        group_id = ctx.batches.create_group(**fields)
+        for position, username in enumerate(pending, start=1):
+            ctx.batches.create(source="instagram_import", status="listing", source_profile=username,
+                               group_id=group_id, group_position=position, **fields)
+    logger.info("Grupo %s criado: %s perfis (%s, limite por perfil %s; %s pulados)", group_id, len(pending),
+                content_type, limit, len(skipped))
+    ctx.wake_import_runner()
+    return group_id, skipped, duplicates
+
+
+def cancel_group(ctx: AppContext, group_id: int) -> None:
+    """Cancela todos os filhos ainda abertos do grupo (os encerrados ficam como estão). A parte de banco é UMA
+    transação: todos os filhos abertos (a fila inteira) ficam cancelados de uma vez, então nenhum filho da fila
+    começa a listar depois. O filho que está listando/baixando é avisado em seguida (cancelamento cooperativo)."""
+    if ctx.batches.get_group(group_id) is None:
+        raise not_found("Grupo de importação", "group_not_found")
+    with ctx.db.transaction():
+        open_children = ctx.batches.group_open_children(group_id)
+        if not open_children:
+            raise AppError(409, "group_finished", "O grupo já foi finalizado.")
+        running = {child["id"]: _cancel_batch_rows(ctx, child["id"], child["status"]) for child in open_children}
+    for batch_id, jobs in running.items():
+        _cancel_batch_signal(ctx, batch_id, jobs)
+    logger.info("Grupo %s cancelado (%s lotes)", group_id, len(open_children))
+
+
 def cancel_job_ids(ctx: AppContext, job_ids: list[int]) -> None:
     for job_id in job_ids:
         ctx.jobs.request_cancel(job_id)
@@ -83,23 +224,23 @@ def cancel_job_ids(ctx: AppContext, job_ids: list[int]) -> None:
             ctx.jobs.cancel_if_idle(job_id)
 
 
-def cancel_batch(ctx: AppContext, batch_id: int) -> None:
-    batch = ctx.batches.get(batch_id)
-    if batch is None:
-        raise not_found("Lote", "batch_not_found")
-    if batch["status"] in ("completed", "failed", "cancelled"):
-        raise AppError(409, "batch_finished", "O lote já foi finalizado.")
-    # Uma transação: lote cancelado, jobs ociosos cancelados num UPDATE único, URLs/cursores apagados.
-    with ctx.db.transaction():
-        ctx.batches.update(batch_id, status="cancelled", finished_at=utc_now())
-        if batch["status"] == "listing":
-            ctx.batches.update_listing(batch_id, listing_cursor=None, listing_state="cancelled", listing_retry_at=None)
-        else:
-            ctx.batches.update_listing(batch_id, listing_cursor=None)
-        running = ctx.jobs.cancel_batch_jobs(batch_id)
-        # Descartes da página que estava aberta (sem checkpoint): a página não será refeita, então são perda real do
-        # que já tinha sido listado; somam uma única vez (o parcial é apagado na mesma instrução).
-        ctx.batches.add_listing_dropped(batch_id, merge_partial=True)
+def _cancel_batch_rows(ctx: AppContext, batch_id: int, status: str) -> list[int]:
+    """Parte de BANCO do cancelamento (chamar dentro de uma transação): lote cancelado, jobs ociosos cancelados num
+    UPDATE único, URLs/cursores apagados. Retorna os jobs em execução, a sinalizar depois do commit."""
+    ctx.batches.update(batch_id, status="cancelled", finished_at=utc_now())
+    if status == "listing":
+        ctx.batches.update_listing(batch_id, listing_cursor=None, listing_state="cancelled", listing_retry_at=None)
+    else:
+        ctx.batches.update_listing(batch_id, listing_cursor=None)
+    running = ctx.jobs.cancel_batch_jobs(batch_id)
+    # Descartes da página que estava aberta (sem checkpoint): a página não será refeita, então são perda real do
+    # que já tinha sido listado; somam uma única vez (o parcial é apagado na mesma instrução).
+    ctx.batches.add_listing_dropped(batch_id, merge_partial=True)
+    return running
+
+
+def _cancel_batch_signal(ctx: AppContext, batch_id: int, running: list[int]) -> None:
+    """Parte COOPERATIVA do cancelamento (depois do commit): congela contadores e sinaliza quem está em execução."""
     # Sem jobs em execução o lote já está sem job aberto: congela os contadores finais agora.
     ctx.batches.refresh_status(batch_id)
     if ctx.import_runner is not None:
@@ -108,6 +249,17 @@ def cancel_batch(ctx: AppContext, batch_id: int) -> None:
     for job_id in running:
         if ctx.worker is not None:
             ctx.worker.signal_cancel(job_id)
+
+
+def cancel_batch(ctx: AppContext, batch_id: int) -> None:
+    batch = ctx.batches.get(batch_id)
+    if batch is None:
+        raise not_found("Lote", "batch_not_found")
+    if batch["status"] in ("completed", "failed", "cancelled"):
+        raise AppError(409, "batch_finished", "O lote já foi finalizado.")
+    with ctx.db.transaction():
+        running = _cancel_batch_rows(ctx, batch_id, batch["status"])
+    _cancel_batch_signal(ctx, batch_id, running)
     logger.info("Lote %s cancelado (%s jobs em execução sinalizados)", batch_id, len(running))
 
 

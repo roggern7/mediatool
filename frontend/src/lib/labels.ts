@@ -37,6 +37,7 @@ export const CONTENT_LABEL: Record<ContentType, string> = {
   videos: "Vídeos",
   images: "Imagens",
   all: "Todos os tipos",
+  photos_carousels: "Fotos e carrosséis",
 };
 
 export const TERMINAL_JOB: ReadonlySet<JobStatus> = new Set(["completed", "failed", "cancelled"]);
@@ -79,6 +80,22 @@ interface BatchLike {
   progress: { failed: number };
   listing_state?: string | null;
   paused_reason?: string | null;
+  found?: number;
+  group_id?: number | null;
+  group_state?: string | null;
+}
+
+export const QUEUED_LABEL = "Aguardando na fila";
+
+/**
+ * Lote filho de um grupo ainda na fila (a listagem dele não começou): não está "coletando lista". Usa
+ * `group_state` da API; sem ele (resposta antiga), deriva dos demais campos.
+ */
+export function isQueuedInGroup(
+  b: Pick<BatchLike, "status" | "listing_state" | "found" | "group_id" | "group_state">,
+): boolean {
+  if (b.group_state != null) return b.group_state === "waiting";
+  return b.group_id != null && b.status === "listing" && b.listing_state == null && (b.found ?? 0) === 0;
 }
 
 /** Lote ativo parado: coleta precisando do dono ou pausa por falhas seguidas. */
@@ -95,6 +112,7 @@ export function batchLabel(b: BatchLike): string {
   if (b.status === "completed" && b.progress.failed > 0) return "Concluído com erros";
   const stopped = stoppedLabel(b);
   if (stopped !== null) return stopped;
+  if (isQueuedInGroup(b)) return QUEUED_LABEL;
   // Espera pelo teto de páginas por hora: o lote continua ativo (mesmo tom da coleta, não é erro nem pausa).
   if (ACTIVE_BATCH.has(b.status) && b.listing_state === "waiting_rate_limit") return RATE_LIMIT_WAIT_LABEL;
   return BATCH_STATUS_LABEL[b.status];
@@ -103,6 +121,7 @@ export function batchLabel(b: BatchLike): string {
 export function batchToneOf(b: BatchLike): Tone {
   if (b.status === "completed" && b.progress.failed > 0) return "warn";
   if (stoppedLabel(b) !== null) return "warn";
+  if (isQueuedInGroup(b)) return "muted";
   return batchTone(b.status);
 }
 

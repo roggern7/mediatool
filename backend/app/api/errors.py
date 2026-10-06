@@ -46,7 +46,8 @@ def _location(loc: tuple) -> str:
 
 
 async def _app_error(_request: Request, exc: AppError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "code": exc.code})
+    content = {**(getattr(exc, "extra", None) or {}), "detail": exc.detail, "code": exc.code}
+    return JSONResponse(status_code=exc.status_code, content=content)
 
 
 async def _validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:

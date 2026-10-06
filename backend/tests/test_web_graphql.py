@@ -406,17 +406,48 @@ def test_repeated_cursor_is_contract_changed(boot):
     assert "FAKE_CURSOR" not in json.dumps(info.value.diagnostic)
 
 
-def test_empty_page_with_has_next_stops_with_warning(boot, caplog):
+def _listing_until_error(http, boot, **kwargs) -> tuple[list[dict], InstagramWebError]:
+    nodes: list[dict] = []
+    with pytest.raises(InstagramWebError) as info:
+        for node in gql(http, boot).iter_profile_posts("perfil_fake", max_media=None, **kwargs):
+            nodes.append(node)
+    return nodes, info.value
+
+
+def test_empty_page_with_has_next_is_not_end_of_profile(boot, caplog):
+    # Mudança confirmada: página vazia com has_next_page=true não encerra mais como fim (era `empty_page` + fim).
     http = FakeHttp(ok("page1_has_next.json"), ok("page_empty_has_next.json"))
-    nodes = list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=None))
-    assert len(nodes) == 2 and len(http.requests) == 2
+    ends: list = []
+    nodes, error = _listing_until_error(http, boot, on_page_end=lambda reason: ends.append(reason) or True)
+    assert len(nodes) == 2 and len(http.requests) == 2, "sem requisição extra"
+    assert error.code == "contract_changed" and error.diagnostic["detail"] == "empty_page"
+    assert ends == [None], "a página anômala não ganha checkpoint"
     assert "empty_page" in caplog.text
 
 
 def test_has_next_without_cursor_stops(boot):
+    # Continua parando sem requisição extra, mas agora como fim ANÔMALO (erro), não como fim do perfil.
     http = FakeHttp(page_json([{"pk": "1", "code": "A"}], True, None))
-    assert len(list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=None))) == 1
-    assert len(http.requests) == 1
+    nodes, error = _listing_until_error(http, boot)
+    assert len(nodes) == 1 and len(http.requests) == 1
+    assert error.code == "contract_changed" and error.diagnostic["detail"] == "cursor_missing"
+
+
+def test_has_next_page_that_is_not_boolean_is_not_end_of_profile(boot):
+    http = FakeHttp(page_json([{"pk": "1", "code": "A"}], None, None))
+    nodes, error = _listing_until_error(http, boot)
+    assert len(nodes) == 1 and len(http.requests) == 1
+    assert error.diagnostic["detail"] == "has_next_invalid"
+
+
+def test_max_pages_none_lists_until_the_real_end(boot):
+    pages = [page_json([{"pk": str(n), "code": f"C{n}"}], True, f"FAKE_CURSOR_{n}") for n in range(1, 700)]
+    http = FakeHttp(*pages, page_json([{"pk": "700", "code": "C700"}], False, None))
+    ends: list = []
+    nodes = list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=None, max_pages=None,
+                                                    on_page_end=lambda reason: ends.append(reason) or True))
+    assert len(nodes) == 700 == len(http.requests), "mais páginas que o padrão antigo de 500"
+    assert ends[-1] == "end_of_profile" and set(ends[:-1]) == {None}
 
 
 def test_max_pages_defensive(boot, caplog):
@@ -504,9 +535,10 @@ def test_stops_after_two_pages_without_new_nodes(boot, caplog):
     a, b = {"pk": "1", "code": "A"}, {"pk": "2", "code": "B"}
     http = FakeHttp(page_json([a, b], True, "FAKE_CURSOR_1"), page_json([a], True, "FAKE_CURSOR_2"),
                     page_json([b], True, "FAKE_CURSOR_3"), page_json([{"pk": "3", "code": "C"}], False, None))
-    nodes = list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=None))
+    nodes, error = _listing_until_error(http, boot)
     assert [n["code"] for n in nodes] == ["A", "B"]
     assert len(http.requests) == 3
+    assert error.code == "contract_changed" and error.diagnostic["detail"] == "no_new_items"
     assert "no_new_items" in caplog.text and "FAKE_CURSOR" not in caplog.text
 
 
@@ -687,7 +719,7 @@ def test_on_page_metadata_two_pages(boot, caplog):
 def test_on_page_cursor_absent(boot):
     http = FakeHttp(viewer_page([{"pk": "1"}], True, None))
     pages: list[dict] = []
-    list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=None, on_page=pages.append))
+    _listing_until_error(http, boot, on_page=pages.append)   # has_next sem cursor: fim anômalo depois do on_page
     assert pages[0]["end_cursor_present"] is False and pages[0]["cursor_changed"] is False
 
 
@@ -780,3 +812,22 @@ def test_profile_page_is_one_post_with_given_cursor_and_count(boot):
     http = FakeHttp(page_json([], False, None))
     assert gql(http, boot).profile_page("perfil_fake", after=None, count=12) == []
     assert "after" not in json.loads(http.requests[0][1]["variables"])
+
+
+def test_nodes_without_any_stable_key_do_not_count_as_new_posts(boot):
+    # Mesmos posts sem pk/id/code com cursores novos: sem teto de páginas isso paginaria para sempre. Nó sem chave
+    # não prova página nova: 2 páginas seguidas assim = fim anômalo (no_new_items).
+    pages = [page_json([{"media_type": 1}, {"media_type": 1}], True, f"FAKE_CURSOR_{n}") for n in range(1, 30)]
+    http = FakeHttp(*pages)
+    nodes, error = _listing_until_error(http, boot, max_pages=None)
+    assert len(http.requests) == 2 and len(nodes) == 4, "os nós seguem para a normalização contar o descarte"
+    assert error.code == "contract_changed" and error.diagnostic["detail"] == "no_new_items"
+
+
+def test_code_is_a_stable_key_when_pk_and_id_are_missing(boot):
+    same = [{"code": "A"}, {"code": "B"}]
+    http = FakeHttp(page_json(same, True, "FAKE_CURSOR_1"), page_json(same, True, "FAKE_CURSOR_2"),
+                    page_json(same, True, "FAKE_CURSOR_3"))
+    nodes, error = _listing_until_error(http, boot, max_pages=None)
+    assert [n["code"] for n in nodes] == ["A", "B"] and len(http.requests) == 3
+    assert error.diagnostic["detail"] == "no_new_items"

@@ -102,7 +102,7 @@ tokens extraídos da página (`fb_dtsg`, `lsd`, `jazoest`) também ficam só em 
 ## 4. Adapter Instagram
 
 ```python
-ContentType = Literal["reels", "posts", "videos", "images", "all"]
+ContentType = Literal["reels", "posts", "videos", "images", "all", "photos_carousels"]   # ver seção 8.1
 def parse_profile_input(value: str) -> str     # "@user", "user", "https://www.instagram.com/user/..." -> "user"; ValueError
                                                # username: ^[A-Za-z0-9._]{1,30}$, sem "..", não reservado (p, reel, explore...)
 @dataclass class ProfileInfo: username; user_id: str|None; full_name: str|None; avatar_url: str|None;
@@ -239,6 +239,10 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
   is_duplicate, duplicate_reason /*source_id|sha256|null*/, source_platform, source_profile, source_url, source_post_id,
   source_media_index, post_id, media_id_remote, media_type, media_url, thumbnail_url, taken_at, temp_path, created_at,
   started_at, finished_at, updated_at, heartbeat_at)`; único `(batch_id, source_post_id, source_media_index)` para ingest.
+- `import_groups(id, content_type, requested_limit, preset_id, preset_name, params json, process, created_at)`
+  (migration 0012): importação de vários perfis; só guarda o pedido, o estado é derivado dos filhos. `batches` ganha
+  `group_id` (FK, NULL em lotes avulsos/antigos), `group_position` (1-based) e `listing_end`
+  (`profile_end`|`limit`|NULL).
 - `settings(key PK, value json, updated_at)`; `app_state(key PK, value, updated_at)`.
 Nenhuma tabela guarda sessão/cookies.
 
@@ -286,8 +290,13 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET/PUT/DELETE | /api/presets/{id} | PUT `{name?, params?}` | `Preset` / 204 (409 builtin) |
 | POST | /api/presets/{id}/duplicate | `{name?}` | `Preset` 201 |
 | POST | /api/instagram/profile | `{profile}` | `ProfileInfo` (preview); prazo 50 s no backend: 504 `timeout`; 429 `rate_limited`; 403 `action_blocked`/`access_refused`; 502 `contract_changed`/`unsupported_media`/`network_error`; 409 `profile_preview_in_progress`; 409 `instagram_paused` |
-| POST | /api/imports | `{profile, content_type, limit: 10\|20\|50\|100\|null, preset_id?\|null, process?: bool}` (`process` padrão `false` = download-only; `preset_id` padrão `null`; `process: true` sem `preset_id` usa o preset padrão) | `Batch` 202; 409 `session_missing`; 409 `instagram_paused` |
-| GET | /api/batches | `limit, offset, source?=instagram_import\|library` | `{items: Batch[], total}` |
+| POST | /api/imports | `{profile, content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool}` (`limit: null` = "Todos", até o fim real do perfil; `content_type`: `all`\|`reels`\|`photos_carousels` e os antigos `posts`\|`videos`\|`images`; `process` padrão `false` = download-only; `preset_id` padrão `null`; `process: true` sem `preset_id` usa o preset padrão) | `Batch` 202; 409 `session_missing`; 409 `instagram_paused`; 409 `profile_already_importing`; 422 `invalid_input` |
+| POST | /api/import-groups/preview | `{entries?: string[], text?: string}` | `ProfilesPreview` (sem efeitos, sem Instagram); 422 `too_many_profiles` |
+| POST | /api/import-groups | `{profiles: string[], content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool}`, query `children_limit` | `ImportGroupDetail` 202 (com `skipped`, `duplicates`); 422 `invalid_profiles`\|`no_profiles`\|`too_many_profiles`; 409 `profile_already_importing`\|`session_missing`\|`instagram_paused`; 404 `preset_not_found` |
+| GET | /api/import-groups | `limit`<=200, `before_id` | `{items: ImportGroup[], total, next_before_id}` |
+| GET | /api/import-groups/{id} | `children_limit`<=500 (100), `after_position` | `ImportGroupDetail`; 404 `group_not_found` |
+| POST | /api/import-groups/{id}/cancel | query `children_limit` | `ImportGroupDetail`; 409 `group_finished`; 404 `group_not_found` |
+| GET | /api/batches | `limit, offset, source?=instagram_import\|library, group_id?, ungrouped?=true` | `{items: Batch[], total}` (padrão: todos os lotes, inclusive filhos de grupo) |
 | GET | /api/batches/{id} | | `Batch` + `jobs: Job[]` |
 | POST | /api/batches/{id}/cancel | | `Batch` |
 | POST | /api/batches/{id}/retry-failed | | `Batch` |
@@ -334,7 +343,10 @@ Batch = { id, source, source_profile|null, content_type|null, requested_limit|nu
   listing_state: "pending"|"running"|"waiting_backpressure"|"waiting_rate_limit"|"paused"|"needs_attention"|"done"|
     "cancelled"|null,
   rate_limit_resume_at: string|null /*ISO UTC*/, rate_limit_pages_used: number|null, rate_limit_pages_max: number|null,
-  listing_dropped: { unexpected_total: number, reasons: {<motivo>: n}, pending: number } }
+  listing_dropped: { unexpected_total: number, reasons: {<motivo>: n}, pending: number },
+  listing_end: "profile_end"|"limit"|null,   // por que a listagem terminou (seção 8.1); null enquanto lista/erro/antigo
+  group_id: number|null, group_position: number|null /*1-based*/,
+  group_state: "waiting"|"active"|"attention"|"completed"|"failed"|"cancelled"|null /*só em filhos de grupo*/ }
   // pending: parte de unexpected_total/reasons que ainda é da página ABERTA da listagem (sem checkpoint; ex.: lote
   // em needs_attention ou parado no meio da página). Já está somada no total para não ficar invisível; vira
   // definitiva se a listagem encerrar ou o lote for cancelado, e é substituída (sem duplicar) se a página for refeita.
@@ -374,6 +386,180 @@ Storage: original promovido de temp por rename atômico para
 `storage\originals\<yyyy>\<mm>\<sha256[:2]>\<sha256>.<ext>`; processado em
 `storage\processed\<yyyy>\<mm>\<media_id>_<job_id>_<sha8>.<ext>`; thumb `storage\thumbs\<media_id>.jpg`.
 Nunca sobrescrever; nome interno nunca vem da origem.
+
+### 8.1 Importação: "Todos", tipo de mídia e vários perfis (grupos)
+
+Contrato para o frontend. Regras de execução completas: `docs/BATCH_ROBUSTNESS.md`, seção 0.1.
+
+**Quantidade (`limit`)**: inteiro de 1 a 1.000.000 ("Últimos N") ou `null` ("Todos"). Fora disso: 422 (validação).
+`null` percorre o perfil até o fim real (`has_next_page=false`); não é um número grande. N conta mídias do TIPO
+pedido ("100 + Reels" = 100 Reels; a listagem continua até achar 100 ou o perfil acabar). O código
+`limit_all_disabled` não existe mais.
+
+**Tipo (`content_type`)**, três opções na interface:
+
+| Interface | `content_type` | O que entra |
+|---|---|---|
+| Todos | `all` | todos os tipos suportados |
+| Reels | `reels` | só publicações classificadas como Reel (item de carrossel nunca entra) |
+| Fotos e carrosséis | `photos_carousels` | fotos simples + TODOS os itens dos carrosséis (inclusive vídeo de carrossel); exclui Reels e vídeo avulso que não é Reel |
+
+**Vídeo avulso que não é Reel** (publicação de vídeo legada, sem `product_type` `clips` e fora de carrossel): entra
+SÓ em `all` (e no antigo `videos`). Não entra em `reels` nem em `photos_carousels`; nesses filtros é ignorado como
+filtro esperado (`content_filter`), nunca como descarte. (Em qual filtro esse caso deve cair está em aberto com o
+dono.)
+
+**Método de importação**: "Todos" (`limit: null`), N acima de 5.000 e `photos_carousels` exigem o método web. Com
+`instagram_provider = "gallery_dl"` configurado, `POST /api/imports` e `POST /api/import-groups` respondem 422
+`not_supported_by_provider` (mensagem em pt-BR) e nada é criado. Em `auto` o pedido é aceito e nunca cai no
+gallery-dl: o erro do web fica visível no lote.
+
+Valores antigos ainda aceitos: `posts` (igual a `all`), `videos`, `images`. Carrossel conta por item; se o limite cai
+no meio de um carrossel, entram só os primeiros itens dele. O que o filtro ignora NÃO aparece em `listing_dropped`.
+
+**`Batch.listing_end`**: `"limit"` (achou a quantidade pedida), `"profile_end"` (o perfil acabou; pode ter menos que
+o pedido: mostrar "perfil chegou ao fim: `found` de `requested_limit`"; nesse caso `error_message` traz um texto
+informativo e `error_code` é `null`), `null` (ainda listando, erro, cancelado ou lote antigo).
+
+**Fim anômalo da paginação** (não é fim do perfil): o lote fica `status: "listing"`, `listing_state:
+"needs_attention"`, `error_code: "contract_changed"`, `error_message` em pt-BR, `listing_end: null`. O lote NÃO
+conclui; há nova tentativa automática a cada 6 h (até 4) e o botão "Retomar importação"
+(`POST /api/batches/{id}/resume-listing`). Na 1a página, sem nenhum item: `status: "failed"` com o mesmo erro.
+
+**Estados apresentados** de um lote/filho: `status` (`listing`|`running`|`completed`|`failed`|`cancelled`) e
+`listing_state` (`null`/`pending`|`running`|`waiting_backpressure`|`waiting_rate_limit`|`paused`|`needs_attention`|
+`done`|`cancelled`). Em filhos de grupo, `group_state` resume para a lista: `waiting` (na fila; a listagem ainda não
+começou, `listing_state` nulo ou `pending`), `active` (listando ou baixando, inclusive `waiting_rate_limit`,
+`waiting_backpressure` e `paused`: use `listing_state` para o rótulo), `attention` (`needs_attention`),
+`completed`, `failed`, `cancelled`.
+
+```ts
+ProfilesPreview = { valid: string[] /*usernames normalizados, minúsculas, na ordem, sem repetição*/,
+  invalid: { entry: string /*até 200 caracteres*/, reason: string /*pt-BR*/ }[], duplicates: number }
+ImportGroup = { id, content_type, requested_limit: number|null /*POR PERFIL*/, preset_id|null, preset_name|null,
+  process: boolean, created_at, finished_at: string|null /*só com todos os filhos encerrados*/,
+  status: "active"|"attention"|"completed"|"cancelled",
+  attention: boolean /*algum filho em attention ou failed; vale também com status active/completed*/,
+  profiles: { total, waiting, active, completed, attention, failed, cancelled } /*os seis somam total*/,
+  profile_end_count: number /*filhos com listing_end = profile_end*/,
+  progress: { found, downloaded, processed, skipped, failed, pending, active } /*soma das mídias dos filhos*/,
+  listing_dropped_total: number /*soma de listing_dropped definitivo dos filhos; o detalhe fica em cada filho*/ }
+ImportGroupDetail = { group: ImportGroup, children: Batch[] /*ordem group_position*/,
+  next_after_position: number|null,
+  skipped?: { profile: string, reason: "profile_already_importing" }[] /*só na criação*/,
+  duplicates?: number /*só na criação*/ }
+```
+`ImportGroup.status` é derivado dos filhos: `active` se algum filho está `waiting` ou `active`; senão `attention` se
+algum está em `attention` (grupo parado aguardando ação ou a nova tentativa de 6 h); senão `cancelled` se todos foram
+cancelados; senão `completed` (todos encerrados; confira `attention`/`profiles.failed` para falhas).
+
+**Entradas de perfil**: UM PERFIL POR LINHA (vírgula e ponto e vírgula também separam; ESPAÇO NÃO separa). Cada
+entrada: `usuario`, `@usuario` ou URL do perfil (`http`/`https`, com ou sem `www`, barra final, query string e
+fragmento). URLs aceitas: `instagram.com/usuario`, `/usuario/` e as abas do perfil `/usuario/reels/` e
+`/usuario/tagged/`. Normalização = a de `parse_profile_input` (minúsculas). Linhas vazias são ignoradas e espaços nas
+pontas aparados; repetidas (depois de normalizar) são removidas e contadas em `duplicates`. Inválidas (reportadas com
+motivo): entrada com espaço interno (`nome com espaço` é UMA entrada inválida, não três perfis), URL que não é de
+perfil (`/p/...`, `/reel/...`, `/reels/...`, `/explore/...`, `/stories/...`, `/accounts/...`, `/direct/...`,
+`/usuario/<outro caminho>`), outro domínio, caracteres não permitidos, nome reservado (`p`, `reel`, `reels`,
+`explore`, `stories`, `accounts`, `direct`, `tv`, `about`, `legal`, `developer`, `api`...) ou fora de
+`^[A-Za-z0-9._]{1,30}$`. Teto de sanidade: 10.000 perfis por requisição
+(422 `too_many_profiles`).
+
+**Fluxo recomendado**: (1) `POST /api/import-groups/preview` com o texto colado; mostrar `invalid` e `duplicates`;
+(2) `POST /api/import-groups` com `profiles: preview.valid`. A criação REJEITA entrada inválida (422
+`invalid_profiles`, sem criar nada) e devolve no erro `invalid`, `valid` e `duplicates` para reenviar só as válidas.
+
+`POST /api/import-groups/preview` (sem efeitos; nenhuma requisição ao Instagram):
+```json
+{ "text": "usuario_um\n@Usuario_Dois\nhttps://www.instagram.com/usuario.tres/?hl=pt\n\nusuario_um\nhttps://www.instagram.com/p/ABCDE12345/" }
+```
+```json
+{ "valid": ["usuario_um", "usuario_dois", "usuario.tres"],
+  "invalid": [{ "entry": "https://www.instagram.com/p/ABCDE12345/", "reason": "a URL não aponta para um perfil" }],
+  "duplicates": 1 }
+```
+
+`POST /api/import-groups` -> 202:
+```json
+{ "profiles": ["usuario_um", "usuario_dois", "usuario.tres"], "content_type": "reels", "limit": 1000,
+  "preset_id": null, "process": false }
+```
+```json
+{ "group": { "id": 7, "content_type": "reels", "requested_limit": 1000, "preset_id": null, "preset_name": null,
+             "process": false, "created_at": "2026-10-06T12:00:00.000Z", "finished_at": null,
+             "status": "active", "attention": false,
+             "profiles": { "total": 2, "waiting": 2, "active": 0, "completed": 0, "attention": 0, "failed": 0,
+                           "cancelled": 0 },
+             "profile_end_count": 0,
+             "progress": { "found": 0, "downloaded": 0, "processed": 0, "skipped": 0, "failed": 0, "pending": 0,
+                           "active": 0 },
+             "listing_dropped_total": 0 },
+  "children": [
+    { "id": 41, "source": "instagram_import", "source_profile": "usuario_um", "content_type": "reels",
+      "requested_limit": 1000, "preset_id": null, "preset_name": null, "process": false, "status": "listing",
+      "found": 0, "error_code": null, "error_message": null, "created_at": "2026-10-06T12:00:00.000Z",
+      "updated_at": "2026-10-06T12:00:00.000Z", "finished_at": null, "listing_state": null,
+      "rate_limit_resume_at": null, "rate_limit_pages_used": null, "rate_limit_pages_max": null,
+      "paused_reason": null, "paused_until": null,
+      "listing_dropped": { "unexpected_total": 0, "reasons": {}, "pending": 0 }, "listing_end": null,
+      "group_id": 7, "group_position": 1, "group_state": "waiting",
+      "progress": { "found": 0, "downloaded": 0, "processed": 0, "skipped": 0, "failed": 0, "pending": 0,
+                    "active": 0 },
+      "counts": { "pending": 0, "downloading": 0, "downloaded": 0, "processing": 0, "completed": 0, "failed": 0,
+                  "cancelled": 0 }, "jobs": null, "jobs_truncated": null },
+    { "id": 42, "source_profile": "usuario.tres", "group_id": 7, "group_position": 2, "group_state": "waiting",
+      "...": "demais campos de Batch" }
+  ],
+  "next_after_position": null,
+  "skipped": [{ "profile": "usuario_dois", "reason": "profile_already_importing" }],
+  "duplicates": 0 }
+```
+- Um lote filho por perfil criado, na ordem da lista (`group_position` 1..n entre os criados). `limit` é POR PERFIL.
+- Perfil que já tem importação ativa (lote em `listing`) não derruba o pedido: volta em `skipped` e os demais são
+  criados. Se TODOS forem pulados: 409 `{code: "profile_already_importing", detail, skipped: [...]}`, nada criado.
+- `children` traz a primeira página (`children_limit`, padrão 100, máx. 500); as seguintes por
+  `GET /api/import-groups/{id}?after_position=<next_after_position>`.
+- Erros: 422 `invalid_profiles` `{detail, code, invalid: [{entry, reason}], valid: [...], duplicates}`; 422
+  `no_profiles` (lista só com vazios); 422 `too_many_profiles`; 422 `not_supported_by_provider` ("Todos", N > 5.000 ou
+  `photos_carousels` com o método gallery-dl configurado; vale também em `POST /api/imports`); 409
+  `session_missing`; 409 `instagram_paused`; 404 `preset_not_found`.
+
+`GET /api/import-groups?limit=50&before_id=` -> `{ "items": [ImportGroup, ...], "total": 12, "next_before_id": 3 }`
+(ordem id DESC; `next_before_id` `null` no fim). Duas consultas ao banco para a página inteira.
+
+`GET /api/import-groups/{id}?children_limit=100&after_position=100` -> `ImportGroupDetail` (sem `skipped`/
+`duplicates`). Cada filho é um `Batch` completo: `source_profile`, `group_position`, `status`, `listing_state`
+apresentado (inclusive `waiting_rate_limit` com os campos `rate_limit_*`, e `waiting_backpressure`), `group_state`,
+`found`, `progress`, `requested_limit`, `listing_end`, `listing_dropped`, `error_code`/`error_message`. Custo
+independente do número de filhos (sem consulta por filho). Exemplo de filho em andamento e de filho com atenção:
+```json
+{ "id": 41, "source_profile": "usuario_um", "group_position": 1, "group_state": "active", "status": "listing",
+  "listing_state": "waiting_rate_limit", "rate_limit_resume_at": "2026-10-06T13:02:11.000Z",
+  "rate_limit_pages_used": 600, "rate_limit_pages_max": 600, "found": 3120, "requested_limit": null,
+  "listing_end": null, "progress": { "found": 3120, "downloaded": 3051, "processed": 0, "skipped": 0, "failed": 2,
+  "pending": 60, "active": 2 }, "...": "demais campos de Batch" }
+{ "id": 43, "source_profile": "usuario_quatro", "group_position": 3, "group_state": "attention",
+  "status": "listing", "listing_state": "needs_attention", "error_code": "contract_changed",
+  "error_message": "O Instagram interrompeu a paginação do perfil antes do fim (resposta sem continuação utilizável). A importação não foi dada como concluída e o ponto de retomada foi mantido.",
+  "found": 240, "listing_end": null, "...": "demais campos de Batch" }
+```
+
+`POST /api/import-groups/{id}/cancel` -> `ImportGroupDetail`: cancela todos os filhos ainda abertos (`listing` ou
+`running`) numa transação só (nenhum filho da fila começa a listar depois); o filho que está listando/baixando para
+de forma cooperativa. Os concluídos/falhos ficam como estão. 409 `group_finished` se não há filho aberto. Cancelar, retomar
+(`resume-listing`), recomeçar (`restart-listing`) ou repetir falhas (`retry-failed`) de UM filho: rotas de lote
+existentes, com o `id` do filho.
+
+`GET /api/batches`: continua listando todos os lotes, inclusive filhos de grupo (compatibilidade), agora com
+`group_id`/`group_position`/`group_state`/`listing_end` em cada item (lotes antigos: `null`). Para a lista de
+"importações recentes" sem poluição use `?ungrouped=true` (só lotes avulsos e antigos) junto com
+`GET /api/import-groups`; `?group_id=<id>` devolve só os filhos de um grupo (paginação por `offset`).
+
+Fila do grupo: um perfil por vez na listagem, na ordem `group_position`; os demais ficam `group_state: "waiting"`.
+O filho seguinte começa quando o da vez terminou de listar (os downloads dele seguem em paralelo) ou ficou parado por
+conta própria (`attention`, pausa do lote). Erro em um perfil não afeta os outros. Pausa global do Instagram
+(`GET /api/settings` -> `instagram.paused_until`) segura todos e a listagem retoma do checkpoint. Depois de reiniciar
+o app a fila continua de onde parou, na mesma ordem.
 
 ## 9. Processor (`media_processor`)
 

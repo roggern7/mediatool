@@ -1,6 +1,6 @@
 """INSTAGRAM_PAGE_RATE_LIMIT: teto de páginas de listagem por hora configurável (docs/BATCH_ROBUSTNESS.md, seção 9).
 
-Padrão 300/h; ``0`` = sem teto horário (só POC de escala). Muda SOMENTE o teto por hora: intervalo entre requisições,
+Padrão 600/h (antes 300); ``0`` = sem teto horário (só POC de escala). Muda SOMENTE o teto por hora: intervalo entre requisições,
 1 em voo, backpressure, pausas, 429, ritmo lento, orçamento de páginas e checkpoint continuam iguais.
 100% offline, valores FAKE, relógio simulado (sem rede, sem porta 8765, sem data\\secrets reais).
 """
@@ -61,8 +61,8 @@ def _calls(env, pages: int = 3) -> list[int]:
 
 
 @pytest.mark.parametrize("env, expected", [
-    (None, 300),
-    ({}, 300),
+    (None, 600),
+    ({}, 600),
     ({ENV_PAGE_RATE_LIMIT: "300"}, 300),
     ({ENV_PAGE_RATE_LIMIT: "5"}, 5),
     ({ENV_PAGE_RATE_LIMIT: " 7 "}, 7),
@@ -71,29 +71,29 @@ def _calls(env, pages: int = 3) -> list[int]:
     ({ENV_PAGE_RATE_LIMIT: "0", LEGACY: "9"}, 0),            # a nova prevalece, inclusive o 0
     ({LEGACY: "9"}, 9),                                      # só a antiga: comportamento anterior
     ({ENV_PAGE_RATE_LIMIT: "", LEGACY: "9"}, 9),             # vazia = ausente
-    ({ENV_PAGE_RATE_LIMIT: "abc"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "-1"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "1.5"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: ""}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "   "}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "100001"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "0x10"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "abc", LEGACY: "9"}, 300),        # inválida nunca desabilita nem herda por engano
+    ({ENV_PAGE_RATE_LIMIT: "abc"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "-1"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "1.5"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: ""}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "   "}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "100001"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "0x10"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "abc", LEGACY: "9"}, 600),        # inválida nunca desabilita nem herda por engano
 ])
 def test_page_rate_limit_value(env, expected):
     assert page_rate_limit(env) == expected
 
 
 @pytest.mark.parametrize("env, expected", [
-    ({}, 300),
+    ({}, 600),
     ({ENV_PAGE_RATE_LIMIT: "300"}, 300),
     ({ENV_PAGE_RATE_LIMIT: "5"}, 5),
     ({ENV_PAGE_RATE_LIMIT: "5", LEGACY: "9"}, 5),
-    ({ENV_PAGE_RATE_LIMIT: "abc"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "-1"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "1.5"}, 300),
-    ({ENV_PAGE_RATE_LIMIT: ""}, 300),
-    ({ENV_PAGE_RATE_LIMIT: "  "}, 300),
+    ({ENV_PAGE_RATE_LIMIT: "abc"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "-1"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "1.5"}, 600),
+    ({ENV_PAGE_RATE_LIMIT: ""}, 600),
+    ({ENV_PAGE_RATE_LIMIT: "  "}, 600),
 ])
 def test_provider_calls_gate_with_the_cap_before_each_page(env, expected):
     assert _calls(env) == [expected] * 3
@@ -101,7 +101,7 @@ def test_provider_calls_gate_with_the_cap_before_each_page(env, expected):
 
 def test_zero_never_calls_wait_listing_page_and_default_is_unchanged():
     assert _calls(ZERO, pages=4) == []
-    assert _calls({}, pages=4) == [300] * 4
+    assert _calls({}, pages=4) == [600] * 4
 
 
 def test_variable_reaches_the_provider_through_settings_env(monkeypatch, tmp_path):
@@ -121,7 +121,7 @@ def test_variable_reaches_the_provider_through_settings_env(monkeypatch, tmp_pat
     assert page_rate_limit(load_settings(root=tmp_path).env) == 5, "ambiente do processo > .env"
     (tmp_path / ".env").unlink()
     monkeypatch.delenv(ENV_PAGE_RATE_LIMIT)
-    assert page_rate_limit(load_settings(root=tmp_path).env) == 300
+    assert page_rate_limit(load_settings(root=tmp_path).env) == 600
 
 
 # --------------------------------------------------------------------------- 7. aviso uma vez só
@@ -144,7 +144,7 @@ def test_no_disabled_warning_for_default_positive_or_invalid(caplog):
         _calls(env)
     assert not [r for r in caplog.records if "DESABILITADO" in r.getMessage()]
     assert provider_mod._rate_limit_disabled_logged is False
-    assert [r for r in caplog.records if "inválido" in r.getMessage()], "valor inválido avisa e usa 300"
+    assert [r for r in caplog.records if "inválido" in r.getMessage()], "valor inválido avisa e usa 600"
 
 
 # --------------------------------------------------------------------------- 2. com 0 não há espera nem reserva
@@ -158,13 +158,13 @@ def _web(mock, gate, *, env, pages: int = 6) -> InstagramWebDownloader:
 def test_zero_lists_more_pages_than_a_full_window_allows_without_waiting_or_reserving():
     clk = MonoClock()
     wall = time.time()
-    # Janela cheia persistida de uma execução anterior (300 páginas agora): com teto, a listagem esperaria ~1 h.
-    full = json.dumps([wall] * 300)
+    # Janela cheia persistida de uma execução anterior (600 páginas agora): com teto, a listagem esperaria ~1 h.
+    full = json.dumps([wall] * 600)
 
     def run(env):
         saved: list[str] = []
         gate = InstagramRequestGate(interval=(0, 0), clock=clk, sleep=clk.sleep, save_pages=saved.append)
-        assert gate.restore_listing_pages(full) == 300
+        assert gate.restore_listing_pages(full) == 600
         mock = GatedInstagram()
         assert len(list(_web(mock, gate, env=env).iter_profile_media("perfil_fake", "all", None))) == 6 * 12
         return gate, saved
@@ -172,9 +172,9 @@ def test_zero_lists_more_pages_than_a_full_window_allows_without_waiting_or_rese
     clk.slept.clear()
     gate, saved = run(ZERO)
     assert clk.slept == [] and saved == [], "sem espera e nada gravado em instagram_listing_pages"
-    assert len(gate._pages) == 300, "nenhuma reserva nova na janela"
+    assert len(gate._pages) == 600, "nenhuma reserva nova na janela"
 
-    gate, saved = run({})   # controle: o padrão (300/h) com a janela cheia espera e reserva
+    gate, saved = run({})   # controle: o padrão (600/h) com a janela cheia espera e reserva
     assert clk.slept and clk.slept[0] > 3000
     assert saved, "o controle prova que a gravação funciona"
 
@@ -225,9 +225,9 @@ def test_stale_wait_fields_are_cleared_at_startup_when_cap_is_disabled(harness_f
     batch_id = h.import_profile(limit=100)["id"]
     from app.db.connection import utc_now
 
-    h.ctx.app_settings.set_state(PAGES_STATE_KEY, json.dumps([time.time()] * 300))   # janela cheia, de agora
+    h.ctx.app_settings.set_state(PAGES_STATE_KEY, json.dumps([time.time()] * 600))   # janela cheia, de agora
     h.ctx.batches.update_listing(batch_id, listing_state="running", rate_limit_resume_at=utc_now(1800),
-                                 rate_limit_pages_used=300, rate_limit_pages_max=300)
+                                 rate_limit_pages_used=600, rate_limit_pages_max=600)
 
     def api(app):
         return app.client.get(f"/api/batches/{batch_id}").json()
@@ -403,21 +403,48 @@ def test_zero_429_pauses_and_slow_pace_still_applies_for_one_hour(harness_factor
     assert final["status"] == "completed"
 
 
-def test_zero_keeps_the_page_budget_and_low_yield_stop():
+def test_zero_keeps_max_pages_and_lists_to_the_real_end_like_default():
     def posts(env, content, pages):
         mock = GatedInstagram()
         dl = _web(mock, InstagramRequestGate(interval=(0, 0)), env=env, pages=pages)
         list(dl.iter_profile_media("perfil_fake", content, None))
         return sum(1 for s in mock.spans if s[2] == "/graphql/query")
 
-    assert posts(ZERO, "all", 4) == posts({}, "all", 4) == 4, "max_pages continua valendo"
+    assert posts(ZERO, "all", 4) == posts({}, "all", 4) == 4, "max_pages (teto do trecho, só testes) continua valendo"
 
-    def low_yield(env):
+    def unproductive(env):
         feed = Feed(["img"] * 3000)   # só imagens: pedir "videos" não rende nada
         dl = InstagramWebDownloader(SessionWithCookie(), transport=feed.transport(), page_delay=(0, 0),
                                     request_gate=InstagramRequestGate(interval=(0, 0)), env=env)
         list(dl.iter_profile_media("perfil_fake", "videos", None))
         return len(feed.posts_vars)
 
-    default, zero = low_yield({}), low_yield(ZERO)
-    assert zero == default and 0 < zero < 3000 // 12, "o corte por baixo rendimento é o mesmo"
+    # Não existe mais corte por baixo rendimento: com e sem a variável a listagem vai até o fim real do perfil.
+    default, zero = unproductive({}), unproductive(ZERO)
+    assert zero == default == 3000 // 12
+
+
+def test_startup_uses_the_cap_in_force_not_the_one_stored_in_the_batch(harness_factory):
+    """Atualização 300 -> 600 com um lote que estava esperando: a janela tem 300 páginas (cheia pelo teto antigo,
+    com vaga pelo novo). A inicialização decide pelo teto VIGENTE: o lote não aparece `waiting_rate_limit`."""
+    from app.db.connection import utc_now
+
+    h = harness_factory()
+    batch_id = h.import_profile(limit=100)["id"]
+    h.ctx.app_settings.set_state(PAGES_STATE_KEY, json.dumps([time.time()] * 300))
+    h.ctx.batches.update_listing(batch_id, listing_state="running", rate_limit_resume_at=utc_now(3000),
+                                 rate_limit_pages_used=300, rate_limit_pages_max=300)
+    assert h.client.get(f"/api/batches/{batch_id}").json()["listing_state"] == "waiting_rate_limit"
+
+    upgraded = harness_factory(root=h.root)   # reinício com o padrão novo (600)
+    body = upgraded.client.get(f"/api/batches/{batch_id}").json()
+    assert body["listing_state"] == "running" and body["rate_limit_resume_at"] is None
+    assert upgraded.ctx.batches.get(batch_id)["rate_limit_pages_max"] is None
+
+    lower = harness_factory(root=h.root, env={ENV_PAGE_RATE_LIMIT: "200"})   # teto vigente menor: continua cheia
+    h.ctx.batches.update_listing(batch_id, rate_limit_resume_at=utc_now(3000), rate_limit_pages_used=300,
+                                 rate_limit_pages_max=300)
+    lower.ctx.import_runner.restore_rate_limit_wait()
+    body = lower.client.get(f"/api/batches/{batch_id}").json()
+    assert (body["listing_state"], body["rate_limit_pages_used"], body["rate_limit_pages_max"]) == (
+        "waiting_rate_limit", 300, 200)

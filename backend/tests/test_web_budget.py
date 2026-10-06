@@ -1,4 +1,5 @@
-"""Orçamento de paginação, retomada, ListingRef e refresh_page do provider web (offline: httpx.MockTransport).
+"""Paginação (sem parada por improdutividade nem teto de páginas), retomada, ListingRef e refresh_page do provider
+web (offline: httpx.MockTransport).
 
 Perfis sintéticos gerados sob demanda pelo cursor (nada de páginas guardadas); valores FAKE.
 """
@@ -19,7 +20,6 @@ import pytest
 from app.integrations.instagram.downloader import InstagramError, ListingCheckpoint, ListingRef
 from app.integrations.instagram.session import InstagramSession
 from app.integrations.instagram.web import budget
-from app.integrations.instagram.web.budget import ListingBudget, max_pages_for
 from app.integrations.instagram.web.provider import InstagramWebDownloader
 from media_fakes import FAKE_SESSION
 
@@ -109,35 +109,26 @@ def assert_no_secrets(text: str) -> None:
         assert marker not in text, marker
 
 
-# --------------------------------------------------------------------------- números do orçamento
+# --------------------------------------------------------------------------- sem orçamento de páginas
 
 
 def test_budget_numbers():
-    assert budget.PAGE_SIZE == 12 and budget.SLACK_PAGES == 2
-    assert budget.SAFETY_FACTOR == {"all": 2, "posts": 2, "images": 4, "reels": 8, "videos": 8}
-    assert [max_pages_for(n, "all") for n in (10, 20, 50, 100)] == [4, 6, 12, 20]
-    assert [max_pages_for(n, "reels") for n in (10, 20, 50, 100)] == [10, 18, 42, 74]
-    assert max_pages_for(10, "images") == 6 and max_pages_for(10, "videos") == 10
-    assert max_pages_for(10000, "all") == 1670 and max_pages_for(10000, "posts") == 1670
-    assert max_pages_for(10000, "reels") == 6674 and max_pages_for(10000, "images") == 3338
-    b = ListingBudget()
-    assert (b.unproductive_limit("all"), b.unproductive_limit("posts")) == (3, 3)
-    assert {b.unproductive_limit(c) for c in ("reels", "videos", "images")} == {6}
-    assert (b.min_pages_for_yield, b.min_yield) == (20, 0.25)
+    # O orçamento antigo (teto proporcional, páginas improdutivas, rendimento baixo) saiu: só o tamanho de página.
+    assert budget.PAGE_SIZE == 12
+    for gone in ("max_pages_for", "ListingBudget", "SAFETY_FACTOR", "STOP_FILTER_EXHAUSTED", "STOP_LOW_YIELD"):
+        assert not hasattr(budget, gone), gone
 
 
-def test_budget_env_is_validated(caplog):
-    b = ListingBudget.from_env({"MEDIA_TOOL_IG_UNPRODUCTIVE_PAGES": "0", "MEDIA_TOOL_IG_UNPRODUCTIVE_PAGES_FILTERED": "999",
-                                "MEDIA_TOOL_IG_MIN_PAGES_FOR_YIELD": "abc", "MEDIA_TOOL_IG_MIN_YIELD": "nan"})
-    assert (b.unproductive_pages, b.unproductive_pages_filtered) == (1, 100)
-    assert (b.min_pages_for_yield, b.min_yield) == (20, 0.25)
-    b = ListingBudget.from_env({"MEDIA_TOOL_IG_UNPRODUCTIVE_PAGES": " 5 ", "MEDIA_TOOL_IG_MIN_YIELD": "0.5",
-                                "MEDIA_TOOL_IG_MIN_PAGES_FOR_YIELD": "40"})
-    assert (b.unproductive_pages, b.min_yield, b.min_pages_for_yield) == (5, 0.5, 40)
-    assert "abc" not in caplog.text and ListingBudget.from_env(None) == ListingBudget()
+def test_old_budget_env_no_longer_stops_the_listing():
+    env = {"MEDIA_TOOL_IG_UNPRODUCTIVE_PAGES": "1", "MEDIA_TOOL_IG_UNPRODUCTIVE_PAGES_FILTERED": "1",
+           "MEDIA_TOOL_IG_MIN_PAGES_FOR_YIELD": "1", "MEDIA_TOOL_IG_MIN_YIELD": "12"}
+    site = SyntheticInstagram(9)   # só fotos
+    dl = downloader(site, env)
+    assert list(dl.iter_profile_media("perfil_teste", "reels", 10)) == []
+    assert site.posts == 9 and dl.last_listing_stats["stop_reason"] == "end_of_profile"
 
 
-def test_limit_10000_uses_proportional_cap():
+def test_no_page_cap_for_any_limit_or_content():
     seen = {}
 
     class Recorder:
@@ -145,64 +136,65 @@ def test_limit_10000_uses_proportional_cap():
         current_page = None
 
         def iter_profile_posts(self, username, **kwargs):
-            seen[username] = kwargs["max_pages"]
+            seen[username] = (kwargs["max_pages"], kwargs["max_media"])
             return iter(())
 
     class Boot:
         def get(self, *, force=False):
             return None
 
-    for content, expected in (("all", 1670), ("reels", 6674)):
+    for content, limit in (("all", 10000), ("reels", 10), ("photos_carousels", 1_000_000), ("all", None)):
         dl = InstagramWebDownloader(FakeProvider(), bootstrap_factory=lambda h: Boot(),
                                     graphql_factory=lambda h, b: Recorder())
-        assert list(dl.iter_profile_media(f"perfil_{content}", content, 10000)) == []
-        assert seen[f"perfil_{content}"] == expected
+        assert list(dl.iter_profile_media(f"perfil_{content}", content, limit)) == []
+        assert seen[f"perfil_{content}"] == (None, limit), "sem teto de páginas nem de quantidade"
 
 
-# --------------------------------------------------------------------------- parada adaptativa
+# --------------------------------------------------------------------------- páginas improdutivas não encerram
 
 
-def test_ten_reels_in_profile_full_of_photos_stops_without_hundreds_of_posts(caplog):
+def test_ten_reels_in_profile_full_of_photos_goes_to_the_real_end(caplog):
     caplog.set_level("DEBUG")
-    site = SyntheticInstagram(500)   # só fotos
+    site = SyntheticInstagram(40)   # só fotos
     dl = downloader(site)
     assert list(dl.iter_profile_media("perfil_teste", "reels", 10)) == []
-    assert site.posts == 6 and site.gets == 1   # UNPRODUCTIVE_PAGES_LIMIT de filtros
-    assert dl.last_listing_stats == {"pages": 6, "posts_seen": 70, "items_compatible": 0,
-                                     "items_skipped_filter": 70, "duplicates": 0, "stop_reason": "filter_exhausted"}
+    assert site.posts == 40 and site.gets == 1   # antes parava em 6 páginas (filter_exhausted)
+    assert dl.last_listing_stats == {"pages": 40, "posts_seen": 478, "items_compatible": 0,
+                                     "items_skipped_filter": 478, "duplicates": 0, "stop_reason": "end_of_profile"}
     assert_no_secrets(caplog.text)
 
 
-def test_sparse_reels_stop_at_proportional_cap():
+def test_sparse_reels_reach_the_requested_quantity():
     site = SyntheticInstagram(500, lambda page, i: "reel" if page % 2 == 0 and i == 0 else "image")
     dl = downloader(site)
     items = list(dl.iter_profile_media("perfil_teste", "reels", 10))
-    assert len(items) == 5 and site.posts == 10 and dl.last_listing_stats["stop_reason"] == "budget_exhausted"
+    # Antes: 5 itens em 10 páginas (budget_exhausted). Agora: os 10 pedidos, sem página extra.
+    assert len(items) == 10 and site.posts == 20 and dl.last_listing_stats["stop_reason"] == "limit_reached"
 
 
-def test_low_yield_stops_after_min_pages(caplog):
+def test_low_yield_does_not_stop(caplog):
     caplog.set_level("INFO")
-    site = SyntheticInstagram(500, lambda page, i: "reel" if page % 5 == 0 and i == 0 else "image")
+    site = SyntheticInstagram(60, lambda page, i: "reel" if page % 5 == 0 and i == 0 else "image")
     dl = downloader(site)
     items = list(dl.iter_profile_media("perfil_teste", "reels", 100))
-    assert len(items) == 4 and site.posts == 20
-    assert dl.last_listing_stats["stop_reason"] == "low_yield"
-    assert "stop_reason=low_yield" in caplog.text
+    assert len(items) == 12 and site.posts == 60   # antes parava em 20 páginas (low_yield)
+    assert dl.last_listing_stats["stop_reason"] == "end_of_profile"
+    assert "stop_reason=end_of_profile" in caplog.text and "low_yield" not in caplog.text
     assert_no_secrets(caplog.text)
 
 
-def test_no_compatible_media_for_all_stops_after_three_pages():
-    site = SyntheticInstagram(500, lambda page, i: "invalid")
+def test_no_compatible_media_for_all_goes_to_the_real_end():
+    site = SyntheticInstagram(30, lambda page, i: "invalid")
     dl = downloader(site)
     assert list(dl.iter_profile_media("perfil_teste", "all", 10)) == []
-    assert site.posts == 3 and dl.last_listing_stats["stop_reason"] == "filter_exhausted"
+    assert site.posts == 30 and dl.last_listing_stats["stop_reason"] == "end_of_profile"   # antes: 3 páginas
 
 
-def test_unproductive_streak_resets_on_compatible_page():
-    site = SyntheticInstagram(500, lambda page, i: "reel" if page == 4 and i == 0 else "image")
+def test_unproductive_streak_never_stops():
+    site = SyntheticInstagram(30, lambda page, i: "reel" if page == 4 and i == 0 else "image")
     dl = downloader(site)
     assert len(list(dl.iter_profile_media("perfil_teste", "reels", 100))) == 1
-    assert site.posts == 10 and dl.last_listing_stats["stop_reason"] == "filter_exhausted"
+    assert site.posts == 30 and dl.last_listing_stats["stop_reason"] == "end_of_profile"
 
 
 def test_repeated_cursor_is_an_error():
@@ -214,23 +206,24 @@ def test_repeated_cursor_is_an_error():
     assert dl.last_listing_stats["stop_reason"] == "error"
 
 
-@pytest.mark.parametrize("limit, pages", [(10, 4), (20, 6), (50, 12), (100, 20)])
-def test_budget_by_quantity(limit, pages):
-    # 1 item por página (11 nós inválidos): produtivo (sem streak, rendimento 1/página), para no teto proporcional.
+@pytest.mark.parametrize("limit", [10, 20, 50, 100])
+def test_quantity_is_reached_with_one_item_per_page(limit):
+    # 1 item por página (11 nós inválidos): antes parava no teto proporcional; agora entrega a quantidade pedida.
     site = SyntheticInstagram(500, lambda page, i: "image" if i == 0 else "invalid")
     dl = downloader(site)
     items = list(dl.iter_profile_media("perfil_teste", "all", limit))
-    assert len(items) == pages == site.posts and dl.last_listing_stats["stop_reason"] == "budget_exhausted"
+    assert len(items) == limit == site.posts and dl.last_listing_stats["stop_reason"] == "limit_reached"
 
 
-@pytest.mark.parametrize("content, kind, pages", [("reels", "reel", 10), ("videos", "reel", 10), ("images", "image", 6)])
-def test_budget_by_filter(content, kind, pages):
+@pytest.mark.parametrize("content, kind", [("reels", "reel"), ("videos", "reel"), ("images", "image"),
+                                           ("photos_carousels", "image")])
+def test_quantity_is_reached_with_filter(content, kind):
     other = "image" if kind == "reel" else "reel"
     site = SyntheticInstagram(500, lambda page, i: kind if page % 2 == 0 and i == 0 else other)
     dl = downloader(site)
     items = list(dl.iter_profile_media("perfil_teste", content, 10))
-    assert len(items) == pages // 2 and site.posts == pages
-    assert dl.last_listing_stats["stop_reason"] == "budget_exhausted"
+    assert len(items) == 10 and site.posts == 20
+    assert dl.last_listing_stats["stop_reason"] == "limit_reached"
 
 
 def test_limit_reached_makes_no_extra_page_and_logs_last_page(caplog):
@@ -329,12 +322,12 @@ def test_checkpoint_after_all_items_of_each_page():
     assert CURSOR not in repr(cps[0]) and "redacted" in repr(cps[0])
 
 
-def test_checkpoint_has_next_false_when_listing_stops_by_filter():
-    site = SyntheticInstagram(500)
+def test_checkpoint_has_next_false_only_at_the_real_end():
+    site = SyntheticInstagram(8)   # só fotos: nenhuma página rende Reel
     cps: list[ListingCheckpoint] = []
     assert list(downloader(site).iter_profile_media("perfil_teste", "reels", 10, on_checkpoint=cps.append)) == []
-    assert [cp.unproductive_streak for cp in cps] == [1, 2, 3, 4, 5, 6]
-    assert [cp.has_next for cp in cps] == [True] * 5 + [False]
+    assert [cp.unproductive_streak for cp in cps] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [cp.has_next for cp in cps] == [True] * 7 + [False]
 
 
 def test_resume_does_not_redo_previous_pages_and_counters_continue():
@@ -358,23 +351,23 @@ def test_resume_does_not_redo_previous_pages_and_counters_continue():
     assert more[-1].has_next is False and dl.last_listing_stats["pages"] == 5
 
 
-def test_streak_continues_across_resume():
-    site = SyntheticInstagram(500)
+def test_resume_with_long_unproductive_streak_keeps_listing():
+    site = SyntheticInstagram(7)
     resume = ListingCheckpoint(resume_cursor=f"{CURSOR}4", next_page_index=5, pages=4, posts_seen=48,
                                items_compatible=0, unproductive_streak=4, has_next=True)
     dl = downloader(site)
     assert list(dl.iter_profile_media("perfil_teste", "reels", 10, resume=resume)) == []
-    assert site.calls == [(f"{CURSOR}4", 12), (f"{CURSOR}5", 12)]
-    assert dl.last_listing_stats["stop_reason"] == "filter_exhausted" and dl.last_listing_stats["pages"] == 6
+    assert site.calls == [(f"{CURSOR}4", 12), (f"{CURSOR}5", 12), (f"{CURSOR}6", 12)]   # antes parava na 6a página
+    assert dl.last_listing_stats["stop_reason"] == "end_of_profile" and dl.last_listing_stats["pages"] == 7
 
 
-def test_low_yield_continues_across_resume():
-    site = SyntheticInstagram(500, lambda page, i: "reel" if page % 5 == 0 and i == 0 else "image")
+def test_resume_with_low_yield_keeps_listing():
+    site = SyntheticInstagram(30, lambda page, i: "reel" if page % 5 == 0 and i == 0 else "image")
     resume = ListingCheckpoint(resume_cursor=f"{CURSOR}19", next_page_index=20, pages=19, posts_seen=228,
                                items_compatible=3, unproductive_streak=4, has_next=True)
     dl = downloader(site)
-    assert len(list(dl.iter_profile_media("perfil_teste", "videos", 100, resume=resume))) == 1
-    assert site.posts == 1 and dl.last_listing_stats["stop_reason"] == "low_yield"
+    assert len(list(dl.iter_profile_media("perfil_teste", "videos", 100, resume=resume))) == 3
+    assert site.posts == 11 and dl.last_listing_stats["stop_reason"] == "end_of_profile"   # antes: 1 página
 
 
 def test_resume_of_finished_listing_makes_no_request():
@@ -421,16 +414,18 @@ def test_long_listing_memory_is_stable():
     assert per_page < 3000, (small, large, per_page)
 
 
-# --------------------------------------------------------------------------- "Todos" desabilitado na API
+# --------------------------------------------------------------------------- "Todos" e N livre na API
 
 
-def test_limit_all_is_disabled_with_422(harness):
+def test_limit_all_and_free_n_are_accepted(harness):
     base = {"profile": "perfil_teste", "content_type": "all", "preset_id": None, "process": False}
     response = harness.client.post("/api/imports", json={**base, "limit": None})
-    assert response.status_code == 422
-    body = response.json()
-    assert body["code"] == "limit_all_disabled" and "Todos" in body["detail"]
-    assert harness.client.get("/api/batches").json()["total"] == 0
-    for limit in (10, 20, 50, 100):  # perfis distintos: o mesmo perfil com listagem aberta dá 409
-        assert harness.client.post("/api/imports", json={**base, "profile": f"perfil_{limit}",
-                                                         "limit": limit}).status_code == 202
+    assert response.status_code == 202, response.text
+    assert response.json()["requested_limit"] is None and response.json()["listing_end"] is None
+    for limit in (1, 10, 37, 100, 12345, 1_000_000):  # perfis distintos: o mesmo perfil com listagem aberta dá 409
+        response = harness.client.post("/api/imports", json={**base, "profile": f"perfil_{limit}", "limit": limit})
+        assert response.status_code == 202 and response.json()["requested_limit"] == limit
+    for bad in (0, -1, 1_000_001, 1.5, "10", True):
+        response = harness.client.post("/api/imports", json={**base, "profile": "perfil_ruim", "limit": bad})
+        assert response.status_code == 422, bad
+    assert harness.client.get("/api/batches").json()["total"] == 7

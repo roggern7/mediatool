@@ -3,6 +3,94 @@
 Complementa `docs/INSTAGRAM_WEB_CONTRACT.md`. Autenticação, bootstrap, formulário GraphQL e variáveis de paginação
 já foram validados no real e NÃO mudam, exceto alterações localizadas citadas aqui.
 
+## 0.1 "Todos", quantidade do tipo pedido, fim real x fim anômalo e vários perfis (REVISÃO MAIS RECENTE; prevalece)
+
+Decisões do dono que substituem o que conflitar nas seções 0, 1, 6 e 9:
+
+- **"Todos" (`limit: null`)** é aceito e percorre o perfil até o FIM REAL da paginação (`has_next_page=false`). Não
+  existe teto de quantidade (`MAX_ITEMS` saiu) nem de páginas (`max_pages_for` saiu); NÃO é "um número grande".
+  "Últimos N": N inteiro de 1 a 1.000.000 (`downloader.MAX_IMPORT_LIMIT`, só validação para rejeitar lixo).
+- **Quantidade é do TIPO pedido**: "100 + Reels" = 100 Reels. A paginação continua até achar a quantidade ou chegar
+  ao fim real. As heurísticas `filter_exhausted` (páginas seguidas sem item compatível) e `low_yield` (rendimento
+  baixo) foram REMOVIDAS, com e sem filtro; `ListingBudget` e as variáveis `MEDIA_TOOL_IG_UNPRODUCTIVE_PAGES*`,
+  `MEDIA_TOOL_IG_MIN_PAGES_FOR_YIELD` e `MEDIA_TOOL_IG_MIN_YIELD` não existem mais (ignoradas se definidas).
+- **Tipos**: `all`, `reels`, `photos_carousels` (novo: fotos simples + TODOS os itens de carrosséis, inclusive
+  vídeo de carrossel; exclui Reels e vídeo avulso que não é Reel) e os antigos `posts` (= `all` no provider web),
+  `videos`, `images`. Em `reels` item de carrossel nunca entra. O filtro acontece na normalização, antes de criar
+  jobs; o que ele ignora conta em `expected.content_filter`, fora de `listing_dropped.unexpected_total`.
+  Carrossel conta por ITEM; se o limite cai no meio de um carrossel, o corte é por mídia (os primeiros itens entram).
+  **Vídeo avulso que não é Reel** (legado: sem `product_type` `clips`, fora de carrossel) entra SÓ em `all` (e no
+  antigo `videos`); em `reels` e `photos_carousels` é ignorado e contado como `content_filter` (esperado), nunca
+  como descarte. Em qual filtro esse caso deve cair está em aberto com o dono.
+- **Regras de parada da listagem** (únicas):
+
+  | Situação | Resultado |
+  |---|---|
+  | Quantidade pedida do tipo atingida | listagem `done`, `listing_end = "limit"`, lote conclui |
+  | `has_next_page=false` (resposta válida) | listagem `done`, `listing_end = "profile_end"`, lote conclui com o que achou (mensagem informativa em `error_message` se achou menos que N) |
+  | Páginas sem item compatível / rendimento baixo | NADA: continua paginando |
+  | `has_next_page=true` com página vazia, sem cursor (com ou sem `errors`), cursor repetido, 2 páginas sem post novo; `has_next_page` não booleano | fim ANÔMALO: `needs_attention` com o checkpoint anterior, `error_code = contract_changed`, lote NÃO concluído, `listing_end = null`; sem requisição extra; nova tentativa automática a cada 6 h (máx. 4) ou `resume-listing` |
+  | Fim anômalo na 1a página, sem nenhum item | lote `failed` com o erro visível (nunca "perfil vazio concluído") |
+  | Fim anômalo na 1a página, com itens | itens viram jobs; `needs_attention` (a nova tentativa refaz a página 1; o índice único deduplica) |
+  | Erro retryable/rede | `paused` com backoff do lote (como antes) |
+  | Outro erro no meio do lote | `needs_attention` (como antes) |
+  | Pausa do Instagram, backpressure, teto de páginas por hora, disco | espera e retoma do checkpoint (como antes) |
+  | Provider encerra sem erro, sem fim real e sem avançar página | `needs_attention` (não é fim do perfil) |
+
+  `ListingCheckpoint.has_next` só fica falso no fim real. O teto de páginas por trecho do construtor do provider
+  (`max_pages`, só testes/POC) encerra o trecho com `has_next` verdadeiro e o runner abre outro trecho.
+- **`batches.listing_end`** (migration 0012): `"profile_end"` | `"limit"` | NULL (listando, erro, cancelado, lote
+  antigo). A interface usa para dizer "perfil chegou ao fim: 37 de 100".
+- **Vários perfis (grupo)**: migration 0012 cria `import_groups` (só o que foi pedido: `content_type`,
+  `requested_limit`, preset, `process`, `created_at`) e `batches.group_id`/`group_position`. O estado do grupo é
+  DERIVADO dos filhos (nenhum status gravado no grupo). Cada filho é um lote comum (cancelar/retomar/recomeçar pelas
+  rotas de lote). A quantidade é POR PERFIL. API em docs/CONTRACTS.md, seção 8.1.
+- **Fila e justiça entre perfis** (`ImportRunner._next_eligible`): a listagem continua globalmente serial (uma thread,
+  um trecho por vez; o portão garante 1 requisição em voo). Os candidatos são os lotes em `listing` por ordem de
+  criação (= `group_position` dentro do grupo). Dentro de um grupo, o filho seguinte só começa quando o da vez
+  terminou de listar OU ficou parado por conta própria (`needs_attention`, backoff do lote `listing_retry_at`,
+  pausa do disjuntor). Enquanto o filho da vez espera backpressure (por lote, global ou de processamento) ou o teto
+  de páginas por hora, os filhos seguintes do MESMO grupo continuam na fila sem mudar de estado (`group_state =
+  "waiting"`). Lotes avulsos e grupos diferentes mantêm o comportamento anterior (um lote em backpressure deixa o
+  seguinte listar, limitado pelo teto global de 200 pendentes). Pausa global do Instagram para todos.
+  Consequências a saber: (a) quando o perfil da vez é "Todos" de um perfil grande, os perfis seguintes do grupo podem
+  esperar HORAS (a listagem dele encosta no teto de páginas por hora e no backpressure dos downloads); (b) um lote
+  avulso criado depois entra na mesma fila por ordem de criação: ele só lista quando os lotes anteriores terminaram
+  de listar ou estão parados/esperando (lote avulso não fica preso atrás de um grupo em backpressure, mas todos
+  dividem a mesma janela de páginas por hora e o teto global de 200 pendentes).
+- **Cancelamento durante a escolha/listagem**: a entrada em `running` é um UPDATE condicional (`start_listing`: só se
+  o lote ainda está em `listing`); lote cancelado depois de escolhido não é listado. A cada página o runner confere
+  o status no banco (e de novo dentro da transação do `_flush`): cancelado, para na fronteira da página sem pedir a
+  próxima, sem criar jobs nem avançar o checkpoint.
+- **Tentativas automáticas de `needs_attention`** (6 h, máx. 4): o contador só zera com progresso REAL (pelo menos um
+  job novo criado no trecho) ou por ação do usuário. Página com checkpoint mas sem job novo não zera; assim um
+  servidor que repete os mesmos posts com cursores novos para em 4 tentativas. Efeito colateral aceito: retomadas
+  que só atravessam páginas sem item do tipo pedido também não zeram.
+- **Nó sem chave estável** (sem `pk`, `id` nem `code`) não conta como post novo: duas páginas seguidas só com nós
+  assim (ou já vistos) são fim anômalo `no_new_items`.
+- **Estratégia `auto`**: nenhum fim anômalo (`LISTING_ANOMALY_DETAILS`) aciona o fallback para o gallery-dl.
+- **Risco conhecido**: `has_next_page` ausente ou nulo é tratado como anomalia (`has_next_invalid`). Se o Instagram
+  passar a omitir o campo na última página, os lotes ficarão em `needs_attention` em vez de concluir, até o código
+  ser ajustado.
+- **Erro em um perfil** (inexistente, privado, `needs_attention`, falha) fica no filho; os demais seguem.
+- **Reinício**: filhos concluídos ficam, o filho em listagem retoma do checkpoint, a fila segue na mesma ordem.
+- **Teto de páginas por hora: padrão 600** (antes 300). `INSTAGRAM_PAGE_RATE_LIMIT` continua valendo (`0` desativa;
+  inválido -> 600). A janela é uma só para todos os perfis. Valor persistido ilegível = janela cheia pelo teto
+  VIGENTE (`restore_listing_pages(raw, max_per_hour=...)`). A reconciliação da inicialização
+  (`restore_rate_limit_wait`) também decide pelo teto vigente, não pelo gravado no lote: um lote que esperava sob o
+  teto antigo não aparece `waiting_rate_limit` se a janela já tem vaga sob o novo. Um "Todos" grande encosta no teto e fica em
+  `waiting_rate_limit` até a janela liberar (esperado).
+- Provider `gallery_dl` (legado, não é o padrão): tem teto próprio de 5.000 itens e não conhece `photos_carousels`.
+  Por isso "Todos" (`limit` nulo), N acima de 5.000 e `photos_carousels` só existem no provider web: com o método
+  `gallery_dl` configurado a API recusa a criação (422 `not_supported_by_provider`); no composite, a estratégia `gallery_dl`
+  recusa a listagem com erro claro (lote criado antes da troca de método falha com a mensagem, sem truncar) e a
+  estratégia `auto` não faz fallback para o gallery-dl nesses dois casos (o erro do web fica no lote).
+- Lista de perfis: um perfil por linha (vírgula e ponto e vírgula também separam; espaço não separa; entrada com
+  espaço interno é inválida). URL só de perfil: `/usuario`, `/usuario/reels/`, `/usuario/tagged/`.
+- Cancelamento do grupo: a parte de banco é uma transação só para todos os filhos abertos; o filho em
+  listagem/download é avisado depois do commit (cooperativo).
+- Testes: `backend/tests/test_import_all_filters.py`, `test_import_groups.py`, `test_import_groups_scale.py` (`slow`).
+
 ## 0. Meta de escala (REVISÃO, prevalece sobre o resto deste documento)
 
 O produto precisa suportar lotes de 1.000, 2.000, 5.000 e 10.000 mídias por operação. Consequências:
@@ -37,7 +125,10 @@ consumidor persiste no lote (colunas internas novas em `batches`: `listing_curso
 criados no lote. Ao fechar o gerador no meio de uma página, o último checkpoint persistido continua válido (a página
 inteira é pedida de novo e o índice único descarta repetidos).
 
-## 1. Orçamento de paginação (`web/budget.py`, novo, único lugar dos números) (REVISADO pela seção 0)
+## 1. Orçamento de paginação (`web/budget.py`) (SUBSTITUÍDO pela seção 0.1: sem teto de páginas, sem parada por improdutividade)
+
+Histórico (não vale mais): as regras abaixo descrevem o orçamento antigo. Hoje `web/budget.py` só guarda `PAGE_SIZE`
+e a leitura validada de números do ambiente.
 
 Regras de parada adaptativas (substituem o teto de 40 páginas):
 - `UNPRODUCTIVE_PAGES_LIMIT`: páginas seguidas sem item compatível (padrão 3 para all/posts, 6 para filtros).
@@ -146,8 +237,7 @@ API (contrato para frontend e backend):
 - `POST /api/media/process-by-filter {view, media_type?, q?, profile?, preset_id}` -> `Batch` (202): cria os jobs no
   servidor numa transação, a partir do mesmo filtro da Biblioteca; teto `MAX_BULK_PROCESS` (10.000).
 - `POST /api/batches/{id}/cancel`: um UPDATE em lote numa transação; sinaliza individualmente só jobs em execução.
-- Quantidade de importação aceita pela API: 10, 20, 50, 100, 250, 500, 1000, 2000, 5000, 10000. A interface mostra só
-  10/20/50/100 até o dono autorizar volumes maiores. "Todos" continua desabilitado.
+- Quantidade de importação aceita pela API (revisado, seção 0.1): N inteiro de 1 a 1.000.000 ou `null` ("Todos").
 
 Banco:
 - Migration de índices: `ix_jobs_batch_cover (batch_id, status, kind, is_duplicate, stage, media_id, rendition_id)`
@@ -229,9 +319,8 @@ Listagem (C1, M1, M4, M3) — política final (re-revisão):
 - No meio do lote (já existe checkpoint com próxima página) nenhum outro erro conclui o lote parcial nem apaga o cursor:
   `internal_error`, `session_*` (sem pausa), `profile_not_found`, `access_refused`, `contract_changed`,
   `content_unavailable` -> `listing_state='needs_attention'` mantendo checkpoint e motivo seguro. `unsupported_media`
-  depois de um checkpoint não para a listagem (itens pulados e contados pelo provider). Só condições explícitas de fim
-  (fim do perfil, limite, filter_exhausted, low_yield, teto de segurança) concluem; antes da 1a página o erro falha o
-  lote como antes.
+  depois de um checkpoint não para a listagem (itens pulados e contados pelo provider). Só o fim real do perfil e o
+  limite concluem (seção 0.1); antes da 1a página o erro falha o lote como antes.
 - Cursor só é apagado quando o lote conclui ou é cancelado (cancelamento grava `listing_state='cancelled'`).
 - Nenhum recomeço automático da página 1. Cursor recusado no início de um trecho retomado: uma nova tentativa com o
   MESMO cursor depois do backoff do lote; recusado de novo -> `needs_attention` com o checkpoint. Recomeço da página 1
@@ -285,16 +374,16 @@ Execução (A1, A3, A4, C2, M7, M8, B6, B7):
 
 Proteção do Instagram (A2, M2, M5):
 - Backoff com janela de prova: após limpar uma pausa por verificação, o nível é mantido por 2x a última pausa; novo 429
-  nessa janela sobe um degrau. Depois de um 429, ritmo da listagem 6-12 s por página por 1 h. Teto de 300 páginas por
-  hora (configurável, ver abaixo).
+  nessa janela sobe um degrau. Depois de um 429, ritmo da listagem 6-12 s por página por 1 h. Teto de 600 páginas por
+  hora (padrão desde a seção 0.1; antes 300; configurável, ver abaixo).
 - Teto por hora configurável por configuração técnica (sem botão na interface): `INSTAGRAM_PAGE_RATE_LIMIT` (ambiente
-  do processo ou `.env`). Ausente ou vazia: vale a antiga `MEDIA_TOOL_IG_MAX_PAGES_PER_HOUR` ou o padrão, 300 páginas/h
-  (comportamento de sempre). Inteiro de 1 a 100000: esse teto. `0`: SEM teto horário, só para POC de escala (nenhuma
+  do processo ou `.env`). Ausente ou vazia: vale a antiga `MEDIA_TOOL_IG_MAX_PAGES_PER_HOUR` ou o padrão, 600 páginas/h
+  (antes 300). Inteiro de 1 a 100000: esse teto. `0`: SEM teto horário, só para POC de escala (nenhuma
   reserva nem espera do teto, nada gravado em `instagram_listing_pages`, o lote nunca fica em `waiting_rate_limit`;
-  um aviso WARNING por processo registra isso). Inválido, negativo, decimal ou acima de 100000: aviso e padrão 300
+  um aviso WARNING por processo registra isso). Inválido, negativo, decimal ou acima de 100000: aviso e padrão 600
   (nunca desabilita por engano). Afeta SOMENTE o teto de páginas por hora: concorrência (1 em voo), intervalo entre
-  requisições, backpressure, retries, checkpoint, pausas, admissão no portão, ritmo lento depois de `rate_limited` e
-  orçamento de páginas continuam iguais. Com `0`, `ImportRunner.restore_rate_limit_wait` limpa na inicialização os
+  requisições, backpressure, retries, checkpoint, pausas, admissão no portão e ritmo lento depois de `rate_limited`
+  continuam iguais. Com `0`, `ImportRunner.restore_rate_limit_wait` limpa na inicialização os
   campos de espera que uma execução anterior (com teto) deixou gravados. Só vale para o provider web; o gallery-dl
   nunca aplicou o teto de páginas. Testes: `backend/tests/test_page_rate_limit_config.py`.
 - Estado do bootstrap reaproveitado em memória por até 10 min entre trechos e renovações (só memória).
@@ -326,7 +415,7 @@ Operação (M6, B3):
   concorrência nas Configurações.
 
 ### Espera pelo teto de páginas por hora (visibilidade)
-Só visibilidade: o teto (300 páginas por hora, janela deslizante de 1 h), os intervalos, a concorrência e o
+Só visibilidade: o teto (600 páginas por hora, janela deslizante de 1 h), os intervalos, a concorrência e o
 backpressure não mudaram.
 - Estado: quando o portão segura a próxima página por causa do teto, a API apresenta `listing_state =
   "waiting_rate_limit"` com `rate_limit_resume_at` (ISO UTC previsto), `rate_limit_pages_used` e
@@ -348,10 +437,10 @@ backpressure não mudaram.
   espera segue até a janela liberar e a admissão da requisição é recusada como sempre (listagem `paused`, nenhuma
   página pedida).
 - Persistência da janela: cada página reservada grava em `app_state` (`instagram_listing_pages`) a lista das reservas
-  da última hora em relógio de parede (JSON com no máximo o teto de entradas, cerca de 5 KB com 300; uma escrita por
+  da última hora em relógio de parede (JSON com no máximo o teto de entradas, cerca de 10 KB com 600; uma escrita por
   página pedida, nunca em leitura). Na inicialização `ImportRunner.restore_rate_limit_wait` reconstrói a janela
   (`restore_listing_pages`): entrada com mais de 1 h é descartada; entrada no futuro ou ilegível conta como página
-  usada agora; valor inteiro ilegível conta como janela cheia agora. Em nenhum caso a espera passa de 1 h. Assim o
+  usada agora; valor inteiro ilegível conta como janela cheia agora (pelo teto vigente). Em nenhum caso a espera passa de 1 h. Assim o
   mesmo teto vale através de um reinício (antes a contagem recomeçava do zero a cada início do app).
 - Reconciliação na inicialização: lote com espera gravada por uma execução anterior é conferido com a janela
   reconstruída. Janela ainda cheia e lote ainda listando: continua em espera com a retomada recalculada. Janela livre

@@ -11,6 +11,7 @@ path distinto (os raros primeiro); o que fica fora sai contado e com os paths li
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import random
@@ -55,6 +56,9 @@ DEFAULT_PAGE_DELAY = (2.0, 4.0)   # segundos entre páginas (a partir da 2a), so
 NO_NEW_PAGES_LIMIT = 2            # páginas consecutivas só com nós já vistos antes de parar
 
 _CONTRACT_MESSAGE = "O Instagram mudou a forma de responder e o Media Tool precisa ser atualizado."
+# Fim anômalo da paginação (has_next_page=true sem como continuar): não é fim do perfil nem conclui a importação.
+_PAGINATION_MESSAGE = ("O Instagram interrompeu a paginação do perfil antes do fim (resposta sem continuação "
+                       "utilizável). A importação não foi dada como concluída e o ponto de retomada foi mantido.")
 # Recusa de autenticação explícita no JSON de erro (minúsculas), avaliada após a renovação: request_auth_failed.
 EXPLICIT_LOGIN_MARKERS = ("login_required", "require_login", "not logged in", "requires login", "checkpoint",
                           "challenge_required")
@@ -446,7 +450,7 @@ def _dropped_at_text(events: list[tuple[int, str, int]]) -> str:
 
 
 def _new_totals() -> dict:
-    return {"pages_with_errors": 0, "errors": 0, "dropped": {}, "cursor_missing_end_of_profile": 0}
+    return {"pages_with_errors": 0, "errors": 0, "dropped": {}}
 
 
 def _split_edges(edges: list) -> tuple[list[dict], dict[str, int], list[int], list[tuple[int, str, int]]]:
@@ -805,7 +809,7 @@ class InstagramWebGraphQL:
         log.warning("%s", line)
 
     def iter_profile_posts(self, username: str, *, max_media: int | None, page_size: int = 12,
-                           max_pages: int = 500, cancel: threading.Event | None = None,
+                           max_pages: int | None = 500, cancel: threading.Event | None = None,
                            on_page: Callable[[dict], None] | None = None, start_cursor: str | None = None,
                            start_page: int = 1,
                            on_page_end: Callable[[str | None], bool] | None = None,
@@ -820,11 +824,18 @@ class InstagramWebGraphQL:
         end_cursor_present, cursor_changed, variables_keys, new_nodes, duplicate_nodes, account_confirmation.
 
         Retomada: `start_cursor` (cursor da próxima página de um checkpoint) e `start_page` (índice dela); `max_pages`
-        conta as páginas deste trecho. `current_page` descreve a página cujos nós estão sendo entregues.
+        conta as páginas deste trecho (None = sem teto: só o fim real do perfil ou o consumidor encerram).
+        `current_page` descreve a página cujos nós estão sendo entregues.
 
         `on_page_end(reason)`: chamado depois que todos os nós de uma página foram consumidos, antes de pedir a
-        próxima, com o motivo de parada já decidido aqui (None = continuaria; "end_of_profile", "empty_page",
-        "no_new_items" ou "budget_exhausted" na última página permitida). Retornar False encerra a listagem.
+        próxima, com o motivo de parada já decidido aqui (None = continuaria; "end_of_profile" só com
+        `has_next_page=false`; "budget_exhausted" na última página permitida por `max_pages`). Retornar False encerra
+        a listagem.
+
+        Fim anômalo NÃO é fim do perfil: `has_next_page=true` com página vazia, sem cursor, com cursor repetido ou
+        depois de `NO_NEW_PAGES_LIMIT` páginas seguidas sem nó novo (e `has_next_page` que não é booleano) levanta
+        `contract_changed` com `diagnostic["detail"]` em `LISTING_ANOMALY_DETAILS`, SEM `on_page_end` da página (o
+        checkpoint anterior continua valendo; os nós dela já foram entregues).
 
         `before_page(cancel)`: chamado antes do POST de cada página (inclusive a 1a do trecho); o provider o usa para
         o teto global de páginas por hora (pode esperar).
@@ -839,8 +850,10 @@ class InstagramWebGraphQL:
         self.listing_account_confirmation = None
         self.current_page = None
         self.listing_totals = _new_totals()
-        last_page = start_page + max_pages - 1
-        for page in range(start_page, last_page + 1):
+        last_page = None if max_pages is None else start_page + max_pages - 1
+        for page in itertools.count(start_page):
+            if last_page is not None and page > last_page:
+                return
             first = page == start_page
             if not first and not (cancel is not None and cancel.is_set()):
                 self._pause(cancel)   # ritmo entre páginas; nunca antes da 1a do trecho
@@ -869,20 +882,24 @@ class InstagramWebGraphQL:
             duplicates = 0
             # edge/nó nulo ou inválido: descartado e contado por motivo
             nodes, dropped, positions, events = _split_edges(edges)
+            keyed_new = 0   # nós novos COM chave estável: só eles contam como "post novo" (no_new_items)
             for position, node in zip(positions, nodes):
-                key = node.get("pk") or node.get("id")
+                key = node.get("pk") or node.get("id") or node.get("code")
                 key = str(key) if key is not None else None
                 if key is not None:
                     if key in seen_ids:
                         duplicates += 1
                         continue
                     seen_ids.add(key)
+                    keyed_new += 1
+                # Nó sem pk/id/code segue adiante (a normalização o descarta e conta), mas não prova página nova.
                 fresh.append(node)
                 fresh_edges.append(position)
             new = len(fresh)
             edges_count = len(edges)
             del conn, edges, nodes   # nada da resposta fica vivo além dos nós desta página
-            has_next = page_info.get("has_next_page") is True
+            has_next_raw = page_info.get("has_next_page")
+            has_next = has_next_raw is True
             cursor = page_info.get("end_cursor")
             cursor_present = isinstance(cursor, str) and bool(cursor)
             totals = self.listing_totals   # só o que esta camada vê: `errors` e edges/nós descartados
@@ -918,34 +935,34 @@ class InstagramWebGraphQL:
                 self._finish_page(spec, page, report)
             del fresh   # nada de acumular nós entre páginas
             reason: str | None = None
-            if has_next and not cursor_present and errors:
-                # has_next_page=true sem cursor numa resposta com `errors`: a paginação quebrou no meio. Encerrar como
-                # fim do perfil concluiria o lote sem as publicações seguintes; sobe como contrato quebrado (sem
-                # checkpoint desta página; os nós dela já foram entregues).
-                log.warning("GraphQL: has_next_page=true sem cursor numa resposta com errors; paginação interrompida")
-                raise InstagramWebError("contract_changed", _CONTRACT_MESSAGE, stage=STAGE,
-                                        diagnostic={"detail": "cursor_missing_with_errors", "page": page})
-            if not has_next or not cursor_present:
-                if has_next:
-                    # Sem `errors`: o encerramento como fim do perfil é mantido, mas fica registrado e contado.
-                    totals["cursor_missing_end_of_profile"] += 1
-                    log.warning("GraphQL: página %d com has_next_page=true sem cursor; listagem encerrada como fim "
-                                "do perfil (cursor_missing_end_of_profile)", page)
-                reason = "end_of_profile"
+            anomaly: str | None = None
+            if has_next_raw is False:
+                reason = "end_of_profile"   # ÚNICO fim real do perfil: resposta válida com has_next_page=false
+            elif not has_next:
+                anomaly = "has_next_invalid"
+            elif not cursor_present:
+                # has_next_page=true sem cursor (com ou sem `errors`): a paginação quebrou no meio. Encerrar como fim
+                # do perfil concluiria o lote sem as publicações seguintes.
+                anomaly = "cursor_missing_with_errors" if errors else "cursor_missing"
             elif not edges_count:
-                log.warning("GraphQL: página vazia com has_next_page=true; encerrando (empty_page)")
-                reason = "empty_page"
+                anomaly = "empty_page"
             elif cursor in seen_cursors or cursor == after:
-                raise InstagramWebError("contract_changed", _CONTRACT_MESSAGE, stage=STAGE,
-                                        diagnostic={"detail": "repeated_cursor", "page": page})
+                anomaly = "repeated_cursor"
             else:
-                pages_without_new = pages_without_new + 1 if new == 0 else 0
+                pages_without_new = pages_without_new + 1 if keyed_new == 0 else 0
                 if pages_without_new >= NO_NEW_PAGES_LIMIT:
-                    log.warning("GraphQL: %d páginas seguidas sem nó novo; encerrando (no_new_items)",
-                                pages_without_new)
-                    reason = "no_new_items"
+                    anomaly = "no_new_items"
                 elif page == last_page:
                     reason = "budget_exhausted"
+            if anomaly is not None:
+                # Sem checkpoint desta página (os nós dela já foram entregues); quem lista mantém o checkpoint
+                # anterior e NÃO conclui a importação.
+                log.warning("GraphQL: página %d com fim anômalo da paginação (%s); não é fim do perfil", page, anomaly)
+                raise InstagramWebError(
+                    "contract_changed",
+                    _CONTRACT_MESSAGE if anomaly in ("cursor_missing_with_errors", "repeated_cursor")
+                    else _PAGINATION_MESSAGE,
+                    stage=STAGE, diagnostic={"detail": anomaly, "page": page})
             if on_page_end is not None and not on_page_end(reason):
                 return
             if reason is not None:

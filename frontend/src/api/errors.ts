@@ -17,7 +17,15 @@ const MESSAGES: Record<string, string> = {
   profile_already_importing:
     "Este perfil já está sendo importado. Aguarde essa importação terminar ou cancele-a antes de começar outra.",
   disk_full: "Pouco espaço livre em disco. Libere espaço para os downloads continuarem.",
-  limit_all_disabled: "A opção Todos está indisponível por enquanto. Escolha 10, 20, 50 ou 100.",
+  invalid_profiles: "Há entradas inválidas na lista de perfis. Corrija ou remova as entradas indicadas e tente de novo.",
+  no_profiles: "Informe ao menos um perfil.",
+  too_many_profiles: "Perfis demais de uma vez. O máximo é 10.000 por importação.",
+  group_finished: "Esta importação já terminou; não há nada para cancelar.",
+  group_not_found: "Importação não encontrada.",
+  payload_too_large:
+    "A lista é grande demais para enviar de uma vez. Divida em partes menores ou cole só os nomes de usuário, sem a URL completa.",
+  not_supported_by_provider:
+    "“Todos” e “Fotos e carrosséis” exigem o método de importação web. Troque o método em Configurações > Instagram.",
   profile_not_found: "Perfil não encontrado.",
   profile_private: "Este perfil é privado e a sessão atual não tem acesso a ele.",
   content_unavailable: "Conteúdo indisponível.",

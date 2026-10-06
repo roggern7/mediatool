@@ -1,6 +1,7 @@
 // Tipos espelhando docs/CONTRACTS.md, seção 8.
 
-export type ContentType = "reels" | "posts" | "videos" | "images" | "all";
+/** Interface: "all" | "reels" | "photos_carousels". "posts", "videos" e "images" só aparecem em lotes antigos. */
+export type ContentType = "reels" | "posts" | "videos" | "images" | "all" | "photos_carousels";
 export type MediaType = "video" | "image";
 
 export type JobStatus =
@@ -190,6 +191,75 @@ export interface Batch {
    * status do lote. Ausente em backends antigos; zero quando não houve descarte.
    */
   listing_dropped?: ListingDropped | null;
+  /** Por que a listagem terminou: fim real do perfil ou quantidade atingida; null enquanto lista/erro/antigo. */
+  listing_end?: "profile_end" | "limit" | null;
+  /** Grupo de importação (vários perfis); null/ausente em lotes avulsos e antigos. */
+  group_id?: number | null;
+  group_position?: number | null;
+  group_state?: GroupChildState | null;
+}
+
+export type GroupChildState = "waiting" | "active" | "attention" | "completed" | "failed" | "cancelled";
+
+/** Contrato: docs/CONTRACTS.md, seção 8.1. */
+export interface ProfilesPreview {
+  valid: string[];
+  invalid: InvalidProfileEntry[];
+  duplicates: number;
+}
+
+export interface InvalidProfileEntry {
+  entry: string;
+  reason: string;
+}
+
+export interface GroupProfiles {
+  total: number;
+  waiting: number;
+  active: number;
+  completed: number;
+  attention: number;
+  failed: number;
+  cancelled: number;
+}
+
+export interface ImportGroup {
+  id: number;
+  content_type: ContentType;
+  /** Por perfil; null = "Todos". */
+  requested_limit: number | null;
+  preset_id: number | null;
+  preset_name: string | null;
+  process: boolean;
+  created_at: string;
+  finished_at: string | null;
+  status: "active" | "attention" | "completed" | "cancelled";
+  /** Algum filho em atenção ou falho (vale também com o grupo ativo ou concluído). */
+  attention: boolean;
+  profiles: GroupProfiles;
+  profile_end_count: number;
+  progress: BatchProgress;
+  listing_dropped_total: number;
+}
+
+export interface SkippedProfile {
+  profile: string;
+  reason: string;
+}
+
+export interface ImportGroupDetail {
+  group: ImportGroup;
+  children: Batch[];
+  next_after_position: number | null;
+  /** Só na criação. */
+  skipped?: SkippedProfile[] | null;
+  duplicates?: number | null;
+}
+
+export interface ImportGroupList {
+  items: ImportGroup[];
+  total: number;
+  next_before_id: number | null;
 }
 
 export interface ListingDropped {
@@ -344,9 +414,18 @@ export interface Diagnostics {
 export interface ImportRequest {
   profile: string;
   content_type: ContentType;
-  /** A API aceita até 10000; a interface oferece só 10/20/50/100 (ver lib/importOptions). */
-  limit: 10 | 20 | 50 | 100 | 250 | 500 | 1000 | 2000 | 5000 | 10000 | null;
+  /** "Últimos N": inteiro de 1 a 1.000.000; null = "Todos" (até o fim real do perfil). */
+  limit: number | null;
   /** Opcionais na API (padrão: null e false = só baixar originais); o painel sempre manda os dois. */
+  preset_id: number | null;
+  process: boolean;
+}
+
+export interface ImportGroupRequest {
+  profiles: string[];
+  content_type: ContentType;
+  /** Por perfil. */
+  limit: number | null;
   preset_id: number | null;
   process: boolean;
 }

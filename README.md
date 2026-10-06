@@ -92,7 +92,8 @@ Banco, sessão do Instagram, mídias e logs são criados localmente no primeiro 
    valida o arquivo. Imprime um relatório sem segredos. Essa prova usa o gallery-dl (legado); a do provider web, que
    é o padrão, está em [Prova de conceito](#prova-de-conceito) e exige o app fechado.
 
-8. **Primeira importação:** na tela **Importar**, informe o perfil, escolha **Quantidade** = **Últimos 10** e clique em
+8. **Primeira importação:** na tela **Importar**, informe o perfil em **Perfis**, deixe **Quantidade por perfil** em
+   **Últimos N** com **10** e clique em
    **Baixar originais**. Só os originais são baixados, sem processamento. Acompanhe em **Importações recentes** ou na tela **Fila**; os itens aparecem na **Biblioteca**.
 
 9. **Baixar e processar (opcional):** repita ligando **Processar após baixar (opcional)**, com **Preset do
@@ -363,22 +364,41 @@ sessão configurada, testa a sessão, lê o perfil, lista no máximo 1 mídia, b
 
 Na tela **Importar** (rota `/`):
 
-1. **Perfil:** `@usuario`, `usuario` ou a URL `https://www.instagram.com/usuario/`. **Consultar perfil** mostra a
-   prévia (nome, avatar, quantidade de posts, privado/verificado). Sem sessão configurada a tela mostra
+1. **Perfis:** campo de várias linhas, um perfil por linha: `usuario`, `@usuario` ou a URL
+   `https://www.instagram.com/usuario/`. Linhas vazias são ignoradas e repetições são removidas. A lista é conferida
+   pelo backend enquanto você digita (`POST /api/import-groups/preview`, sem falar com o Instagram): a tela mostra
+   quantos perfis são válidos, quantas duplicatas saíram e quais entradas são inválidas, com o motivo. As inválidas
+   ficam de fora e o botão de início avisa isso. Com um único perfil na lista, **Consultar perfil** mostra a prévia
+   (nome, avatar, quantidade de posts, privado/verificado). Sem sessão configurada a tela mostra
    **Configurar em Configurações**.
-2. **Conteúdo:** Reels, Posts, Vídeos, Imagens ou Todos os tipos.
-3. **Quantidade:** Últimos 10, Últimos 20, Últimos 50 ou Últimos 100. A opção **Todos** aparece desabilitada
-   ("indisponível por enquanto") até ter política própria; a API recusa `limit` nulo com 422 `limit_all_disabled`.
-   A quantidade conta mídias, não posts (um carrossel pode ter várias).
-4. **Processar após baixar (opcional):** desligado por padrão. Ligado, mostra o **Preset do processamento** (padrão: o
-   preset padrão de Configurações, ou Anti-duplicidade).
-5. Clique em **Baixar originais** (só baixa os originais). Com o processamento ligado, o botão vira **Baixar e
-   processar** (baixa e processa com o preset escolhido).
+2. **Tipo de mídia:** **Todos**, **Reels** ou **Fotos e carrosséis** (`all`, `reels`, `photos_carousels`).
+3. **Quantidade por perfil:** **Últimos N** (N inteiro livre de 1 a 1.000.000, com atalhos 100, 500 e 1.000) ou
+   **Todos** (`limit` nulo), que percorre o perfil até o fim real da paginação; em perfis grandes isso pode levar
+   horas por causa do limite de requisições por hora, e o lote continua sozinho. A quantidade conta mídias do tipo
+   escolhido, não posts (um carrossel pode ter várias; "100 + Reels" são 100 Reels): o app continua procurando até
+   achar N ou chegar ao fim do perfil.
+4. **Processamento:** **Processar após baixar (opcional)** vem desligado. Ligado, mostra o **Preset do
+   processamento** (padrão: o preset padrão de Configurações, ou Anti-duplicidade).
+5. Antes de iniciar, a tela mostra um resumo em uma linha, por exemplo
+   `37 perfis • Todos os Reels • Todas as mídias disponíveis`. Clique em **Baixar originais** (só baixa os
+   originais). Com o processamento ligado, o botão vira **Baixar e processar**.
 
-Um lote (batch) é criado: primeiro a listagem do perfil (`listing`), depois um job por mídia (`running`). O painel
-do lote, logo abaixo do formulário, mostra o progresso real com **Cancelar**, **Tentar falhas novamente** e
-**Abrir Biblioteca**; a tabela **Importações recentes** lista os lotes anteriores.
-Só uma listagem roda por vez. Mídias já baixadas antes não são baixadas de novo (ver deduplicação na seção Fila).
+Com **um perfil** é criado um lote avulso (`POST /api/imports`): primeiro a listagem do perfil (`listing`), depois
+um job por mídia (`running`). O painel do lote, logo abaixo do formulário, mostra o progresso real com **Cancelar**,
+**Tentar falhas novamente** e **Abrir Biblioteca**.
+
+Com **dois ou mais perfis** é criada uma importação em grupo (`POST /api/import-groups`, contrato em
+`docs/CONTRACTS.md`, seção 8.1): um lote por perfil, listados um de cada vez; a quantidade vale para cada perfil.
+Perfis que já têm importação em andamento são pulados e a tela diz quais. O painel **Importação • N perfis** mostra
+o resumo (concluídos, ativos, aguardando, com atenção, mídias baixadas, descartes) e a lista de perfis, 100 por
+página, com o estado de cada um (aguardando, listando, baixando, aguardando downloads, aguardando limite de
+requisições com o horário de retomada, pausado, atenção, concluído, falhou, cancelado) e a quantidade
+(`830 / 2.000`, `1.240 mídias`, `perfil chegou ao fim: 37 de 100`). **Cancelar importação** cancela todos os perfis
+ainda abertos; clicar em um perfil abre o lote dele (cancelar, retomar, **Ver na Fila**).
+
+A tabela **Importações recentes** lista as importações anteriores: cada grupo aparece em uma linha só, junto com
+os lotes de um perfil. Só uma listagem roda por vez. Mídias já baixadas antes não são baixadas de novo (ver
+deduplicação na seção Fila).
 
 ## Presets
 
@@ -428,10 +448,13 @@ O Media Tool foi preparado para lotes de 1.000 a 10.000 mídias. Por enquanto a 
   terminou.
 - **Sem acumular downloads.** A coleta espera quando há cerca de 100 mídias aguardando download no lote (200 no app
   todo) e volta quando a fila diminui. Assim os links de download são usados poucos minutos depois de coletados.
-- **A coleta para por falta de resultado, não por um número fixo de páginas.** Se várias páginas seguidas não trazem
-  nada do tipo pedido, ou o rendimento fica muito baixo, a importação termina com o que encontrou e diz por quê.
+- **A coleta só termina na quantidade pedida ou no fim real do perfil.** Páginas seguidas sem nada do tipo pedido não
+  encerram mais a importação: ela continua até achar a quantidade ou o Instagram dizer que o perfil acabou. Se o
+  perfil acabar antes, a importação conclui com o que encontrou e avisa. Se a paginação parar de um jeito estranho
+  (página vazia ou sem continuação antes do fim), a importação NÃO é dada como concluída: fica aguardando atenção,
+  com o ponto de retomada guardado.
 - **Ritmo cuidadoso com o Instagram.** Uma coleta por vez no app inteiro, uma requisição ao Instagram por vez e 2 a
-  4 s entre páginas (6 a 12 s durante 1 hora depois de um aviso de limite; no máximo 300 páginas por hora).
+  4 s entre páginas (6 a 12 s durante 1 hora depois de um aviso de limite; no máximo 600 páginas por hora, configurável por `INSTAGRAM_PAGE_RATE_LIMIT`).
   Baixar os arquivos e processar não aumentam as chamadas ao Instagram.
 - **Link de download vencido.** O Media Tool renova a página daquela mídia uma única vez e tenta de novo; se não der,
   a mídia fica com erro "Conteúdo indisponível". Mídias da mesma página aproveitam a mesma renovação.

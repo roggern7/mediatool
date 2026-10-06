@@ -115,9 +115,8 @@ def downloader(site: Site, **kwargs) -> InstagramWebDownloader:
 
 
 def anomalies(pages_with_errors: int = 0, errors: int = 0, dropped: dict | None = None,
-              skipped: dict | None = None, cursor_missing: int = 0) -> dict:
-    return {"pages_with_errors": pages_with_errors, "errors": errors,
-            "cursor_missing_end_of_profile": cursor_missing, "dropped_unexpected": dropped or {},
+              skipped: dict | None = None) -> dict:
+    return {"pages_with_errors": pages_with_errors, "errors": errors, "dropped_unexpected": dropped or {},
             "skipped_expected": skipped or {}}
 
 
@@ -170,7 +169,7 @@ def test_full_data_with_errors_delivers_everything_and_keeps_paginating(caplog):
     assert_safe(line)
     assert redact(line) == line   # o redator do app não tem mais nada a tirar (nem estraga a linha)
     summary = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Listagem web (este trecho)")]
-    assert summary == ["Listagem web (este trecho): pages_with_errors=1 errors=1 cursor_missing_end_of_profile=0 "
+    assert summary == ["Listagem web (este trecho): pages_with_errors=1 errors=1 "
                        "dropped_unexpected={} skipped_expected={}"]
 
 
@@ -266,16 +265,21 @@ def test_empty_page_with_errors_and_no_next_page_ends_the_profile(caplog):
         assert part in lines[0], part
 
 
-def test_empty_page_with_errors_and_next_page_stops_as_today(caplog):
-    # Comportamento atual preservado (documentado no relatório): página vazia com has_next_page=true encerra a
-    # listagem (empty_page) sem pedir a página seguinte, mesmo com cursor válido; o checkpoint sai com has_next=False.
+def test_empty_page_with_errors_and_next_page_is_an_anomalous_end(caplog):
+    # Mudança confirmada pelo dono: página vazia com has_next_page=true NÃO é fim do perfil (antes encerrava como
+    # `empty_page` com checkpoint has_next=False). Continua sem pedir a página seguinte; sobe erro e o último
+    # checkpoint (página 1, has_next=True) é o que vale para a retomada.
     site = Site(body(1, images(1)), body(2, [], errors=[{"message": "nothing"}]), body(3, images(3), has_next=False))
     cps: list[ListingCheckpoint] = []
     dl = downloader(site)
-    assert len(list(dl.iter_profile_media("perfil_teste", "all", 100, on_checkpoint=cps.append))) == 12
-    assert site.afters == [None, cursor(1)]
-    assert dl.last_listing_stats["stop_reason"] == "empty_page"
-    assert (cps[-1].next_page_index, cps[-1].has_next, cps[-1].unproductive_streak) == (3, False, 1)
+    received = []
+    with pytest.raises(InstagramError) as info:
+        for item in dl.iter_profile_media("perfil_teste", "all", 100, on_checkpoint=cps.append):
+            received.append(item)
+    assert len(received) == 12 and site.afters == [None, cursor(1)]
+    assert info.value.code == "contract_changed" and info.value.diagnostic["detail"] == "empty_page"
+    assert dl.last_listing_stats["stop_reason"] == "error"
+    assert len(cps) == 1 and (cps[-1].next_page_index, cps[-1].has_next) == (2, True)
     line = page_lines(caplog)[0]
     assert "página 2 com errors parciais" in line and "edges=0" in line
     assert "has_next_page=True" in line and "cursor_present=True" in line
@@ -327,22 +331,24 @@ def test_has_next_without_cursor_and_errors_is_contract_changed_after_delivering
     assert "página 2 com errors parciais" in line and "has_next_page=True" in line and "cursor_present=False" in line
 
 
-def test_has_next_without_cursor_and_without_errors_ends_as_before(caplog):
+def test_has_next_without_cursor_and_without_errors_is_an_anomalous_end(caplog):
+    # Mudança confirmada pelo dono: has_next_page=true sem cursor (mesmo sem `errors`) não é mais fim do perfil.
     site = Site(body(1, images(1)), body(2, images(2), end_cursor=None))
     cps: list[ListingCheckpoint] = []
     dl = downloader(site)
-    assert len(list(dl.iter_profile_media("perfil_teste", "all", 100, on_checkpoint=cps.append))) == 24
-    assert dl.last_listing_stats["stop_reason"] == "end_of_profile" and cps[-1].has_next is False
-    # 2a: o encerramento não muda, mas agora há aviso explícito e contador (sem a linha de errors da página).
+    received = []
+    with pytest.raises(InstagramError) as info:
+        for item in dl.iter_profile_media("perfil_teste", "all", 100, on_checkpoint=cps.append):
+            received.append(item)
+    assert len(received) == 24 and site.afters == [None, cursor(1)], "os itens da página saem; nenhuma requisição a mais"
+    assert info.value.code == "contract_changed" and info.value.diagnostic["detail"] == "cursor_missing"
+    assert dl.last_listing_stats["stop_reason"] == "error"
+    assert len(cps) == 1 and cps[-1].has_next is True and cps[-1].next_page_index == 2
     assert page_lines(caplog) == []
     warnings = [r.getMessage() for r in caplog.records
-                if r.levelno == logging.WARNING and "cursor_missing_end_of_profile" in r.getMessage()]
-    assert warnings == [
-        "GraphQL: página 2 com has_next_page=true sem cursor; listagem encerrada como fim do perfil "
-        "(cursor_missing_end_of_profile)",
-        "Listagem web (este trecho): pages_with_errors=0 errors=0 cursor_missing_end_of_profile=1 "
-        "dropped_unexpected={} skipped_expected={}"]
-    assert dl.last_listing_anomalies == anomalies(cursor_missing=1)
+                if r.levelno == logging.WARNING and "fim anômalo" in r.getMessage()]
+    assert warnings == ["GraphQL: página 2 com fim anômalo da paginação (cursor_missing); não é fim do perfil"]
+    assert dl.last_listing_anomalies == anomalies()
 
 
 def test_runner_keeps_checkpoint_and_asks_for_attention_when_pagination_breaks(harness_factory):
@@ -405,17 +411,22 @@ def test_resume_from_checkpoint_after_partial_error_page_does_not_request_it_aga
     assert dl.last_listing_anomalies["pages_with_errors"] == 0   # totais são do trecho, não do lote
 
 
-def test_pages_with_every_node_dropped_count_as_unproductive(caplog):
-    # Item (e): páginas com errors em que nada é aproveitado contam na sequência improdutiva e encerram a listagem.
+def test_pages_with_every_node_dropped_are_an_anomalous_end(caplog):
+    # Item (e): páginas com errors em que nada é aproveitado contam na sequência improdutiva. Mudança confirmada:
+    # 2 páginas seguidas sem nó novo (no_new_items) não encerram mais como fim; sobem erro sem checkpoint da 2a.
     empty = [{"node": None}] * 3
     site = Site(body(1, images(1)), *[body(n, edges=empty, errors=[{"message": "partial"}]) for n in (2, 3, 4)],
                 body(5, images(5), has_next=False))
     cps: list[ListingCheckpoint] = []
     dl = downloader(site)
-    assert len(list(dl.iter_profile_media("perfil_teste", "all", 100, on_checkpoint=cps.append))) == 12
-    # 2 páginas seguidas sem nó novo encerram (no_new_items) antes do limite de 3 páginas improdutivas.
-    assert dl.last_listing_stats["stop_reason"] == "no_new_items" and len(site.afters) == 3
-    assert [(cp.unproductive_streak, cp.has_next) for cp in cps] == [(0, True), (1, True), (2, False)]
+    received = []
+    with pytest.raises(InstagramError) as info:
+        for item in dl.iter_profile_media("perfil_teste", "all", 100, on_checkpoint=cps.append):
+            received.append(item)
+    assert len(received) == 12 and len(site.afters) == 3, "nenhuma requisição além das 3"
+    assert info.value.diagnostic["detail"] == "no_new_items" and dl.last_listing_stats["stop_reason"] == "error"
+    assert [(cp.unproductive_streak, cp.has_next) for cp in cps] == [(0, True), (1, True)]
+    assert info.value.listing_dropped == {"node_null": 3}, "descartes da página sem checkpoint vão junto do erro"
     assert dl.last_listing_anomalies["dropped_unexpected"] == {"node_null": 6}
     assert len(page_lines(caplog)) == 2
 
@@ -607,23 +618,28 @@ def _row(h, batch_id: int):
     return h.ctx.db.fetchone(f"SELECT {BATCH_COLUMNS} FROM batches WHERE id = ?", (batch_id,))
 
 
-def test_runner_first_page_break_ends_listing_with_visible_error_and_keeps_items(harness_factory):
-    # 1a página do lote (não há checkpoint a manter): os 12 itens viram jobs e a listagem termina (`done`) com o
-    # erro visível no lote; nenhuma nova tentativa automática, nenhuma requisição a mais.
+def test_runner_first_page_break_keeps_items_with_visible_error_and_does_not_conclude(harness_factory):
+    # 1a página do lote (não há checkpoint a manter): os 12 itens viram jobs e o erro fica visível no lote. Mudança
+    # confirmada pelo dono: fim anômalo não conclui mais a listagem (antes: `done` + lote `running`); o lote fica em
+    # `needs_attention` (nova tentativa só em 6 h; ela refaz a página 1 e o índice único descarta os repetidos).
+    # Nenhuma requisição a mais agora.
     site = Site(body(1, images(1), end_cursor=None, errors=[{"message": "partial"}]))
     h = harness_factory(downloader=downloader(site))
     batch_id = _batch(h)
     h.run_imports()
     row = _row(h, batch_id)
-    assert (row["listing_state"], row["error_code"], row["found"]) == ("done", "contract_changed", 12)
-    assert row["status"] == "running" and row["listing_retry_at"] is None and row["listing_cursor"] is None
+    assert (row["listing_state"], row["error_code"], row["found"]) == ("needs_attention", "contract_changed", 12)
+    assert row["status"] == "listing" and row["listing_retry_at"] is not None
+    full = h.ctx.batches.get(batch_id)
+    assert full["listing_end"] is None and full["listing_next_page"] is None
+    h.run_imports()
     assert site.afters == [None]
 
 
-def test_runner_break_on_first_page_of_resumed_chunk_retries_same_cursor_once_then_needs_attention(harness_factory):
-    # Comportamento real (regra já existente do "cursor recusado" no início de um trecho retomado, não alterada):
-    # `contract_changed` na 1a página do trecho -> listagem `paused` com nova tentativa em 60 s com o MESMO cursor;
-    # repetindo, `needs_attention` com o checkpoint mantido (depois, 1 tentativa a cada 6 h, no máximo 4).
+def test_runner_break_on_first_page_of_resumed_chunk_goes_straight_to_needs_attention(harness_factory):
+    # Mudança confirmada pelo dono: fim anômalo da paginação não é "cursor recusado"; não ganha a nova tentativa em
+    # 60 s (nenhuma requisição extra). Vai direto para `needs_attention` com o checkpoint mantido (depois, 1
+    # tentativa a cada 6 h, no máximo 4).
     site = Site(body(1, images(1)), body(2, images(2), end_cursor=None, errors=[{"message": "partial"}]))
     h = harness_factory(downloader=downloader(site))
     batch_id = _batch(h)
@@ -632,19 +648,13 @@ def test_runner_break_on_first_page_of_resumed_chunk_retries_same_cursor_once_th
                                  listing_has_next=1)
     h.run_imports()
     row = _row(h, batch_id)
-    assert (row["status"], row["listing_state"], row["error_code"]) == ("listing", "paused", "contract_changed")
+    assert (row["status"], row["listing_state"], row["error_code"]) == ("listing", "needs_attention",
+                                                                       "contract_changed")
     assert row["listing_retry_at"] is not None and row["listing_cursor_refusals"] == 1
     assert (row["listing_cursor"], row["listing_next_page"], row["found"]) == (cursor(1), 2, 12)
     assert site.afters == [cursor(1)]
     h.run_imports()
-    assert site.afters == [cursor(1)], "antes do prazo não há nova requisição"
-    h.ctx.db.execute("UPDATE batches SET listing_retry_at = NULL WHERE id = ?", (batch_id,))   # fim dos 60 s
-    h.run_imports()
-    row = _row(h, batch_id)
-    assert (row["status"], row["listing_state"], row["error_code"]) == ("listing", "needs_attention",
-                                                                       "contract_changed")
-    assert (row["listing_cursor"], row["listing_next_page"], row["found"]) == (cursor(1), 2, 12)
-    assert site.afters == [cursor(1), cursor(1)]   # exatamente uma nova tentativa, com o mesmo cursor
+    assert site.afters == [cursor(1)], "antes do prazo de 6 h não há nova requisição"
 
 
 # --------------------------------------------------------------------------- revisão: estratégia auto sem fallback

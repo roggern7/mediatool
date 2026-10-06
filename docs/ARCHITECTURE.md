@@ -63,14 +63,14 @@ documento explica como as peças se encaixam.
 2. O runner de importação (uma listagem por vez) chama `iter_profile_media(username, content, limit)` do adapter,
    criado por operação (`downloader_factory` em `app.main`) como `CompositeInstagramDownloader`.
    - Estratégia `web` (padrão): o `InstagramWebDownloader` abre a página inicial (1 GET), consulta as publicações por
-     `POST /graphql/query` com `doc_id`, página a página (2 a 4 s entre páginas; para após 2 páginas sem nós novos),
+     `POST /graphql/query` com `doc_id`, página a página (2 a 4 s entre páginas),
      normaliza cada nó em `RemoteMedia` e para ao atingir o limite. Tokens e cookies vivem só nos objetos da operação.
      Paginação comprovada no real em 2026-10-03 (1 GET + 2 POST; variáveis `after`/`before`/`first`/`last`
-     aceitas). Orçamento de paginação (`web/budget.py`): a listagem para por quantidade atingida, cancelamento, erro,
-     páginas seguidas sem item compatível com o filtro, rendimento baixo ou um teto de segurança proporcional ao
-     limite; parar por orçamento ou filtro não é erro. Números, checkpoint de retomada e backpressure:
-     [BATCH_ROBUSTNESS.md](BATCH_ROBUSTNESS.md). O limite "Todos" (`limit` nulo) está desabilitado (422
-     `limit_all_disabled`).
+     aceitas). A listagem só termina por quantidade atingida (do tipo pedido), cancelamento,
+     erro ou fim real do perfil (`has_next_page=false`); não há teto de páginas nem parada por improdutividade, e
+     fim anômalo da paginação deixa o lote em `needs_attention`. Regras, checkpoint de retomada e backpressure:
+     [BATCH_ROBUSTNESS.md](BATCH_ROBUSTNESS.md). "Todos" (`limit` nulo) lista até o fim real do perfil. Vários
+     perfis: grupo de importação (pai + um lote filho por perfil), CONTRACTS.md seção 8.1.
    - Estratégia `gallery_dl` (ou fallback de `auto` em `contract_changed`/`unsupported_media`): o adapter inicia o
      runner do gallery-dl como processo filho, envia o pedido JSON (com os cookies) pelo stdin e lê
      `{"type": "item" | "profile" | "error" | "done"}` em JSON lines do stdout.
@@ -118,15 +118,15 @@ Contrato completo em `docs/BATCH_ROBUSTNESS.md`; aqui só o resumo:
   (`listing_cursor`, contadores, `listing_state` = `pending|running|waiting_backpressure|paused|needs_attention|done`).
   Backpressure: para com `MAX_PENDING_INGEST` (100) por lote ou `MAX_PENDING_INGEST_GLOBAL` (200), volta abaixo de 40.
   Na espera pelo teto de páginas por hora a API apresenta `waiting_rate_limit` (lote ativo, retoma sozinho).
-- Paginação (seção 1): para por improdutividade (`filter_exhausted`, `low_yield`), com teto de segurança proporcional
-  (`web/budget.py`); parar por orçamento ou filtro não é erro.
+- Paginação (seção 1): termina só na quantidade pedida ou no fim real do perfil; sem teto de páginas e sem parada por
+  improdutividade (`filter_exhausted`/`low_yield` removidos); fim anômalo -> `needs_attention`.
 - URL expirada (seção 2): renovação única da página de origem por (lote, página), registrada em `listing_pages`;
   falha recente faz os irmãos falharem sem nova requisição. URLs e cursor em `job_remote_refs`, nunca na API ou log.
 - Autenticação (seções 3 e 7): `request_auth_failed` pausa 15 min e é recuperável; `session_invalid` só com
   evidência forte. Nada apaga a sessão DPAPI.
 - Pausas (seções 4 e 8): controlador único `services/instagram_recovery.py` com backoff por motivo persistido em
   `app_state` e verificação mínima no vencimento; portão global `InstagramRequestGate` (1 requisição em voo,
-  2-4 s entre páginas; 6-12 s por 1 h após 429; teto de 300 páginas por hora).
+  2-4 s entre páginas; 6-12 s por 1 h após 429; teto de 600 páginas por hora).
 - API e banco (seção 6): `GET /api/batches/{id}` sem jobs por padrão, keyset (`before_id`/`next_before_id`) em jobs e
   mídia, `POST /api/media/process-by-filter`, índices de cobertura, retenção de 30 dias, `journal_size_limit`.
 - Revisão de 10.000 (seção 9): erros de rede na listagem pausam o lote com backoff (1m, 5m, 15m, 1h);

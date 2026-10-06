@@ -132,7 +132,9 @@ def test_limit_and_content_type_are_forwarded(harness):
 def test_import_validation(harness):
     base = {"profile": "perfil_teste", "content_type": "all", "limit": 10, "preset_id": None, "process": False}
     bad = [
-        {**base, "limit": 15},
+        {**base, "limit": 0},            # N livre: 15 passou a ser aceito; só lixo é recusado
+        {**base, "limit": 1_000_001},
+        {**base, "limit": "15"},
         {**base, "content_type": "stories"},
         {**base, "process": "sim"},
         {**base, "preset_id": 0},

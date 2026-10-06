@@ -36,7 +36,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Teto do gallery-dl (o runner também limita a 5000); o MAX_ITEMS do contrato subiu para 10.000 só no provider web.
+# Teto do gallery-dl (o runner também limita a 5000). O provider web não tem teto de quantidade; "Todos"
+# (limit None) e `photos_carousels` nunca chegam aqui (composite.web_only; a API recusa na criação).
 GALLERY_DL_MAX_ITEMS = 5000
 
 RUNNER_MODULE = "app.integrations.instagram.gallerydl_runner"

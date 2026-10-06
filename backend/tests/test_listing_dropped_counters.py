@@ -297,20 +297,26 @@ BROKEN = {"end_cursor": None, "errors": [{"message": "partial"}]}   # paginaçã
 
 
 def test_discard_after_the_last_item_of_a_page_that_ends_with_error_is_counted(harness_factory):
-    # Repro A: a 1a página entrega 2 itens, descarta o 3o e quebra a paginação: a listagem encerra (`done`) com o
-    # erro visível e o descarte entra no total, uma vez (não há item depois dele para carregá-lo).
+    # Repro A: a 1a página entrega 2 itens, descarta o 3o e quebra a paginação. Mudança confirmada pelo dono: o fim
+    # anômalo não encerra mais a listagem (antes: `done` + lote `running`); o lote fica em `needs_attention` com o
+    # erro visível e o descarte já aparece na API como parcial da página aberta (não há item depois dele para
+    # carregá-lo). Cancelado o lote (a página não será refeita), ele entra no total, uma única vez.
     site = gp.Site(gp.body(1, [gp.image(1, 0), gp.image(1, 1), no_url(1, 2)], **BROKEN))
     h = harness_factory(downloader=gp.downloader(site))
     batch_id = gp._batch(h)
     h.run_imports()
     row = state(h, batch_id)
     assert (row["status"], row["listing_state"], row["error_code"], row["found"]) == (
-        "running", "done", "contract_changed", 2)
-    assert (row["total"], row["reasons"], row["partial"]) == (1, {"unexpected": {"image_no_url": 1}}, None)
-    assert h.batch(batch_id)["listing_dropped"] == api(1, {"image_no_url": 1})
-    again = harness_factory(root=h.root, downloader=gp.downloader(site))   # encerrado: reinício não soma de novo
+        "listing", "needs_attention", "contract_changed", 2)
+    assert (row["total"], row["reasons"], row["partial"]) == (0, None, {"image_no_url": 1})
+    assert h.batch(batch_id)["listing_dropped"] == api(1, {"image_no_url": 1}, pending=1)
+    again = harness_factory(root=h.root, downloader=gp.downloader(site))   # reinício não soma nem pede de novo
     again.run_imports()
-    assert state(again, batch_id)["total"] == 1 and site.afters == [None]
+    assert state(again, batch_id)["partial"] == {"image_no_url": 1} and site.afters == [None]
+    assert again.client.post(f"/api/batches/{batch_id}/cancel").status_code == 200
+    row = state(again, batch_id)
+    assert (row["total"], row["reasons"], row["partial"]) == (1, {"unexpected": {"image_no_url": 1}}, None)
+    assert again.batch(batch_id)["listing_dropped"] == api(1, {"image_no_url": 1})
 
 
 def test_page_with_only_discards_that_ends_with_error_and_no_item_fails_but_keeps_the_count(harness_factory):

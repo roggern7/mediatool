@@ -186,6 +186,8 @@ export function ConfirmDialog({
   title,
   children,
   confirmLabel,
+  cancelLabel = "Cancelar",
+  focusCancel,
   danger,
   busy,
   onConfirm,
@@ -194,6 +196,10 @@ export function ConfirmDialog({
   title: string;
   children: ReactNode;
   confirmLabel: string;
+  /** Rótulo do botão que desiste (ex.: "Voltar" quando a ação confirmada é um cancelamento). */
+  cancelLabel?: string;
+  /** Foco inicial no botão que desiste (seguro), em vez do botão de confirmar. */
+  focusCancel?: boolean;
   danger?: boolean;
   busy?: boolean;
   onConfirm: () => void;
@@ -205,15 +211,15 @@ export function ConfirmDialog({
       onClose={busy ? () => undefined : onCancel}
       actions={
         <>
-          <button type="button" className="btn" onClick={onCancel} disabled={busy}>
-            Cancelar
+          <button type="button" className="btn" onClick={onCancel} disabled={busy} autoFocus={focusCancel}>
+            {cancelLabel}
           </button>
           <button
             type="button"
             className={`btn ${danger ? "btn-danger-solid" : "btn-primary"}`}
             onClick={onConfirm}
             disabled={busy}
-            autoFocus
+            autoFocus={!focusCancel}
           >
             {busy ? <Spinner /> : null}
             {confirmLabel}

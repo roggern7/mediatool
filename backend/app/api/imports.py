@@ -6,18 +6,28 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query
 
-from app.api.deps import Ctx, IdPath
+from app.api.deps import MAX_ID, Ctx, IdPath
 from app.core.errors import AppError, not_found
 from app.integrations.instagram.downloader import InstagramError
 from app.integrations.instagram.validation import parse_profile_input
 from app.jobs.errors import safe_message
-from app.schemas.batches import BatchList, BatchOut, ImportRequest, RestartListingRequest
+from app.schemas.batches import (
+    BatchList,
+    BatchOut,
+    ImportGroupDetail,
+    ImportGroupList,
+    ImportGroupRequest,
+    ImportRequest,
+    ProfilesPreview,
+    ProfilesPreviewRequest,
+    RestartListingRequest,
+)
 from app.schemas.instagram import ProfileInfoOut, ProfileRequest
 from app.services import import_service
 from app.services.deadline import CallInProgress, DeadlineExceeded, run_with_deadline
 from app.services.instagram_gate import InstagramPaused
 from app.services.instagram_pause import ensure_not_paused, raise_paused
-from app.services.presenters import batch_single, batches_out
+from app.services.presenters import batch_single, batches_out, group_detail, groups_out
 
 logger = logging.getLogger("media_tool.imports")
 
@@ -84,14 +94,79 @@ def create_import(ctx: Ctx, body: ImportRequest) -> dict[str, Any]:
     return batch_single(ctx, batch_id)
 
 
+@router.post("/import-groups/preview", response_model=ProfilesPreview)
+def preview_import_group(body: ProfilesPreviewRequest) -> dict[str, Any]:
+    """Pré-validação da lista de perfis, sem efeitos e sem nenhuma requisição ao Instagram."""
+    entries = list(body.entries or [])
+    if body.text:
+        entries.append(body.text)
+    valid, invalid, duplicates = import_service.parse_profile_entries(entries)
+    return {"valid": valid, "invalid": invalid, "duplicates": duplicates}
+
+
+@router.post("/import-groups", response_model=ImportGroupDetail, status_code=202)
+def create_import_group(
+    ctx: Ctx, body: ImportGroupRequest, children_limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> dict[str, Any]:
+    group_id, skipped, duplicates = import_service.create_import_group(
+        ctx,
+        profiles=body.profiles,
+        content_type=body.content_type,
+        limit=body.limit,
+        preset_id=body.preset_id,
+        process=body.process,
+    )
+    detail = group_detail(ctx, ctx.batches.get_group(group_id), children_limit=children_limit)
+    return {**detail, "skipped": skipped, "duplicates": duplicates}
+
+
+@router.get("/import-groups", response_model=ImportGroupList)
+def list_import_groups(
+    ctx: Ctx,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+) -> dict[str, Any]:
+    """Ordem id DESC. Paginação keyset: `before_id` + `next_before_id` (null no fim)."""
+    groups, total, next_before_id = ctx.batches.list_groups(limit=limit, before_id=before_id)
+    return {"items": groups_out(ctx, groups), "total": total, "next_before_id": next_before_id}
+
+
+@router.get("/import-groups/{group_id}", response_model=ImportGroupDetail)
+def get_import_group(
+    ctx: Ctx,
+    group_id: IdPath,
+    children_limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    after_position: Annotated[int | None, Query(ge=0, le=MAX_ID)] = None,
+) -> dict[str, Any]:
+    """Grupo + filhos em ordem de `group_position` (keyset `after_position` + `next_after_position`)."""
+    group = ctx.batches.get_group(group_id)
+    if group is None:
+        raise not_found("Grupo de importação", "group_not_found")
+    return group_detail(ctx, group, children_limit=children_limit, after_position=after_position)
+
+
+@router.post("/import-groups/{group_id}/cancel", response_model=ImportGroupDetail)
+def cancel_import_group(
+    ctx: Ctx, group_id: IdPath, children_limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> dict[str, Any]:
+    """Cancela os filhos ainda abertos; os encerrados ficam. Um filho sozinho: POST /api/batches/{id}/cancel."""
+    import_service.cancel_group(ctx, group_id)
+    return group_detail(ctx, ctx.batches.get_group(group_id), children_limit=children_limit)
+
+
 @router.get("/batches", response_model=BatchList)
 def list_batches(
     ctx: Ctx,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0, le=10_000_000)] = 0,
     source: Literal["instagram_import", "library"] | None = None,
+    group_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+    ungrouped: bool = False,
 ) -> dict[str, Any]:
-    items, total = ctx.batches.list(limit=limit, offset=offset, source=source)
+    """Por padrão lista todos os lotes, inclusive filhos de grupo (compatibilidade). `ungrouped=true` deixa só os
+    avulsos (lotes antigos e importações de um perfil); `group_id=` só os filhos daquele grupo."""
+    items, total = ctx.batches.list(limit=limit, offset=offset, source=source, group_id=group_id,
+                                    ungrouped=ungrouped)
     return {"items": batches_out(ctx, items), "total": total}
 
 

@@ -89,6 +89,65 @@ def _listing_dropped(batch: dict[str, Any]) -> dict[str, Any]:
             "pending": pending}
 
 
+def _group_state(batch: dict[str, Any]) -> str | None:
+    """Estado apresentado de um filho de grupo (mesma regra do agregado em BatchRepository.group_aggregates)."""
+    if batch.get("group_id") is None:
+        return None
+    status = batch["status"]
+    if status in _CLOSED_BATCH_STATUSES:
+        return status
+    if status == "listing":
+        listing_state = batch.get("listing_state") or "pending"
+        if listing_state == "needs_attention":
+            return "attention"
+        if listing_state == "pending" and batch.get("listing_next_page") is None:
+            return "waiting"   # na fila do grupo: a listagem ainda não começou
+    return "active"
+
+
+def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Grupos de importação com agregados derivados dos filhos (duas consultas para a lista inteira)."""
+    stats = ctx.batches.group_aggregates([g["id"] for g in groups])
+    result = []
+    for group in groups:
+        row = stats.get(group["id"], {})
+        total = int(row.get("total", 0))
+        counts = {key: int(row.get(key, 0)) for key in ("waiting", "completed", "attention", "cancelled")}
+        counts["failed"] = int(row.get("failed_profiles", 0))
+        counts["active"] = total - sum(counts.values())
+        open_children = counts["waiting"] + counts["active"] + counts["attention"]
+        if counts["waiting"] + counts["active"] > 0:
+            status = "active"
+        elif counts["attention"] > 0:
+            status = "attention"
+        elif total > 0 and counts["cancelled"] == total:
+            status = "cancelled"
+        else:
+            status = "completed"
+        found = int(row.get("found", 0))
+        result.append({
+            **{key: group[key] for key in ("id", "content_type", "requested_limit", "preset_id", "preset_name",
+                                           "created_at")},
+            "process": bool(group["process"]),
+            "finished_at": row.get("finished_at") if total > 0 and open_children == 0 else None,
+            "status": status,
+            "attention": counts["attention"] + counts["failed"] > 0,
+            "profiles": {"total": total, **counts},
+            "profile_end_count": int(row.get("profile_end", 0)),
+            "progress": {"found": found, **{key: int(row.get(key, 0)) for key in _PROGRESS_KEYS}},
+            "listing_dropped_total": int(row.get("dropped", 0)),
+        })
+    return result
+
+
+def group_detail(ctx: AppContext, group: dict[str, Any], *, children_limit: int,
+                 after_position: int | None = None) -> dict[str, Any]:
+    children, next_after = ctx.batches.group_children(group["id"], limit=children_limit,
+                                                      after_position=after_position)
+    return {"group": groups_out(ctx, [group])[0], "children": batches_out(ctx, children),
+            "next_after_position": next_after}
+
+
 def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bool = False) -> list[dict[str, Any]]:
     # Lote encerrado com contadores congelados não agrega os jobs; lote aberto agrega pelo índice coberto.
     stats = ctx.jobs.batch_stats([b["id"] for b in batches if not _frozen(b)])
@@ -119,6 +178,10 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
         # needs_attention): já aparece no total para não ficar invisível, e vira definitiva (ou é substituída pela
         # contagem da página refeita) sem somar duas vezes.
         data["listing_dropped"] = _listing_dropped(batch)
+        data["listing_end"] = batch.get("listing_end")
+        data["group_id"] = batch.get("group_id")
+        data["group_position"] = batch.get("group_position")
+        data["group_state"] = _group_state(batch)
         # Pausa do disjuntor só enquanto vigente; paused_reason é o código que repetiu (o frontend o descreve).
         until = batch.get("paused_until")
         active = until is not None and until > utc_now()

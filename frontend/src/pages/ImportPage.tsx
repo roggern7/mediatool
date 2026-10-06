@@ -1,36 +1,88 @@
-import { useRef, useState } from "react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { BadgeCheck, Lock, Search, UserRound } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
 import { describeErrorCode } from "../api/errors";
-import type { Batch, ContentType, Preset, ProfileInfo } from "../api/types";
+import type { Batch, ContentType, ImportGroup, Preset, ProfileInfo } from "../api/types";
 import { Field, Empty, ErrorLine, Pill, SkeletonRows, SplitBar, Spinner, Switch } from "../components/ui";
 import { formatCount, formatDateTime } from "../lib/format";
-import { ACTIVE_BATCH, CONTENT_LABEL, batchLabel, batchTitle, batchToneOf, isDownloadOnly } from "../lib/labels";
 import {
-  LIMIT_OPTIONS,
+  ACTIVE_BATCH,
+  CONTENT_LABEL,
+  batchLabel,
+  batchTitle,
+  batchToneOf,
+  isDownloadOnly,
+  isQueuedInGroup,
+} from "../lib/labels";
+import {
+  CONTENT_CHOICES,
+  DEFAULT_LIMIT_TEXT,
+  LIMIT_SHORTCUTS,
+  type LimitMode,
   PROCESS_AFTER_DOWNLOAD_DEFAULT,
-  buildImportRequest,
-  canSubmitImport,
+  entriesSummary,
+  invalidCountText,
+  profilesCountText,
+  resolveLimit,
+  startLabel,
 } from "../lib/importOptions";
-import { parseProfileInput } from "../lib/profile";
+import {
+  entriesKey,
+  interpretGroupCreated,
+  interpretStartError,
+  planFromPreview,
+  providerBlocker,
+  settledPreview,
+  startBlocker,
+  startSummary,
+} from "../lib/importStart";
+import {
+  type RecentEntry,
+  groupDroppedText,
+  groupProfileCounts,
+  groupStatusLabel,
+  groupTitle,
+  mergeRecent,
+  profileEndText,
+} from "../lib/importGroup";
+import { compactProfileEntries, parseProfileList } from "../lib/profile";
 import { describeSessionTest } from "../lib/sessionTest";
 import { isPaused, useNow } from "../lib/pause";
 import { PauseBanner } from "../components/PauseBanner";
 import { BatchNotice } from "../components/BatchNotice";
+import { ImportGroupPanel } from "../components/ImportGroupPanel";
 import { listingDropped, listingDroppedSuffix, needsAttention } from "../lib/batchState";
 import { navigate, ROUTES } from "../lib/router";
 import { queueForBatch } from "../lib/batchRoute";
 import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
+import { useDebounced } from "../lib/useDebounced";
 import { useQuery } from "../lib/useQuery";
 import { useToast } from "../lib/toast";
 
-const CONTENT_OPTIONS: ContentType[] = ["reels", "posts", "videos", "images", "all"];
+/** Espera depois da última tecla antes de pedir a pré-validação ao backend. */
+const PREVIEW_DEBOUNCE_MS = 400;
+/** Entradas inválidas listadas na tela (as demais entram em "e mais N"). */
+const INVALID_SHOWN_MAX = 100;
+const RECENT_ROWS = 8;
+
+type Recent = RecentEntry<ImportGroup, Batch>;
+type Selection = { kind: "batch" | "group"; id: number };
 
 function defaultPresetId(presets: Preset[] | undefined, configured: number | null | undefined): number | null {
   if (!presets || presets.length === 0) return null;
   if (configured != null && presets.some((p) => p.id === configured)) return configured;
   const anti = presets.find((p) => p.name === "Anti-duplicidade");
   return (anti ?? presets[0])?.id ?? null;
+}
+
+function selectionOf(entry: Recent): Selection {
+  return { kind: entry.kind, id: entry.kind === "group" ? entry.group.id : entry.batch.id };
+}
+
+function isActiveEntry(entry: Recent): boolean {
+  return entry.kind === "group"
+    ? entry.group.status === "active" || entry.group.status === "attention"
+    : ACTIVE_BATCH.has(entry.batch.status);
 }
 
 export function ImportPage() {
@@ -40,7 +92,8 @@ export function ImportPage() {
 
   const [profileText, setProfileText] = useState("");
   const [content, setContent] = useState<ContentType>("all");
-  const [limitIdx, setLimitIdx] = useState(0);
+  const [limitMode, setLimitMode] = useState<LimitMode>("last");
+  const [limitText, setLimitText] = useState(DEFAULT_LIMIT_TEXT);
   const [presetChoice, setPresetChoice] = useState<number | null>(null);
   // Só estado da tela: toda visita começa em "somente baixar originais".
   const [processAfter, setProcessAfter] = useState(PROCESS_AFTER_DOWNLOAD_DEFAULT);
@@ -48,10 +101,47 @@ export function ImportPage() {
   const [lookup, setLookup] = useState<{ username: string; info: ProfileInfo } | null>(null);
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupError, setLookupError] = useState<string | null>(null);
-  const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Selection | null>(null);
+  // Última importação ativa vista na lista: continua aberta depois de concluir, até ser fechada ou trocada.
+  const [auto, setAuto] = useState<Selection | null>(null);
+  // Lote de um perfil aberto a partir da lista de um grupo (vale só enquanto aquele grupo está aberto).
+  const [child, setChild] = useState<{ groupId: number; batchId: number } | null>(null);
+  // Aviso da última criação (perfis pulados); `groupId` nulo = nada foi criado.
+  const [startNotice, setStartNotice] = useState<{ groupId: number | null; text: string } | null>(null);
   const [showAllBatches, setShowAllBatches] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
 
-  const parsed = parseProfileInput(profileText);
+  // A lista do campo é recalculada sem travar a digitação (valor adiado) e conferida no backend com debounce.
+  // A estimativa local é só o número provisório; válidos, inválidos e duplicatas exibidos e enviados vêm do backend.
+  const deferredText = useDeferredValue(profileText);
+  const draft = useMemo(
+    () => ({
+      key: entriesKey(compactProfileEntries(deferredText)),
+      estimate: parseProfileList(deferredText).valid.length,
+    }),
+    [deferredText],
+  );
+  const requestedKey = useDebounced(draft.key, PREVIEW_DEBOUNCE_MS);
+  const previewQuery = useQuery(`profiles-preview:${requestedKey}`, async () =>
+    requestedKey ? { key: requestedKey, data: await api.previewProfiles(requestedKey.split("\n")) } : null,
+  );
+  const hasText = profileText.trim() !== "";
+  const typing = deferredText !== profileText;
+  const checking = typing || requestedKey !== draft.key || previewQuery.loading;
+  const preview = hasText
+    ? settledPreview({
+        currentKey: draft.key,
+        requestedKey,
+        typing,
+        loading: previewQuery.loading,
+        result: previewQuery.data,
+      })
+    : null;
+  const previewError = hasText && !checking && !preview ? previewQuery.error : null;
+  const invalidCount = preview ? preview.invalid.length : 0;
+  const singleProfile = preview && preview.valid.length === 1 ? (preview.valid[0] ?? null) : null;
+
+  const limitChoice = resolveLimit(limitMode, limitText);
   const sessionOk = settings.data?.instagram.session_configured ?? false;
   const now = useNow();
   const igStatus = settings.data?.instagram ?? null;
@@ -59,50 +149,93 @@ export function ImportPage() {
   const lastTest = settings.data?.instagram.last_test ?? null;
   const lastView = lastTest ? describeSessionTest(lastTest) : null;
   const presetId = presetChoice ?? defaultPresetId(presets.data, settings.data?.default_preset_id);
-  const canSubmit =
-    sessionOk && parsed.ok && !submitting && !paused && canSubmitImport(processAfter, presetId);
+  const providerProblem = providerBlocker(settings.data?.instagram_provider, content, limitMode === "all");
+  const blocker = startBlocker({
+    sessionOk,
+    paused,
+    submitting,
+    preview,
+    limit: limitChoice,
+    process: processAfter,
+    presetId,
+    providerProblem,
+  });
+  const canSubmit = blocker === null;
+  const summary = startSummary({ preview, limit: limitChoice, content });
 
   const [recentPoll, setRecentPoll] = useState<number | null>(5_000);
   const recent = useQuery(
-    "batches",
+    "recent-imports",
     async () => {
-      const page = await api.listBatches(8, 0, "instagram_import");
-      // Filtro também no cliente, caso a API ainda não filtre por source.
-      const items = page.items.filter((b) => b.source === "instagram_import");
-      setRecentPoll(items.some((b) => ACTIVE_BATCH.has(b.status)) ? 5_000 : null);
-      return { ...page, items };
+      // Grupos (uma linha cada) + lotes avulsos e antigos; os filhos de grupo não entram na lista.
+      const [groups, batches] = await Promise.all([
+        api.listImportGroups(RECENT_ROWS),
+        api.listBatches(RECENT_ROWS, 0, "instagram_import", { ungrouped: true }),
+      ]);
+      const items = mergeRecent(
+        groups.items,
+        batches.items.filter((b) => b.source === "instagram_import"),
+        RECENT_ROWS,
+      );
+      const live = items.find(isActiveEntry);
+      // Sem nenhuma ativa, a última aberta automaticamente continua na tela (ex.: grupo que acabou de concluir).
+      if (live) setAuto(selectionOf(live));
+      setRecentPoll(live ? 5_000 : null);
+      return items;
     },
     recentPoll,
   );
-  const recentItems = recent.data?.items ?? [];
-  const autoBatch = recentItems.find((b) => b.source === "instagram_import" && ACTIVE_BATCH.has(b.status));
-  const shownBatchId = selectedBatchId ?? autoBatch?.id ?? null;
+  const recentItems = recent.data ?? [];
+  const shown = selected ?? auto;
+  const shownLive = shown !== null && recentItems.some((e) => isActiveEntry(e) && sameSelection(e, shown));
+  const shownBatchId =
+    shown?.kind === "batch" ? shown.id : shown && child?.groupId === shown.id ? child.batchId : null;
+
+  function closeShown() {
+    setSelected(null);
+    // A importação ainda ativa volta a aparecer sozinha; a encerrada some de vez.
+    if (!shownLive) setAuto(null);
+  }
 
   async function submit() {
-    if (!parsed.ok || !canSubmitImport(processAfter, presetId)) return;
+    const plan = planFromPreview(preview, {
+      content,
+      limit: limitChoice,
+      processAfterDownload: processAfter,
+      presetId,
+    });
+    if (!canSubmit || !plan) return;
     setSubmitting(true);
+    setStartNotice(null);
     try {
-      const batch = await api.createImport(
-        buildImportRequest({
-          profile: parsed.username,
-          content,
-          limitIndex: limitIdx,
-          processAfterDownload: processAfter,
-          presetId,
-        }),
-      );
-      setSelectedBatchId(batch.id);
+      if (plan.kind === "single") {
+        const batch = await api.createImport(plan.body);
+        setSelected({ kind: "batch", id: batch.id });
+        toast.push(
+          "ok",
+          processAfter
+            ? `Download e processamento de @${plan.body.profile} iniciados.`
+            : `Download dos originais de @${plan.body.profile} iniciado.`,
+        );
+      } else {
+        const created = interpretGroupCreated(await api.createImportGroup(plan.body));
+        setSelected({ kind: "group", id: created.groupId });
+        if (created.notice) setStartNotice({ groupId: created.groupId, text: created.notice });
+        toast.push("ok", created.message);
+      }
+      // Lista enviada: o campo é limpo (tipo, quantidade e processamento ficam) e o painel criado recebe o foco.
+      setProfileText("");
       recent.reload();
-      toast.push(
-        "ok",
-        processAfter
-          ? `Download e processamento de @${parsed.username} iniciados.`
-          : `Download dos originais de @${parsed.username} iniciado.`,
-      );
+      window.requestAnimationFrame(() => {
+        panelRef.current?.focus({ preventScroll: true });
+        panelRef.current?.scrollIntoView({ block: "nearest" });
+      });
     } catch (err) {
-      toast.push("err", messageOf(err));
-      // Perfil já em importação: atualiza a lista para mostrar a importação em andamento.
-      if (err instanceof ApiError && err.code === "profile_already_importing") recent.reload();
+      const failure = interpretStartError(err instanceof ApiError ? err : null);
+      if (failure.notice) setStartNotice({ groupId: null, text: failure.notice });
+      if (failure.error) toast.push("err", failure.error);
+      if (failure.refreshPreview) previewQuery.reload();
+      if (failure.reloadRecent) recent.reload();
       settings.reload(); // pode ter entrado em pausa; atualiza a faixa
     } finally {
       setSubmitting(false);
@@ -110,8 +243,8 @@ export function ImportPage() {
   }
 
   async function consult() {
-    if (!parsed.ok) return;
-    const username = parsed.username;
+    if (singleProfile === null) return;
+    const username = singleProfile;
     setLookupBusy(true);
     setLookupError(null);
     try {
@@ -126,7 +259,7 @@ export function ImportPage() {
     }
   }
 
-  const lookupShown = lookup && parsed.ok && lookup.username === parsed.username ? lookup.info : null;
+  const lookupShown = lookup && lookup.username === singleProfile ? lookup.info : null;
 
   return (
     <div className="page">
@@ -174,53 +307,91 @@ export function ImportPage() {
         }}
       >
         <div className="import-form">
-          <Field
-            label="Perfil"
-            htmlFor="imp-profile"
-            error={profileText.trim() && !parsed.ok ? parsed.error : null}
-            hint={parsed.ok ? `@${parsed.username}` : "@usuario ou URL do perfil"}
-          >
-            <input
-              id="imp-profile"
-              className={`input${profileText.trim() && !parsed.ok ? " invalid" : ""}`}
-              value={profileText}
-              onChange={(e) => setProfileText(e.target.value)}
-              placeholder="@perfil"
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </Field>
-          <Field label="Conteúdo" htmlFor="imp-content">
+          <div className="span-all">
+            <Field
+              label="Perfis"
+              htmlFor="imp-profiles"
+              hint="Um perfil por linha: usuario, @usuario ou a URL do perfil. Linhas vazias e repetidas são ignoradas."
+            >
+              <textarea
+                id="imp-profiles"
+                className="input textarea mono"
+                rows={5}
+                value={profileText}
+                onChange={(e) => setProfileText(e.target.value)}
+                placeholder={"usuario\n@usuario\nhttps://www.instagram.com/usuario/"}
+                autoComplete="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                aria-describedby="imp-profiles-status"
+              />
+            </Field>
+          </div>
+          <Field label="Tipo de mídia" htmlFor="imp-content">
             <select
               id="imp-content"
               className="select"
               value={content}
               onChange={(e) => setContent(e.target.value as ContentType)}
             >
-              {CONTENT_OPTIONS.map((c) => (
-                <option key={c} value={c}>
-                  {CONTENT_LABEL[c]}
+              {CONTENT_CHOICES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
                 </option>
               ))}
             </select>
           </Field>
-          <Field label="Quantidade" htmlFor="imp-limit">
-            <select
-              id="imp-limit"
-              className="select"
-              value={limitIdx}
-              onChange={(e) => setLimitIdx(Number(e.target.value))}
-            >
-              {LIMIT_OPTIONS.map((o, i) => (
-                <option key={o.label} value={i} disabled={o.disabled}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+          <Field
+            label="Quantidade por perfil"
+            htmlFor="imp-limit-mode"
+            error={limitChoice.ok ? null : limitChoice.error}
+          >
+            <div className="row" style={{ flexWrap: "wrap" }}>
+              <select
+                id="imp-limit-mode"
+                className="select"
+                value={limitMode}
+                onChange={(e) => setLimitMode(e.target.value as LimitMode)}
+              >
+                <option value="last">Últimos N</option>
+                <option value="all">Todos</option>
+              </select>
+              {limitMode === "last" ? (
+                <>
+                  <input
+                    id="imp-limit"
+                    className={`input${limitChoice.ok ? "" : " invalid"}`}
+                    style={{ width: 96 }}
+                    inputMode="numeric"
+                    aria-label="Quantidade de mídias por perfil"
+                    aria-invalid={!limitChoice.ok}
+                    value={limitText}
+                    onChange={(e) => setLimitText(e.target.value)}
+                    autoComplete="off"
+                  />
+                  <div className="seg" role="group" aria-label="Atalhos de quantidade">
+                    {LIMIT_SHORTCUTS.map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        className={limitChoice.ok && limitChoice.limit === n ? "on" : ""}
+                        aria-pressed={limitChoice.ok && limitChoice.limit === n}
+                        onClick={() => setLimitText(String(n))}
+                      >
+                        {formatCount(n)}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+            </div>
           </Field>
         </div>
 
         <div style={{ marginTop: 16 }}>
+          <div className="field-label" style={{ marginBottom: 6 }}>
+            Processamento
+          </div>
           <Switch checked={processAfter} onChange={setProcessAfter} label="Processar após baixar (opcional)" />
           {processAfter ? (
             <div style={{ marginTop: 10, maxWidth: 280 }}>
@@ -256,16 +427,92 @@ export function ImportPage() {
           </div>
         </div>
 
-        <div className="row" style={{ marginTop: 16 }}>
-          <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
+        <div id="imp-profiles-status" style={{ marginTop: 16 }}>
+          {!hasText ? null : preview ? (
+            <div className="small" role="status">
+              {entriesSummary({
+                valid: preview.valid.length,
+                duplicates: preview.duplicates,
+                invalid: preview.invalid.length,
+              })}
+            </div>
+          ) : previewError ? (
+            // Sem conferência não há contagem válida para mostrar.
+            <ErrorLine message={previewError} onRetry={previewQuery.reload} />
+          ) : !checking ? (
+            <div className="muted small" role="status">
+              Nenhum perfil na lista.
+            </div>
+          ) : (
+            <div className="muted small" role="status">
+              Conferindo a lista. Estimativa provisória: cerca de {profilesCountText(draft.estimate)}; o número final
+              aparece quando a conferência terminar.
+            </div>
+          )}
+          {preview && preview.invalid.length > 0 ? (
+            <div className="alert warn" role="alert" style={{ marginTop: 8, flexDirection: "column" }}>
+              <strong id="imp-invalid-title">
+                {invalidCountText(preview.invalid.length)}:{" "}
+                {preview.valid.length > 0
+                  ? "ficam de fora; a importação começa só com os perfis válidos."
+                  : "nenhum perfil válido na lista."}
+              </strong>
+              <ul className="invalid-list" aria-labelledby="imp-invalid-title">
+                {preview.invalid.slice(0, INVALID_SHOWN_MAX).map((item, i) => (
+                  <li key={`${i}:${item.entry}`}>
+                    <span className="mono">{item.entry}</span>: {item.reason}
+                  </li>
+                ))}
+                {preview.invalid.length > INVALID_SHOWN_MAX ? (
+                  <li>e mais {formatCount(preview.invalid.length - INVALID_SHOWN_MAX)}</li>
+                ) : null}
+              </ul>
+            </div>
+          ) : null}
+          {summary?.kind === "problem" ? (
+            <div className="field-error" role="alert" style={{ marginTop: 8 }}>
+              {summary.text}
+            </div>
+          ) : null}
+          {summary?.kind === "summary" ? (
+            <>
+              <div style={{ marginTop: 8 }}>
+                <strong>{summary.text}</strong>
+              </div>
+              {summary.hints.map((hint) => (
+                <div key={hint} className="muted small" style={{ marginTop: 4 }}>
+                  {hint}
+                </div>
+              ))}
+            </>
+          ) : null}
+          {providerProblem ? (
+            <div id="imp-provider-note" className="alert warn" role="status" style={{ marginTop: 8 }}>
+              <span className="grow">{providerProblem}</span>
+              <button type="button" className="btn btn-sm" onClick={() => navigate(ROUTES.settings)}>
+                Abrir Configurações
+              </button>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="row" style={{ marginTop: 16, flexWrap: "wrap" }}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={!canSubmit}
+            title={providerProblem ?? undefined}
+            aria-describedby={providerProblem ? "imp-provider-note" : undefined}
+          >
             {submitting ? <Spinner /> : null}
-            {processAfter ? "Baixar e processar" : "Baixar originais"}
+            {startLabel({ process: processAfter, invalid: invalidCount })}
           </button>
           <span className="grow" />
           <button
             type="button"
             className="btn btn-ghost"
-            disabled={!parsed.ok || !sessionOk || lookupBusy || paused}
+            title={singleProfile === null ? "Disponível com um único perfil na lista" : undefined}
+            disabled={singleProfile === null || !sessionOk || lookupBusy || paused}
             onClick={() => void consult()}
           >
             {lookupBusy ? <Spinner /> : <Search size={14} strokeWidth={1.75} aria-hidden="true" />}
@@ -274,6 +521,11 @@ export function ImportPage() {
         </div>
       </form>
 
+      {startNotice && startNotice.groupId === null ? (
+        <div className="alert warn" role="status" style={{ marginTop: 12 }}>
+          <span className="grow">{startNotice.text}</span>
+        </div>
+      ) : null}
       {lookupError ? (
         <div style={{ marginTop: 12 }}>
           <ErrorLine message={lookupError} />
@@ -281,15 +533,36 @@ export function ImportPage() {
       ) : null}
       {lookupShown ? <ProfilePreview info={lookupShown} /> : null}
 
-      {shownBatchId !== null ? (
-        <BatchPanel
-          key={shownBatchId}
-          batchId={shownBatchId}
-          onChanged={recent.reload}
-          onFinished={(id) => setSelectedBatchId((prev) => prev ?? id)}
-          onClose={selectedBatchId !== null ? () => setSelectedBatchId(null) : undefined}
-        />
-      ) : null}
+      <div ref={panelRef} tabIndex={-1} role="region" aria-label="Acompanhamento da importação">
+        {shown?.kind === "group" ? (
+          <ImportGroupPanel
+            key={shown.id}
+            groupId={shown.id}
+            notice={startNotice && startNotice.groupId === shown.id ? startNotice.text : null}
+            openBatchId={shownBatchId}
+            onOpenBatch={(batchId) => setChild({ groupId: shown.id, batchId })}
+            onChanged={recent.reload}
+            onClose={selected !== null || !shownLive ? closeShown : undefined}
+          />
+        ) : null}
+        {shown !== null && shownBatchId !== null ? (
+          <BatchPanel
+            key={shownBatchId}
+            batchId={shownBatchId}
+            onChanged={recent.reload}
+            onFinished={(id) => {
+              if (shown.kind === "batch") setSelected((prev) => prev ?? { kind: "batch", id });
+            }}
+            onClose={
+              shown.kind === "group"
+                ? () => setChild(null)
+                : selected !== null || !shownLive
+                  ? closeShown
+                  : undefined
+            }
+          />
+        ) : null}
+      </div>
 
       <section className="section" style={{ marginTop: 22 }}>
         <div className="section-head">
@@ -303,7 +576,10 @@ export function ImportPage() {
           ) : null}
         </div>
         {showAllBatches ? (
-          <AllBatches selectedId={shownBatchId} onSelect={setSelectedBatchId} />
+          <>
+            <AllGroups selected={shown} onSelect={setSelected} />
+            <AllBatches selected={shown} onSelect={setSelected} />
+          </>
         ) : recent.data === undefined ? (
           recent.error ? (
             <ErrorLine message={recent.error} onRetry={recent.reload} />
@@ -313,7 +589,7 @@ export function ImportPage() {
         ) : recentItems.length === 0 ? (
           <Empty title="Nenhuma importação ainda" />
         ) : (
-          <RecentTable items={recentItems} selectedId={shownBatchId} onSelect={setSelectedBatchId} />
+          <RecentTable items={recentItems} selected={shown} onSelect={setSelected} />
         )}
       </section>
     </div>
@@ -472,6 +748,7 @@ function BatchSummary({ batch }: { batch: Batch }) {
   const succeeded = done - errors - cancelled;
   const showBar = p.found > 0 && listingDone;
   const downloadOnly = isDownloadOnly(batch);
+  const profileEnd = batch.error_code ? null : profileEndText(batch);
   const counters: [string, number][] = [
     ["Encontrados", p.found],
     ["Baixados", p.downloaded],
@@ -487,12 +764,12 @@ function BatchSummary({ batch }: { batch: Batch }) {
         <div className="row">
           <strong style={{ fontSize: 14 }}>{batchTitle(batch)}</strong>
           <Pill tone={batchToneOf(batch)}>{batchLabel(batch)}</Pill>
-          {ACTIVE_BATCH.has(batch.status) ? <Spinner /> : null}
+          {ACTIVE_BATCH.has(batch.status) && !isQueuedInGroup(batch) ? <Spinner /> : null}
         </div>
         <span className="muted small">
           {[
             batch.content_type ? CONTENT_LABEL[batch.content_type] : null,
-            batch.requested_limit ? `Últimos ${batch.requested_limit}` : "Todos",
+            batch.requested_limit ? `Últimos ${formatCount(batch.requested_limit)}` : "Todos",
             batch.process && batch.preset_name ? batch.preset_name : "Somente originais",
           ]
             .filter(Boolean)
@@ -518,10 +795,19 @@ function BatchSummary({ batch }: { batch: Batch }) {
             {listingDroppedSuffix(batch)}
           </div>
         </div>
+      ) : isQueuedInGroup(batch) ? (
+        <div className="muted small">
+          Aguardando na fila: a listagem deste perfil começa quando chegar a vez dele na importação.
+        </div>
       ) : batch.status === "listing" ? (
         <div className="muted small">Coletando a lista de mídias do perfil.</div>
       ) : null}
-      {(batch.error_code || batch.error_message) && !needsAttention(batch) ? (
+      {profileEnd ? (
+        // Fim real do perfil antes da quantidade pedida: informação, não erro.
+        <div className="muted small" style={{ marginTop: 8 }}>
+          O {profileEnd}.
+        </div>
+      ) : (batch.error_code || batch.error_message) && !needsAttention(batch) ? (
         <div style={{ marginTop: 10 }}>
           <ErrorLine message={describeErrorCode(batch.error_code, batch.error_message)} />
         </div>
@@ -530,14 +816,19 @@ function BatchSummary({ batch }: { batch: Batch }) {
   );
 }
 
+function sameSelection(entry: Recent, selected: Selection | null): boolean {
+  if (selected === null || selected.kind !== entry.kind) return false;
+  return selected.id === (entry.kind === "group" ? entry.group.id : entry.batch.id);
+}
+
 function RecentTable({
   items,
-  selectedId,
+  selected,
   onSelect,
 }: {
-  items: Batch[];
-  selectedId: number | null;
-  onSelect: (id: number) => void;
+  items: Recent[];
+  selected: Selection | null;
+  onSelect: (selection: Selection) => void;
 }) {
   return (
     <div className="table-wrap">
@@ -556,28 +847,54 @@ function RecentTable({
           </tr>
         </thead>
         <tbody>
-          {items.map((b) => (
-            <tr
-              key={b.id}
-              className={`clickable${b.id === selectedId ? " selected" : ""}`}
-              onClick={() => onSelect(b.id)}
-            >
-              <td className="truncate" style={{ maxWidth: 200 }}>{`@${b.source_profile ?? "?"}`}</td>
-              <td className="muted">{b.content_type ? CONTENT_LABEL[b.content_type] : "-"}</td>
-              <td>
-                <Pill tone={batchToneOf(b)}>{batchLabel(b)}</Pill>
-                {listingDropped(b) ? <div className="muted small">{listingDropped(b)?.summary}</div> : null}
-              </td>
-              <td className="num">{formatCount(b.progress.found)}</td>
-              <td className="num muted">{formatCount(b.progress.downloaded)}</td>
-              <td className="num muted" title={isDownloadOnly(b) ? "Somente originais" : undefined}>
-                {isDownloadOnly(b) ? "-" : formatCount(b.progress.processed)}
-              </td>
-              <td className="num muted">{formatCount(b.progress.skipped)}</td>
-              <td className={`num ${b.progress.failed > 0 ? "tone-err" : "muted"}`}>{formatCount(b.progress.failed)}</td>
-              <td className="muted nowrap">{formatDateTime(b.created_at)}</td>
-            </tr>
-          ))}
+          {items.map((entry) => {
+            const isGroup = entry.kind === "group";
+            const item = isGroup ? entry.group : entry.batch;
+            const selection: Selection = { kind: entry.kind, id: item.id };
+            const tone = isGroup ? groupStatusLabel(entry.group) : null;
+            const downloadOnly = isGroup ? !entry.group.process : isDownloadOnly(entry.batch);
+            const note = isGroup
+              ? [...groupProfileCounts(entry.group.profiles), groupDroppedText(entry.group)].filter(Boolean).join(" • ")
+              : (listingDropped(entry.batch)?.summary ?? "");
+            const p = item.progress;
+            return (
+              <tr
+                key={`${entry.kind}:${item.id}`}
+                className={`clickable${sameSelection(entry, selected) ? " selected" : ""}`}
+                onClick={() => onSelect(selection)}
+              >
+                <td className="truncate" style={{ maxWidth: 240 }}>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelect(selection);
+                    }}
+                  >
+                    {isGroup ? groupTitle(entry.group) : `@${entry.batch.source_profile ?? "?"}`}
+                  </button>
+                </td>
+                <td className="muted">{item.content_type ? CONTENT_LABEL[item.content_type] : "-"}</td>
+                <td>
+                  {isGroup && tone ? (
+                    <Pill tone={tone.tone}>{tone.label}</Pill>
+                  ) : !isGroup ? (
+                    <Pill tone={batchToneOf(entry.batch)}>{batchLabel(entry.batch)}</Pill>
+                  ) : null}
+                  {note ? <div className="muted small">{note}</div> : null}
+                </td>
+                <td className="num">{formatCount(p.found)}</td>
+                <td className="num muted">{formatCount(p.downloaded)}</td>
+                <td className="num muted" title={downloadOnly ? "Somente originais" : undefined}>
+                  {downloadOnly ? "-" : formatCount(p.processed)}
+                </td>
+                <td className="num muted">{formatCount(p.skipped)}</td>
+                <td className={`num ${p.failed > 0 ? "tone-err" : "muted"}`}>{formatCount(p.failed)}</td>
+                <td className="muted nowrap">{formatDateTime(item.created_at)}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -586,13 +903,72 @@ function RecentTable({
 
 const ALL_BATCHES_PAGE = 20;
 
-function AllBatches({ selectedId, onSelect }: { selectedId: number | null; onSelect: (id: number) => void }) {
+/** Importações de vários perfis, uma linha por grupo (keyset `before_id`). Some quando não há nenhuma. */
+function AllGroups({ selected, onSelect }: { selected: Selection | null; onSelect: (s: Selection) => void }) {
+  // Pilha de cursores `before_id`; vazia = primeira página.
+  const [cursors, setCursors] = useState<number[]>([]);
+  const before = cursors[cursors.length - 1];
+  const [pollMs, setPollMs] = useState<number>(POLL_STEPS_MS[0]);
+  const list = useQuery(
+    `all-groups:${before ?? "first"}`,
+    async () => {
+      const page = await api.listImportGroups(ALL_BATCHES_PAGE, before);
+      setPollMs((prev) => nextPollMs(prev, page.items.some((g) => g.status === "active")));
+      return { ...page, before };
+    },
+    pollMs,
+  );
+  if (list.data === undefined) {
+    return list.error ? <ErrorLine message={list.error} onRetry={list.reload} /> : null;
+  }
+  const { items, total, next_before_id: next } = list.data;
+  if (total === 0) return null;
+  const ready = list.data.before === before;
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <h3 className="muted small" style={{ marginBottom: 6 }}>
+        Vários perfis · {formatCount(total)}
+      </h3>
+      {list.error ? <ErrorLine message={list.error} onRetry={list.reload} /> : null}
+      <RecentTable
+        items={items.map((group) => ({ kind: "group" as const, group }))}
+        selected={selected}
+        onSelect={onSelect}
+      />
+      {cursors.length > 0 || next !== null ? (
+        <div className="row" style={{ marginTop: 10, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={cursors.length === 0 || !ready}
+            onClick={() => setCursors(cursors.slice(0, -1))}
+          >
+            Anterior
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={next === null || !ready}
+            onClick={() => {
+              if (next !== null) setCursors([...cursors, next]);
+            }}
+          >
+            Próxima
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Lotes avulsos e antigos (um perfil), como sempre; os filhos de grupo ficam dentro do grupo. */
+function AllBatches({ selected, onSelect }: { selected: Selection | null; onSelect: (s: Selection) => void }) {
   const [offset, setOffset] = useState(0);
   const [pollMs, setPollMs] = useState<number>(POLL_STEPS_MS[0]);
   const list = useQuery(
     `all-batches:${offset}`,
     async () => {
-      const page = await api.listBatches(ALL_BATCHES_PAGE, offset, "instagram_import");
+      const page = await api.listBatches(ALL_BATCHES_PAGE, offset, "instagram_import", { ungrouped: true });
       const items = page.items.filter((b) => b.source === "instagram_import");
       setPollMs((prev) => nextPollMs(prev, items.some((b) => ACTIVE_BATCH.has(b.status))));
       if (page.items.length === 0 && page.total > 0 && offset > 0) setOffset(0);
@@ -604,11 +980,18 @@ function AllBatches({ selectedId, onSelect }: { selectedId: number | null; onSel
     return list.error ? <ErrorLine message={list.error} onRetry={list.reload} /> : <SkeletonRows rows={3} />;
   }
   const { items, total } = list.data;
-  if (items.length === 0) return <Empty title="Nenhuma importação ainda" />;
+  if (items.length === 0) return <Empty title="Nenhuma importação de um perfil" />;
   return (
     <>
+      <h3 className="muted small" style={{ marginBottom: 6 }}>
+        Um perfil · {formatCount(total)}
+      </h3>
       {list.error ? <ErrorLine message={list.error} onRetry={list.reload} /> : null}
-      <RecentTable items={items} selectedId={selectedId} onSelect={onSelect} />
+      <RecentTable
+        items={items.map((batch) => ({ kind: "batch" as const, batch }))}
+        selected={selected}
+        onSelect={onSelect}
+      />
       {total > ALL_BATCHES_PAGE ? (
         <div className="row" style={{ marginTop: 10, justifyContent: "flex-end" }}>
           <span className="muted small">

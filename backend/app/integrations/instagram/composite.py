@@ -17,6 +17,8 @@ from typing import TypeVar
 
 from app.core.config import INSTAGRAM_PROVIDERS
 from app.integrations.instagram.downloader import (
+    LEGACY_MAX_ITEMS,
+    LISTING_ANOMALY_DETAILS,
     ContentType,
     InstagramDownloader,
     InstagramError,
@@ -33,7 +35,20 @@ DEFAULT_INSTAGRAM_PROVIDER = "web"
 FALLBACK_CODES: frozenset[str] = frozenset({"contract_changed", "unsupported_media"})
 # Details de `contract_changed` que NÃO acionam o fallback: a resposta veio utilizável e só a paginação quebrou
 # (has_next_page=true sem cursor junto com `errors`); o erro sobe visível, sem requisições novas pelo gallery-dl.
-NO_FALLBACK_DETAILS: frozenset[str] = frozenset({"cursor_missing_with_errors"})
+# Vale para TODO fim anômalo da paginação (LISTING_ANOMALY_DETAILS): o erro do web fica visível e o lote segue a
+# regra de `needs_attention`; o gallery-dl nunca "conclui" no lugar dele.
+NO_FALLBACK_DETAILS: frozenset[str] = frozenset({"cursor_missing_with_errors"}) | LISTING_ANOMALY_DETAILS
+
+
+# "Todos" (limit None) e `photos_carousels` só existem no provider web: o gallery-dl truncaria em 5.000 itens
+# (fingindo fim de perfil) e recusa o filtro. Nunca são atendidos pelo legado, nem por fallback.
+WEB_ONLY_MESSAGE = ("\"Todos\", \"Fotos e carrosséis\" e quantidades acima de 5.000 exigem o método de importação web; "
+                    "o método gallery-dl não lista o perfil até o fim, para em 5.000 mídias e não conhece esse "
+                    "filtro.")
+
+
+def web_only(content: str, limit: int | None) -> bool:
+    return limit is None or limit > LEGACY_MAX_ITEMS or content == "photos_carousels"
 
 
 def _no_fallback(exc: InstagramError) -> bool:
@@ -114,12 +129,16 @@ class CompositeInstagramDownloader(InstagramDownloader):
         if on_checkpoint is not None:
             extra["on_checkpoint"] = on_checkpoint
         if self.strategy == "gallery_dl":
+            if web_only(content, limit):
+                # Erro claro em vez de truncar em 5.000 ou falhar de forma obscura (a API já recusa na criação).
+                raise InstagramError("invalid_input", WEB_ONLY_MESSAGE)
             self._listing_source = self.fallback
             return self.fallback.iter_profile_media(username, content, limit, cancel=cancel, **extra)
         self._listing_source = self.primary
         primary = self.primary.iter_profile_media(username, content, limit, cancel=cancel, **extra)
-        if self.strategy == "web" or resume is not None:
+        if self.strategy == "web" or resume is not None or web_only(content, limit):
             # Seção 9 (M5): com resume não há fallback (o gallery-dl recomeçaria do início, fora do checkpoint).
+            # "Todos"/`photos_carousels`: sem fallback em `auto`; o erro do web fica visível no lote.
             return primary
         return self._iter_auto(primary, username, content, limit, cancel, extra)
 

@@ -2,6 +2,9 @@ import type {
   Batch,
   Diagnostics,
   Health,
+  ImportGroupDetail,
+  ImportGroupList,
+  ImportGroupRequest,
   ImportRequest,
   InstagramStatus,
   Job,
@@ -14,6 +17,7 @@ import type {
   PresetParams,
   ProcessByFilterRequest,
   ProfileInfo,
+  ProfilesPreview,
   SessionInput,
   Settings,
   SettingsUpdate,
@@ -33,13 +37,22 @@ export class ApiError extends Error {
   readonly code: string;
   /** Texto original do backend (pode ser null). */
   readonly detail: string | null;
+  /** Corpo JSON do erro, quando há campos além de detail/code (ex.: `invalid`, `skipped`). */
+  readonly payload: Record<string, unknown> | null;
 
-  constructor(status: number, code: string, message: string, detail: string | null = null) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    detail: string | null = null,
+    payload: Record<string, unknown> | null = null,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.payload = payload;
   }
 }
 
@@ -137,7 +150,8 @@ async function request<T>(method: Method, path: string, opts: RequestOptions = {
   if (!response.ok) {
     const { detail, code } = extractDetail(payload);
     const finalCode = code ?? `http_${response.status}`;
-    throw new ApiError(response.status, finalCode, errorMessageFor(finalCode, response.status, detail), detail);
+    const extra = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+    throw new ApiError(response.status, finalCode, errorMessageFor(finalCode, response.status, detail), detail, extra);
   }
   return payload as T;
 }
@@ -160,8 +174,30 @@ export const api = {
     request<ProfileInfo>("POST", "/instagram/profile", { body: { profile }, timeoutMs: INSTAGRAM_TIMEOUT_MS }),
   createImport: (req: ImportRequest) => request<Batch>("POST", "/imports", { body: req }),
 
-  listBatches: (limit = 10, offset = 0, source?: Batch["source"]) =>
-    request<Paged<Batch>>("GET", "/batches", { query: { limit, offset, source } }),
+  /** Pré-validação da lista de perfis: sem efeitos e sem requisição ao Instagram. */
+  previewProfiles: (entries: string[], signal?: AbortSignal) =>
+    request<ProfilesPreview>("POST", "/import-groups/preview", { body: { entries }, signal }),
+  createImportGroup: (req: ImportGroupRequest) =>
+    request<ImportGroupDetail>("POST", "/import-groups", { body: req, timeoutMs: SLOW_TIMEOUT_MS }),
+  listImportGroups: (limit = 50, beforeId?: number) =>
+    request<ImportGroupList>("GET", "/import-groups", { query: { limit, before_id: beforeId } }),
+  /** Grupo + uma página de filhos (ordem group_position; a seguinte é `after_position = next_after_position`). */
+  getImportGroup: (id: number, opts: { childrenLimit?: number; afterPosition?: number | null } = {}) =>
+    request<ImportGroupDetail>("GET", `/import-groups/${id}`, {
+      query: { children_limit: opts.childrenLimit, after_position: opts.afterPosition },
+    }),
+  cancelImportGroup: (id: number) => request<ImportGroupDetail>("POST", `/import-groups/${id}/cancel`),
+
+  /** `ungrouped`: só lotes avulsos e antigos (sem filhos de grupo); `groupId`: só os filhos de um grupo. */
+  listBatches: (
+    limit = 10,
+    offset = 0,
+    source?: Batch["source"],
+    opts: { ungrouped?: boolean; groupId?: number } = {},
+  ) =>
+    request<Paged<Batch>>("GET", "/batches", {
+      query: { limit, offset, source, group_id: opts.groupId, ungrouped: opts.ungrouped ? "true" : undefined },
+    }),
   /** Resumo do lote, sem jobs (lista de jobs do lote: listJobs({ batch_id })). */
   getBatch: (id: number, includeJobs = false) =>
     request<Batch>("GET", `/batches/${id}`, { query: { include_jobs: includeJobs ? "true" : undefined } }),

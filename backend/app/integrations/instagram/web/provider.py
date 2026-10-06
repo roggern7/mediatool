@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 from app.integrations.instagram.downloader import (
     CONTENT_TYPES,
-    MAX_ITEMS,
     ContentType,
     InstagramDownloader,
     InstagramError,
@@ -86,7 +85,7 @@ def _default_graphql(http: Any, bootstrap: Any, overrides: dict[str, str], env: 
 BOOTSTRAP_CACHE_TTL = 600.0   # seção 9 (M2): WebState reaproveitado por até 10 min
 ENV_MAX_PAGES_PER_HOUR = "MEDIA_TOOL_IG_MAX_PAGES_PER_HOUR"
 # Configuração técnica para POC de escala (sem botão na interface): teto de páginas de listagem por hora. Ausente
-# ou inválida = padrão (300); ``0`` = sem teto horário. Só o teto por hora muda: intervalo entre requisições, 1 em
+# ou inválida = padrão (600); ``0`` = sem teto horário. Só o teto por hora muda: intervalo entre requisições, 1 em
 # voo, backpressure, pausas, retries e checkpoint continuam iguais. Quando definida, prevalece sobre a de cima.
 ENV_PAGE_RATE_LIMIT = "INSTAGRAM_PAGE_RATE_LIMIT"
 _rate_limit_disabled_logged = False
@@ -232,13 +231,13 @@ class InstagramWebDownloader(InstagramDownloader):
         )
         # Repassado a iter_profile_posts na listagem (metadados seguros por página; ver graphql.py).
         self._on_page = on_page
-        # Teto de páginas por trecho de listagem (None = teto proporcional de web/budget.py).
+        # Teto de páginas por TRECHO de listagem (só testes/POC; None = sem teto, o padrão do app). Atingido, o
+        # trecho termina com checkpoint `has_next=True`: não é fim do perfil.
         self._max_pages = max_pages
         # Métricas seguras da última listagem (pages, posts_seen, items_compatible, items_skipped_filter, duplicates,
         # stop_reason); None antes de qualquer listagem. Nunca cursor, URL ou id.
         self.last_listing_stats: dict | None = None
-        # Totais seguros do último trecho de listagem: pages_with_errors, errors, cursor_missing_end_of_profile,
-        # dropped_unexpected e
+        # Totais seguros do último trecho de listagem: pages_with_errors, errors, dropped_unexpected e
         # skipped_expected (motivo -> quantidade); None antes do fim de um trecho. Nunca mensagem, id ou cursor.
         self.last_listing_anomalies: dict | None = None
         # Estado da conta na 1a resposta da última listagem: "confirmed", "different_account" ou "not_confirmed"
@@ -291,8 +290,8 @@ class InstagramWebDownloader(InstagramDownloader):
             raise InstagramError("invalid_input", "Limite inválido.")
         if resume is not None and not isinstance(resume, ListingCheckpoint):
             raise InstagramError("invalid_input", "Ponto de retomada da listagem inválido.")
-        effective = min(limit, MAX_ITEMS) if limit is not None else MAX_ITEMS
-        return self._iter_media(username, content, effective, cancel, resume, on_checkpoint)
+        # ``limit=None`` ("Todos"): até o fim real do perfil, sem teto de quantidade nem de páginas.
+        return self._iter_media(username, content, limit, cancel, resume, on_checkpoint)
 
     def resolve_post(self, shortcode: str) -> list[RemoteMedia]:
         try:
@@ -507,17 +506,16 @@ class InstagramWebDownloader(InstagramDownloader):
             _close(ops)
 
     def _iter_media(
-        self, username: str, content: str, limit: int, cancel: threading.Event | None,
+        self, username: str, content: str, limit: int | None, cancel: threading.Event | None,
         resume: ListingCheckpoint | None, on_checkpoint: Callable[[ListingCheckpoint], None] | None,
     ) -> Iterator[RemoteMedia]:
         """Lista página a página (gerador; nada de respostas/nós/itens acumulados).
 
-        Parada (ordem): quantidade atingida (imediata) > cancelamento > erro > fim do perfil/página vazia/2 páginas
-        sem nó novo > páginas seguidas sem item compatível (filter_exhausted) > rendimento baixo (low_yield) > teto
-        proporcional (budget_exhausted). Parar por orçamento ou filtro não é erro. ``on_checkpoint`` é chamado depois
-        que todos os itens de uma página foram entregues; ``resume`` continua de um checkpoint (contadores totais,
-        sequência improdutiva e rendimento continuam valendo)."""
-        from app.integrations.instagram.web.budget import ListingBudget, max_pages_for
+        Parada (ordem): quantidade atingida do tipo pedido (imediata; ``limit=None`` nunca para por quantidade) >
+        cancelamento > erro (inclusive fim anômalo da paginação, que NÃO é fim do perfil) > fim real do perfil
+        (``has_next_page=false``). Páginas sem item compatível com o filtro e rendimento baixo NÃO encerram a
+        listagem: ela segue até a quantidade ou o fim real. ``on_checkpoint`` é chamado depois que todos os itens de
+        uma página foram entregues; ``resume`` continua de um checkpoint (contadores totais continuam valendo)."""
         from app.integrations.instagram.web.errors import InstagramWebError
         from app.integrations.instagram.web.normalize import (
             DEGRADED_REASONS,
@@ -543,8 +541,7 @@ class InstagramWebDownloader(InstagramDownloader):
         if resume is not None and not resume.has_next:
             st["stop_reason"] = "nothing_to_resume"
             return
-        budget = ListingBudget.from_env(self._env)
-        max_pages = self._max_pages if self._max_pages is not None else max_pages_for(limit, content)
+        max_pages = self._max_pages
         stats = NormalizeStats()
         count = 0
         streak = resume.unproductive_streak if resume else 0
@@ -562,9 +559,6 @@ class InstagramWebDownloader(InstagramDownloader):
             nonlocal streak, page_compatible, closed_page
             streak = 0 if page_compatible else streak + 1
             page_compatible = 0
-            if reason in (None, "budget_exhausted"):
-                reason = budget.stop_reason(content, pages=st["pages"], items_compatible=st["items_compatible"],
-                                            unproductive_streak=streak) or reason
             st["stop_reason"] = reason
             page = ops.graphql.current_page
             if page is not None:
@@ -573,7 +567,8 @@ class InstagramWebDownloader(InstagramDownloader):
                 on_checkpoint(ListingCheckpoint(
                     resume_cursor=page.end_cursor, next_page_index=page.index + 1, pages=st["pages"],
                     posts_seen=st["posts_seen"], items_compatible=st["items_compatible"],
-                    unproductive_streak=streak, has_next=reason is None,
+                    # Só o fim real do perfil zera `has_next`; o teto de páginas do trecho (testes/POC) não.
+                    unproductive_streak=streak, has_next=reason != "end_of_profile",
                     page_counts=_page_counts(getattr(page, "report", None), DEGRADED_REASONS),
                 ))
             return reason is None
@@ -639,7 +634,7 @@ class InstagramWebDownloader(InstagramDownloader):
                         st["items_compatible"] += 1
                         page_compatible += 1
                         yield item
-                        if count >= limit:
+                        if limit is not None and count >= limit:
                             st["stop_reason"] = "limit_reached"
                             completed = True
                             return
@@ -702,14 +697,12 @@ class InstagramWebDownloader(InstagramDownloader):
                 )
                 self.last_listing_anomalies = anomalies = _listing_anomalies(ops, stats.reasons, EXPECTED_REASONS,
                                                                                  st)
-                if anomalies["pages_with_errors"] or anomalies["dropped_unexpected"] \
-                        or anomalies["cursor_missing_end_of_profile"]:
+                if anomalies["pages_with_errors"] or anomalies["dropped_unexpected"]:
                     log.warning(
                         "Listagem web (este trecho): pages_with_errors=%s errors=%s "
-                        "cursor_missing_end_of_profile=%s dropped_unexpected=%s skipped_expected=%s",
+                        "dropped_unexpected=%s skipped_expected=%s",
                         anomalies["pages_with_errors"], anomalies["errors"],
-                        anomalies["cursor_missing_end_of_profile"], _counts(anomalies["dropped_unexpected"]),
-                        _counts(anomalies["skipped_expected"]),
+                        _counts(anomalies["dropped_unexpected"]), _counts(anomalies["skipped_expected"]),
                     )
 
 
@@ -754,7 +747,6 @@ def _listing_anomalies(ops: _Ops, reasons: Mapping[str, int], expected: frozense
         if st.get(key):
             skipped[reason] = int(st[key])
     return {"pages_with_errors": int(totals.get("pages_with_errors") or 0), "errors": int(totals.get("errors") or 0),
-            "cursor_missing_end_of_profile": int(totals.get("cursor_missing_end_of_profile") or 0),
             "dropped_unexpected": dropped, "skipped_expected": skipped}
 
 

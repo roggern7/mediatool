@@ -591,11 +591,14 @@ def test_cursor_cycle_a_b_a_stops():
 
 
 def test_empty_page_with_has_next_stops():
+    # Continua parando sem requisição extra; mudança confirmada: agora como fim anômalo (erro), não fim do perfil.
     site = Site()
     site.on_post = lambda n, form, request: httpx.Response(
         200, text=page_body([], True, f"e{n}"), headers={"content-type": "application/json"})
     gql, http = graphql_for(site)
-    assert list(gql.iter_profile_posts("perfil_teste", max_media=None)) == []
+    with pytest.raises(InstagramError) as info:
+        list(gql.iter_profile_posts("perfil_teste", max_media=None))
+    assert info.value.code == "contract_changed" and info.value.diagnostic["detail"] == "empty_page"
     assert site.posts == 1
     http.close()
 
@@ -607,7 +610,11 @@ def test_max_pages_bounds_requests_even_with_fresh_cursors_and_duplicate_nodes()
         200, text=page_body([image_node("DUP", pk="dup")], True, f"x{n}"),
         headers={"content-type": "application/json"})
     gql, http = graphql_for(site)
-    nodes = list(gql.iter_profile_posts("perfil_teste", max_media=None, max_pages=5))
+    nodes = []
+    with pytest.raises(InstagramError) as info:   # mudança confirmada: no_new_items é fim anômalo, não fim do perfil
+        for node in gql.iter_profile_posts("perfil_teste", max_media=None, max_pages=5):
+            nodes.append(node)
+    assert info.value.diagnostic["detail"] == "no_new_items"
     assert len(nodes) == 1 and site.posts == 3
     http.close()
 
@@ -683,8 +690,12 @@ def test_composite_falls_back_once_and_does_not_loop():
     with pytest.raises(InstagramError):
         comp.get_profile("x")
     with pytest.raises(InstagramError):
+        list(comp.iter_profile_media("x", "all", 10))
+    assert primary.calls == 2 and fallback.calls == 2, "um fallback por operação, sem laço"
+    # "Todos" (limit None) nunca cai no gallery-dl: o erro do web sobe e o fallback não é chamado.
+    with pytest.raises(InstagramError):
         list(comp.iter_profile_media("x", "all", None))
-    assert primary.calls == 2 and fallback.calls == 2
+    assert primary.calls == 3 and fallback.calls == 2
 
 
 def test_composite_no_fallback_after_items_were_yielded():

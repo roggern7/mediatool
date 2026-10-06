@@ -1,22 +1,54 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from app.integrations.instagram.downloader import MAX_IMPORT_LIMIT
 from app.schemas.common import PositiveId, StrictModel
 from app.schemas.jobs import JobOut
 
-ContentType = Literal["reels", "posts", "videos", "images", "all"]
+# Interface: "all" (Todos), "reels" (Reels) e "photos_carousels" (Fotos e carrosséis). "posts", "videos" e "images"
+# continuam aceitos por compatibilidade.
+ContentType = Literal["reels", "posts", "videos", "images", "all", "photos_carousels"]
+# "Últimos N": inteiro positivo livre (o máximo só rejeita lixo). `null` = "Todos": até o fim real do perfil.
+ImportLimit = Annotated[int, Field(strict=True, ge=1, le=MAX_IMPORT_LIMIT)]
 
 
 class ImportRequest(StrictModel):
     profile: str = Field(min_length=1, max_length=512)
     content_type: ContentType
-    # A interface mostra só 10/20/50/100 até o dono autorizar volumes maiores; "Todos" (null) continua 422.
-    limit: Literal[10, 20, 50, 100, 250, 500, 1000, 2000, 5000, 10000] | None
+    # N conta mídias do TIPO pedido (100 + reels = 100 Reels); `null` = "Todos".
+    limit: ImportLimit | None
     preset_id: PositiveId | None = None
     # Download puro é o padrão: o processamento (FFmpeg) é opcional e só acontece com `process: true`.
+    process: bool = Field(default=False, strict=True)
+
+
+class ProfilesPreviewRequest(StrictModel):
+    # Lista de entradas e/ou texto colado: um perfil por linha (vírgula e ponto e vírgula também separam; espaço
+    # NÃO separa: entrada com espaço interno é inválida).
+    entries: list[str] | None = Field(default=None, max_length=100_000)
+    text: str | None = Field(default=None, max_length=2_000_000)
+
+
+class InvalidProfileEntry(BaseModel):
+    entry: str
+    reason: str
+
+
+class ProfilesPreview(BaseModel):
+    valid: list[str]
+    invalid: list[InvalidProfileEntry]
+    duplicates: int
+
+
+class ImportGroupRequest(StrictModel):
+    # Cada entrada: `usuario`, `@usuario` ou URL do perfil. Entrada inválida = 422 `invalid_profiles` (com a lista).
+    profiles: list[str] = Field(min_length=1, max_length=100_000)
+    content_type: ContentType
+    limit: ImportLimit | None   # POR PERFIL
+    preset_id: PositiveId | None = None
     process: bool = Field(default=False, strict=True)
 
 
@@ -75,6 +107,15 @@ class BatchOut(BaseModel):
     paused_until: str | None = None
     # Descartes inesperados da listagem do lote (zero em lotes antigos e de Biblioteca).
     listing_dropped: ListingDropped = Field(default_factory=ListingDropped)
+    # Por que a listagem terminou: "profile_end" (fim real do perfil; pode ter menos que o pedido) ou "limit"
+    # (quantidade pedida atingida). None enquanto lista, em erro/cancelamento e em lotes antigos.
+    listing_end: Literal["profile_end", "limit"] | None = None
+    # Grupo de importação (vários perfis): None em lotes avulsos e antigos. `group_position` é 1-based.
+    group_id: int | None = None
+    group_position: int | None = None
+    # Só em filhos de grupo: waiting (na fila, listagem ainda não começou) | active | attention | completed |
+    # failed | cancelled.
+    group_state: Literal["waiting", "active", "attention", "completed", "failed", "cancelled"] | None = None
     progress: BatchProgress
     counts: dict[str, int]
     # Só com ?include_jobs=true: no máximo 500 jobs (os mais recentes); a lista completa é GET /api/jobs?batch_id=.
@@ -85,3 +126,55 @@ class BatchOut(BaseModel):
 class BatchList(BaseModel):
     items: list[BatchOut]
     total: int
+
+
+class GroupProfiles(BaseModel):
+    # Filhos por estado (os seis somam `total`).
+    total: int
+    waiting: int
+    active: int
+    completed: int
+    attention: int
+    failed: int
+    cancelled: int
+
+
+class ImportGroupOut(BaseModel):
+    id: int
+    content_type: str
+    requested_limit: int | None
+    preset_id: int | None
+    preset_name: str | None
+    process: bool
+    created_at: str
+    finished_at: str | None
+    # Derivado dos filhos: active (algum na fila ou trabalhando) | attention (nenhum trabalhando, algum aguardando
+    # ação) | completed (todos encerrados) | cancelled (todos cancelados).
+    status: Literal["active", "attention", "completed", "cancelled"]
+    # Algum filho em `attention` ou `failed` (vale também com o grupo ainda ativo).
+    attention: bool
+    profiles: GroupProfiles
+    # Filhos cuja listagem chegou ao fim real do perfil.
+    profile_end_count: int
+    progress: BatchProgress
+    listing_dropped_total: int
+
+
+class ImportGroupList(BaseModel):
+    items: list[ImportGroupOut]
+    total: int
+    next_before_id: int | None = None
+
+
+class SkippedProfile(BaseModel):
+    profile: str
+    reason: str
+
+
+class ImportGroupDetail(BaseModel):
+    group: ImportGroupOut
+    children: list[BatchOut]
+    next_after_position: int | None = None
+    # Só na resposta da criação: perfis pulados (já tinham importação ativa) e repetições removidas da entrada.
+    skipped: list[SkippedProfile] | None = None
+    duplicates: int | None = None

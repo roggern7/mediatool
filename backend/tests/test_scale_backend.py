@@ -209,11 +209,12 @@ def test_process_by_filter_creates_jobs_in_one_transaction_with_cap(harness, mon
     assert extra.status_code == 422
 
 
-def test_import_accepts_large_quantities_but_not_all(harness):
+def test_import_accepts_large_quantities_free_n_and_all(harness):
+    # Mudança confirmada pelo dono: N livre (1 a 1.000.000) e "Todos" (null) aceitos; antes só a lista fechada.
     h = harness
-    for limit in (250, 500, 1000, 2000, 5000, 10000):  # perfis distintos (mesmo perfil listando: 409)
-        assert h.import_profile(profile=f"perfil_{limit}", limit=limit)["requested_limit"] == limit
-    for limit in (None, 3, 300, 20000):
+    for limit in (250, 500, 1000, 2000, 5000, 10000, 3, 300, 20000, None):  # perfis distintos (mesmo perfil: 409)
+        assert h.import_profile(profile=f"perfil_{limit}".lower(), limit=limit)["requested_limit"] == limit
+    for limit in (0, -5, 1_000_001):
         r = h.client.post("/api/imports", json={"profile": PROFILE, "content_type": "all", "limit": limit,
                                                 "preset_id": None, "process": False})
         assert r.status_code == 422

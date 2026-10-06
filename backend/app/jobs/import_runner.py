@@ -6,7 +6,15 @@ checkpoint são gravados numa transação. O trecho para (backpressure) quando o
 ainda não baixados (ou o app inteiro tem `MAX_PENDING_INGEST_GLOBAL`) e retoma abaixo de `RESUME_PENDING_INGEST`;
 para também em pausa do Instagram, falha de rede, cancelamento ou encerramento do app, e retoma do checkpoint (o
 índice único dos jobs descarta itens repetidos). O lote só sai de `listing` quando a listagem termina
-(`listing_state = done`).
+(`listing_state = done`), e ela só termina por quantidade atingida (`listing_end = limit`) ou pelo fim REAL do perfil
+(`listing_end = profile_end`: checkpoint com `has_next = False`, isto é, `has_next_page=false`). Fim anômalo da
+paginação (`LISTING_ANOMALY_DETAILS`) nunca conclui: `needs_attention` com o checkpoint, ou falha visível quando
+acontece na 1a página sem nenhum item.
+
+Vários perfis (grupo, migration 0012): os filhos são lotes comuns e entram na fila pela ordem de criação
+(`group_position`). Um trecho de listagem por vez no app inteiro (esta thread). Dentro de um grupo o próximo filho só
+começa quando o anterior terminou de listar, ou ficou parado por conta própria (`needs_attention`, backoff do lote,
+pausa do disjuntor); enquanto o filho da vez espera backpressure ou o teto de páginas, os seguintes continuam na fila.
 
 Seção 9 (C1, M1, M4): erro retryable/rede pausa a listagem do lote com backoff persistido (1m, 5m, 15m, 1h, 1h...),
 sem desistir; qualquer outro erro no meio do lote (há checkpoint) deixa o lote em `needs_attention` com o checkpoint
@@ -36,7 +44,12 @@ from typing import TYPE_CHECKING, Any
 
 from app.db.connection import utc_now
 from app.db.repositories.common import canonical_json
-from app.integrations.instagram.downloader import InstagramError, ListingCheckpoint, RemoteMedia
+from app.integrations.instagram.downloader import (
+    LISTING_ANOMALY_DETAILS,
+    InstagramError,
+    ListingCheckpoint,
+    RemoteMedia,
+)
 from app.jobs.errors import safe_message
 from app.jobs.pipeline import instagram_paused
 from app.services import disk
@@ -66,9 +79,10 @@ ATTENTION_RETRY_SECONDS = 6 * 3600
 ATTENTION_MAX_TRIES = 4
 
 END_OF_PROFILE_MESSAGE = "O perfil não tem mais publicações compatíveis; o lote terminou com {found} itens."
-UNPRODUCTIVE_MESSAGE = (
-    "A listagem parou porque as últimas páginas do perfil trouxeram poucos ou nenhum item compatível com o filtro "
-    "(baixo rendimento). O lote terminou com {found} itens."
+# O provider encerrou o trecho sem erro, sem fim real do perfil e sem avançar nenhuma página: não é fim do perfil.
+LISTING_STALLED_MESSAGE = (
+    "A listagem parou antes do fim do perfil sem avançar. A importação não foi dada como concluída e o ponto de "
+    "retomada foi mantido."
 )
 
 
@@ -85,6 +99,7 @@ class _Chunk:
         self.pages_ok = 0  # páginas entregues (checkpoint) neste trecho
         self.from_cursor = False  # o trecho começou de um cursor salvo
         self.retryable = False  # o erro do trecho é retryable
+        self.anomaly = False  # o erro do trecho é um fim anômalo da paginação (não é fim do perfil)
 
     @property
     def progressed(self) -> bool:
@@ -170,8 +185,13 @@ class ImportRunner:
             return None
         now = utc_now()
         global_full = self.ctx.batches.pending_ingest_global() + PAGE_ESTIMATE > MAX_PENDING_INGEST_GLOBAL
+        # Grupos cujo filho da vez espera backpressure: os filhos seguintes continuam na fila (sem mudar de estado).
+        waiting_groups: set[int] = set()
         for batch in candidates:
             batch_id = batch["id"]
+            group_id = batch.get("group_id")
+            if group_id is not None and group_id in waiting_groups:
+                continue
             if batch["listing_state"] == "needs_attention" and not batch["listing_retry_at"]:
                 continue  # tentativas automáticas esgotadas: só a ação do usuário (resume-listing) retoma
             if (batch["listing_retry_at"] or "") > now or self._batch_paused(batch, now):
@@ -182,6 +202,8 @@ class ImportRunner:
             if full or global_full or self._process_backlog_full(batch):
                 if not waiting:
                     self.ctx.batches.update_listing(batch_id, listing_state="waiting_backpressure")
+                if group_id is not None:
+                    waiting_groups.add(group_id)
                 continue
             if not self._disk_ok():
                 return None
@@ -265,20 +287,24 @@ class ImportRunner:
         gate = getattr(self.ctx, "instagram_gate", None)
         if not hasattr(gate, "restore_listing_pages"):
             return
-        gate.restore_listing_pages(self.ctx.app_settings.get_state(PAGES_STATE_KEY))
         from app.integrations.instagram.web.provider import page_rate_limit   # local: evita ciclo de import
 
         # INSTAGRAM_PAGE_RATE_LIMIT=0 (POC de escala): sem teto horário não há espera; campos antigos são limpos.
-        disabled = page_rate_limit(getattr(self.ctx.settings, "env", None)) == 0
+        per_hour = page_rate_limit(getattr(self.ctx.settings, "env", None))
+        disabled = per_hour == 0
+        # Valor persistido ilegível = janela cheia pelo teto VIGENTE.
+        gate.restore_listing_pages(self.ctx.app_settings.get_state(PAGES_STATE_KEY),
+                                   max_per_hour=per_hour or DEFAULT_MAX_PAGES_PER_HOUR)
         rows = self.ctx.db.fetchall(
-            "SELECT id, status, listing_state, rate_limit_pages_max FROM batches"
-            " WHERE rate_limit_resume_at IS NOT NULL")
+            "SELECT id, status, listing_state FROM batches WHERE rate_limit_resume_at IS NOT NULL")
         for row in rows:
-            used, seconds = gate.listing_window(int(row["rate_limit_pages_max"] or DEFAULT_MAX_PAGES_PER_HOUR))
+            # Teto VIGENTE, não o gravado no lote: depois de o teto subir (300 -> 600) a janela pode já ter vaga.
+            used, seconds = gate.listing_window(per_hour or DEFAULT_MAX_PAGES_PER_HOUR)
             if (not disabled and seconds is not None and row["status"] == "listing"
                     and row["listing_state"] == "running"):
                 self.ctx.batches.update_listing(
-                    row["id"], rate_limit_resume_at=utc_now(seconds), rate_limit_pages_used=used)
+                    row["id"], rate_limit_resume_at=utc_now(seconds), rate_limit_pages_used=used,
+                    rate_limit_pages_max=per_hour)
             else:
                 self.ctx.batches.update_listing(
                     row["id"], rate_limit_resume_at=None, rate_limit_pages_used=None, rate_limit_pages_max=None)
@@ -313,10 +339,15 @@ class ImportRunner:
             batch_id, batch["source_profile"], batch["content_type"], limit,
             "retomada" if resume is not None else "início",
         )
-        fields: dict[str, Any] = {"listing_state": "running", "listing_retry_at": None}
-        if batch["listing_state"] == "paused":
-            fields.update(error_code=None, error_message=None)  # motivo da pausa anterior não vale mais
-        self.ctx.batches.update_listing(batch_id, **fields)
+        # Transição condicional e atômica: se o lote foi cancelado depois de escolhido (`_next_eligible`) e antes
+        # daqui, nada é listado. `_current` já está registrado: um cancelamento posterior aciona `cancel`.
+        # (Lote `paused`: o motivo da pausa anterior não vale mais.)
+        if not self.ctx.batches.start_listing(batch_id, clear_error=batch["listing_state"] == "paused"):
+            with self._lock:
+                self._current = None
+                self._current_thread = None
+            logger.info("Lote %s: cancelado ou encerrado antes do início do trecho; nada foi listado", batch_id)
+            return
 
         chunk = _Chunk()
         chunk.from_cursor = resume is not None and resume.resume_cursor is not None
@@ -334,7 +365,10 @@ class ImportRunner:
             chunk_limit = remaining + repeats
 
         def on_checkpoint(checkpoint: ListingCheckpoint) -> None:
-            if cancel.is_set() and self._is_cancelled(batch_id):
+            # A cada página confere o banco (não só o aviso em memória): lote cancelado para na fronteira da página,
+            # sem pedir a próxima. O `_flush` repete a conferência dentro da transação dele.
+            if self._is_cancelled(batch_id):
+                cancel.set()
                 return
             for item in buffer:
                 if item.listing_ref is not None:
@@ -342,7 +376,15 @@ class ImportRunner:
             chunk.page_estimate = max(chunk.page_estimate, chunk.page_items)
             chunk.page_items = 0
             chunk.created += self._flush(batch, buffer, checkpoint)
+            if self._is_cancelled(batch_id):
+                cancel.set()
+                return
             chunk.pages_ok += 1
+            if chunk.created > 0 and batch.get("listing_attention_tries"):
+                # Progresso REAL (job novo criado): as tentativas automáticas de needs_attention recomeçam. Página
+                # com checkpoint mas sem nenhum job novo (ex.: o servidor repetindo os mesmos posts) não zera.
+                self.ctx.batches.update_listing(batch_id, listing_attention_tries=0)
+                batch["listing_attention_tries"] = 0
             if self.ctx.worker is not None:
                 self.ctx.worker.note_auth_success()  # página entregue: resposta autenticada com sucesso (seção 7)
             chunk.pending = self.ctx.jobs.pending_ingest_count(batch_id)
@@ -381,6 +423,8 @@ class ImportRunner:
             if not cancel.is_set():
                 error = (exc.code, safe_message(exc.message))
                 chunk.retryable = bool(exc.retryable)
+                diagnostic = getattr(exc, "diagnostic", None)
+                chunk.anomaly = isinstance(diagnostic, dict) and diagnostic.get("detail") in LISTING_ANOMALY_DETAILS
         except Exception as exc:  # noqa: BLE001
             failure = exc
             if not cancel.is_set():
@@ -498,18 +542,23 @@ class ImportRunner:
         limit = batch["requested_limit"]
         found = self.ctx.jobs.count_for_batch(batch_id)
         if chunk.stop == "limit" or self._limit_reached(batch_id, limit):
-            self._finish_listing(batch_id, None, None)
+            self._finish_listing(batch_id, None, None, listing_end="limit")
             return
         has_next = current["listing_has_next"]
         if has_next is None or not has_next:
+            # ÚNICO fim de perfil: o provider encerrou sem erro e o último checkpoint diz que não há próxima página
+            # (has_next_page=false). Sem checkpoint nenhum = provider que não pagina por checkpoint (gallery-dl).
             message = END_OF_PROFILE_MESSAGE.format(found=found) if limit is not None and found < limit else None
-            self._finish_listing(batch_id, None, message)
+            self._finish_listing(batch_id, None, message, listing_end="profile_end")
             return
-        if chunk_limit is not None and yielded >= chunk_limit and chunk.progressed:
-            # O provider parou pelo limite contando itens repetidos da página retomada: novo trecho do checkpoint.
+        if chunk.pages_ok > 0 or (chunk_limit is not None and yielded >= chunk_limit and chunk.progressed):
+            # Ainda há páginas e o trecho avançou (o provider parou pelo teto de páginas do trecho, ou pelo limite
+            # contando itens repetidos da página retomada): novo trecho do checkpoint.
             self.ctx.batches.update_listing(batch_id, listing_state="pending")
             return
-        self._finish_listing(batch_id, None, UNPRODUCTIVE_MESSAGE.format(found=found))
+        # Trecho encerrado sem erro, sem avançar e com próxima página pendente: não é fim do perfil.
+        chunk.anomaly = True
+        self._handle_listing_error(current, ("contract_changed", LISTING_STALLED_MESSAGE), chunk)
 
     def _handle_listing_error(self, batch: dict[str, Any], error: tuple[str, str], chunk: _Chunk) -> None:
         batch_id = batch["id"]
@@ -520,7 +569,9 @@ class ImportRunner:
             logger.warning("Lote %s: listagem pausada por %s; será retomada do checkpoint", batch_id, code)
             return
         # O checkpoint nunca é apagado aqui: recomeçar da página 1 só por ação do usuário (restart-listing).
-        cursor_refused = chunk.from_cursor and chunk.pages_ok == 0 and code in _CURSOR_REFUSED_CODES
+        # Fim anômalo da paginação não é recusa do cursor: sem nova tentativa em 1 min (nenhuma requisição extra).
+        cursor_refused = (chunk.from_cursor and chunk.pages_ok == 0 and code in _CURSOR_REFUSED_CODES
+                          and not chunk.anomaly)
         if cursor_refused and not batch["listing_cursor_refusals"]:
             # 1a recusa do cursor salvo no início do trecho: nova tentativa com o MESMO cursor depois do backoff.
             self._pause_with_backoff(batch, chunk, code, message, listing_cursor_refusals=1)
@@ -533,7 +584,11 @@ class ImportRunner:
         # content_unavailable...). Antes da primeira página (ou depois da última) não há o que retomar e o lote
         # termina como antes.
         mid_batch = batch["listing_next_page"] is not None and bool(batch["listing_has_next"])
-        if cursor_refused or mid_batch:
+        # Fim anômalo ainda na 1a página (sem checkpoint) mas com itens já listados: também não conclui; a nova
+        # tentativa pede a página 1 de novo e o índice único descarta os repetidos. Sem item nenhum, o lote falha
+        # com o erro visível (abaixo), nunca como "perfil vazio concluído".
+        first_page_partial = chunk.anomaly and not mid_batch and self.ctx.jobs.count_for_batch(batch_id) > 0
+        if cursor_refused or mid_batch or first_page_partial:
             tries = int(batch["listing_attention_tries"] or 0)
             retry_at = utc_now(ATTENTION_RETRY_SECONDS) if tries < ATTENTION_MAX_TRIES else None
             self.ctx.batches.update_listing(
@@ -556,14 +611,16 @@ class ImportRunner:
         )
         logger.warning("Lote %s: falha na listagem (%s); retomada do checkpoint em %ss", batch["id"], code, delay)
 
-    def _finish_listing(self, batch_id: int, error: tuple[str, str] | None, message: str | None) -> None:
-        """Listagem encerrada (`done`): o lote sai de `listing` e termina quando todos os jobs forem terminais."""
+    def _finish_listing(self, batch_id: int, error: tuple[str, str] | None, message: str | None, *,
+                        listing_end: str | None = None) -> None:
+        """Listagem encerrada (`done`): o lote sai de `listing` e termina quando todos os jobs forem terminais.
+        `listing_end`: "limit" (quantidade atingida) ou "profile_end" (fim real do perfil); None em erro."""
         batches = self.ctx.batches
         with self.ctx.db.transaction():
             # Página final sem checkpoint (limite no meio dela): os descartes até o último item gravado entram agora,
             # uma única vez (a coluna parcial é apagada na mesma instrução).
             batches.add_listing_dropped(batch_id, merge_partial=True)
-            batches.update_listing(batch_id, listing_state="done", listing_cursor=None)
+            batches.update_listing(batch_id, listing_state="done", listing_cursor=None, listing_end=listing_end)
         batches.sync_found(batch_id)
         found = batches.get(batch_id)["found"]
         if error is not None and found == 0:
@@ -593,6 +650,10 @@ class ImportRunner:
         created = 0
         last: RemoteMedia | None = None
         with self.ctx.db.transaction():
+            if self._is_cancelled(batch_id):
+                # Cancelado (mesma transação que gravaria os jobs e o checkpoint): nada é criado nem avançado.
+                buffer.clear()
+                return 0
             count = self.ctx.jobs.count_for_batch(batch_id)
             for item in buffer:
                 if limit is not None and count >= limit:
@@ -611,8 +672,9 @@ class ImportRunner:
                     listing_items_compatible=checkpoint.items_compatible,
                     listing_unproductive_streak=checkpoint.unproductive_streak,
                     listing_has_next=int(bool(checkpoint.has_next)),
-                    # Página entregue: backoff, recusas do cursor e tentativas de needs_attention recomeçam.
-                    listing_retry_level=0, listing_cursor_refusals=0, listing_attention_tries=0,
+                    # Página entregue: backoff e recusas do cursor recomeçam (as tentativas de needs_attention só
+                    # com job novo criado: ver on_checkpoint).
+                    listing_retry_level=0, listing_cursor_refusals=0,
                     listing_dropped_partial=None,  # a página fechou: vale a contagem inteira dela, abaixo
                 )
                 # Descartes da página, na mesma transação do checkpoint dela: cada página soma uma única vez.

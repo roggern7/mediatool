@@ -693,14 +693,63 @@ table.table {
 
 .import-form {
   display: grid;
-  grid-template-columns: minmax(220px, 2fr) repeat(2, minmax(150px, 1fr));
+  grid-template-columns: minmax(150px, 1fr) minmax(260px, 2fr);
   gap: 14px 14px;
   align-items: start;
 }
-@media (max-width: 960px) {
+.import-form .span-all {
+  grid-column: 1 / -1;
+}
+@media (max-width: 760px) {
   .import-form {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
+}
+.input.textarea {
+  width: 100%;
+  height: auto;
+  min-height: 96px;
+  max-height: 50vh;
+  padding: 7px 9px;
+  resize: vertical;
+  line-height: 1.45;
+  white-space: pre;
+  overflow: auto;
+}
+.invalid-list {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 180px;
+  overflow-y: auto;
+  align-self: stretch;
+  overflow-wrap: anywhere;
+}
+.link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+.group-detail {
+  max-width: 420px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .profile-preview {

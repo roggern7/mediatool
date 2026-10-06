@@ -213,7 +213,7 @@ def test_page_cap_default_and_cancel():
 
     mono = MonoClock()
     gate = InstagramRequestGate(interval=(0, 0), clock=mono, sleep=mono.sleep)
-    for _ in range(300):
+    for _ in range(600):   # padrão: 600 páginas por hora (antes 300)
         gate.wait_listing_page()
     assert mono.slept == []
     cancel = threading.Event()

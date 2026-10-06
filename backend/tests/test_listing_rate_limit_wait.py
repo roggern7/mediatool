@@ -1,6 +1,6 @@
 """Visibilidade da espera pelo teto de páginas por hora (docs/BATCH_ROBUSTNESS.md, seção 9, "Espera pelo teto").
 
-Portão: o teto continua exatamente o configurado (300/h) antes e depois de um reinício, a janela persistida é
+Portão: o teto continua exatamente o configurado (600/h) antes e depois de um reinício, a janela persistida é
 reconstruída (entradas velhas, futuras ou ilegíveis) e a espera avisa uma vez na entrada e uma na saída.
 Lote: estado exibido pela API, uma linha de log em cada ponta, nenhuma página durante a espera, reinício,
 cancelamento e pausa do Instagram durante a espera. Tudo offline, relógio simulado, valores FAKE.
@@ -31,7 +31,7 @@ from conftest import wait_until
 from media_fakes import FakeInstagramDownloader, remote
 
 JOIN_TIMEOUT = 20.0
-PER_HOUR = 3   # teto do fake dos testes de lote (o do portão continua 300 por padrão)
+PER_HOUR = 3   # teto do fake dos testes de lote (o do portão é 600 por padrão)
 
 
 # --------------------------------------------------------------------------- portão (unidade, relógio simulado)
@@ -59,35 +59,35 @@ class FakeClock:
                                     **extra)
 
 
-def test_cap_stays_exactly_300_per_hour_before_and_after_restart():
-    assert DEFAULT_MAX_PAGES_PER_HOUR == 300 and PAGE_WINDOW_SECONDS == 3600.0
+def test_cap_stays_exactly_600_per_hour_before_and_after_restart():
+    assert DEFAULT_MAX_PAGES_PER_HOUR == 600 and PAGE_WINDOW_SECONDS == 3600.0
     store: dict[str, str] = {}
     first = FakeClock()
     gate = first.gate(store)
     reserved: list[float] = []   # relógio de parede de cada página reservada
-    for _ in range(300):
+    for _ in range(600):
         gate.wait_listing_page()
         reserved.append(first.wall)
         first.advance(1.0)
-    assert first.sleeps == [], "as 300 primeiras páginas da hora não esperam"
-    for _ in range(20):          # da 301a em diante cada página espera a mais antiga sair da janela
+    assert first.sleeps == [], "as 600 primeiras páginas da hora não esperam"
+    for _ in range(20):          # da 601a em diante cada página espera a mais antiga sair da janela
         gate.wait_listing_page()
         reserved.append(first.wall)
-    assert len(first.sleeps) == 20 and first.sleeps[0] == pytest.approx(3300.0)
+    assert len(first.sleeps) == 20 and first.sleeps[0] == pytest.approx(3000.0)
 
     # "Reinício": portão novo, relógio monotônico recomeçado, 0,5 s de relógio de parede depois.
     second = FakeClock(mono=5.0, wall=first.wall + 0.5)
     restarted = second.gate(store)
-    assert restarted.restore_listing_pages(store["pages"]) == 300
+    assert restarted.restore_listing_pages(store["pages"]) == 600
     used, seconds = restarted.listing_window()
-    assert used == 300 and seconds == pytest.approx(0.5, abs=0.01)
-    for _ in range(320):
+    assert used == 600 and seconds == pytest.approx(0.5, abs=0.01)
+    for _ in range(620):
         restarted.wait_listing_page()
         reserved.append(second.wall)
     assert second.sleeps[0] == pytest.approx(0.5, abs=0.01), "nenhuma página antes da hora depois do reinício"
 
-    # Nem mais: em qualquer janela de 1 h cabem no máximo 300 páginas. Nem menos: a 301a sai assim que a 1a completa 1 h.
-    gaps = [reserved[i + 300] - reserved[i] for i in range(len(reserved) - 300)]
+    # Nem mais: em qualquer janela de 1 h cabem no máximo 600 páginas. Nem menos: a 601a sai assim que a 1a completa 1 h.
+    gaps = [reserved[i + 600] - reserved[i] for i in range(len(reserved) - 600)]
     assert min(gaps) >= PAGE_WINDOW_SECONDS - 0.01
     assert max(gaps) == pytest.approx(PAGE_WINDOW_SECONDS, abs=0.6)
 
@@ -111,10 +111,14 @@ def test_restored_window_drops_old_entries_and_counts_future_or_corrupted_as_use
         gate = clock.gate({})
         assert gate.restore_listing_pages(raw) == DEFAULT_MAX_PAGES_PER_HOUR
         used, seconds = gate.listing_window()
-        assert used == 300 and seconds == pytest.approx(PAGE_WINDOW_SECONDS), "ilegível: cheia, por no máximo 1 h"
+        assert used == 600 and seconds == pytest.approx(PAGE_WINDOW_SECONDS), "ilegível: cheia, por no máximo 1 h"
         clock.advance(0.0)
         gate.wait_listing_page()
         assert clock.sleeps[-1] == pytest.approx(PAGE_WINDOW_SECONDS)
+    # O fail-safe usa o teto VIGENTE (variável de ambiente), não o padrão.
+    gate = clock.gate({})
+    assert gate.restore_listing_pages("isto não é JSON", max_per_hour=7) == 7
+    assert gate.listing_window(7) == (7, pytest.approx(PAGE_WINDOW_SECONDS))
 
 
 def test_gate_notifies_wait_once_on_enter_and_once_on_exit():
@@ -161,13 +165,13 @@ def test_short_waits_at_the_cap_are_not_announced_but_still_wait():
     events: list[str] = []
     gate = clock.gate({})
     gate.listing_wait_observer = lambda event, info: events.append(event)
-    for _ in range(300):
+    for _ in range(600):
         gate.wait_listing_page()
-        clock.advance(11.0)          # 300 páginas em 3300 s: a janela enche e a 301a espera 300 s (avisada)
+        clock.advance(5.5)           # 600 páginas em 3300 s: a janela enche e a 601a espera 300 s (avisada)
     gate.wait_listing_page()
     assert events == ["enter", "exit"] and clock.sleeps == [pytest.approx(300.0)]
     events.clear()
-    for _ in range(40):              # daqui em diante cada página espera 11 s: abaixo do limiar, sem aviso
+    for _ in range(40):              # daqui em diante cada página espera 5,5 s: abaixo do limiar, sem aviso
         gate.wait_listing_page()
     assert events == [] and len(clock.sleeps) == 41
     assert all(0 < s < 30.0 for s in clock.sleeps[1:]), "a espera em si não mudou"
@@ -258,7 +262,8 @@ def log_lines() -> Iterator[LogLines]:
 
 def _app(harness_factory, root=None, items: int = 60):
     dl = GatedFakeDownloader(items=[remote(f"R{i:04d}") for i in range(items)])
-    h = harness_factory(root=root, downloader=dl)
+    # O teto dos testes de lote vem da configuração: a reconciliação da inicialização usa o teto vigente.
+    h = harness_factory(root=root, downloader=dl, env={"INSTAGRAM_PAGE_RATE_LIMIT": str(PER_HOUR)})
     dl.gate = h.ctx.instagram_gate
     return h, dl
 
@@ -407,10 +412,12 @@ def test_corrupted_persisted_window_is_fail_safe_and_keeps_the_wait_state(harnes
     # Janela persistida ilegível: considerada cheia por no máximo 1 h; o estado gravado continua, recalculado.
     h.ctx.app_settings.set_state(PAGES_STATE_KEY, "{corrompido")
     h.ctx.batches.update_listing(batch_id, listing_state="running", rate_limit_resume_at=utc_now(60),
-                                 rate_limit_pages_used=300, rate_limit_pages_max=300)
+                                 rate_limit_pages_used=PER_HOUR, rate_limit_pages_max=PER_HOUR)
     h2, _dl2 = _app(harness_factory, root=h.root)
     api = _api(h2, batch_id)
-    assert api["listing_state"] == "waiting_rate_limit" and api["rate_limit_pages_used"] == 300
+    # Ilegível = cheia pelo teto VIGENTE (o da configuração do app de teste).
+    assert api["listing_state"] == "waiting_rate_limit" and api["rate_limit_pages_used"] == PER_HOUR
+    assert api["rate_limit_pages_max"] == PER_HOUR
     assert 3590 < _remaining(api["rate_limit_resume_at"]) <= 3600
 
 

@@ -330,9 +330,9 @@ def test_media_api_exposes_hashes_and_reel_flag(env):
     assert "/reel/REELPOST01/" in reel["source_url"] and reel["has_audio"] is True
 
 
-@pytest.mark.parametrize("bad_limit", [1, 3])
-def test_api_rejects_limits_outside_10_20_50_100(env, bad_limit):
-    """Documenta: a API só aceita 10/20/50/100/None; limites 1 e 3 só existem internamente (ver relatório)."""
+@pytest.mark.parametrize("bad_limit", [0, -3, 1_000_001])
+def test_api_rejects_limits_outside_the_valid_range(env, bad_limit):
+    """A API aceita N inteiro de 1 a 1.000.000 (ou null = Todos); antes só a lista fechada 10/20/50/100..."""
     h, _s, _c = env
     response = h.client.post("/api/imports", json={"profile": PROFILE, "content_type": "all", "limit": bad_limit,
                                                    "preset_id": None, "process": True})

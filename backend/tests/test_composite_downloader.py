@@ -73,7 +73,7 @@ def run_all_ops(dl: CompositeInstagramDownloader, tmp_path: Path) -> list[object
     outcomes: list[object] = []
     for op in (
         lambda: dl.get_profile("perfil_teste"),
-        lambda: list(dl.iter_profile_media("perfil_teste", "all", None)),
+        lambda: list(dl.iter_profile_media("perfil_teste", "all", 10)),
         lambda: dl.download(remote("ABCDE1"), tmp_path),
         lambda: dl.resolve_post("ABCDE1"),
     ):
@@ -379,3 +379,64 @@ def test_resume_and_checkpoint_are_forwarded_only_when_given():
     gallery = CompositeInstagramDownloader(primary, Recording("gallery"), "gallery_dl")
     list(gallery.iter_profile_media("perfil_teste", "all", 10, resume=cp))   # fake antigo aceita/ignora
     assert gallery.last_listing_stats is None
+
+
+# --------------------------------------------------------------------------- "Todos" e photos_carousels só no web
+
+
+@pytest.mark.parametrize("content, limit", [("all", None), ("reels", None), ("photos_carousels", 10),
+                                            ("photos_carousels", None), ("all", 5001), ("reels", 1_000_000)])
+def test_gallery_dl_strategy_refuses_all_and_photos_carousels_clearly(content, limit):
+    web = Recording("web", items=[remote("ABCDE1")])
+    gallery = Recording("gallery", items=[remote("ABCDE1")])
+    dl = CompositeInstagramDownloader(web, gallery, strategy="gallery_dl")
+    with pytest.raises(InstagramError) as info:
+        list(dl.iter_profile_media("perfil_teste", content, limit))
+    assert info.value.code == "invalid_input" and "método de importação web" in info.value.message
+    assert gallery.calls == [] and web.calls == [], "nada de truncar em 5.000 fingindo fim de perfil"
+    assert len(list(dl.iter_profile_media("perfil_teste", "all", 10))) == 1, "os demais casos seguem no legado"
+
+
+@pytest.mark.parametrize("content, limit", [("all", None), ("photos_carousels", 10), ("all", 5001)])
+@pytest.mark.parametrize("code", sorted(FALLBACK_CODES))
+def test_auto_never_falls_back_to_gallery_dl_for_all_or_photos_carousels(content, limit, code):
+    web = Recording("web", error=web_error(code))
+    gallery = Recording("gallery", items=[remote("ABCDE1")])
+    dl = CompositeInstagramDownloader(web, gallery, strategy="auto")
+    with pytest.raises(InstagramError) as info:
+        list(dl.iter_profile_media("perfil_teste", content, limit))
+    assert info.value.code == code, "o erro do web fica visível"
+    assert gallery.calls == []
+
+
+def test_legacy_cap_constant_matches_the_gallery_dl_adapter():
+    from app.integrations.instagram.downloader import LEGACY_MAX_ITEMS
+    from app.integrations.instagram.gallerydl import GALLERY_DL_MAX_ITEMS
+
+    assert LEGACY_MAX_ITEMS == GALLERY_DL_MAX_ITEMS == 5000
+    dl = CompositeInstagramDownloader(Recording("web", items=[remote("ABCDE1")]),
+                                      Recording("gallery", items=[remote("ABCDE1")]), strategy="gallery_dl")
+    assert len(list(dl.iter_profile_media("perfil_teste", "all", 5000))) == 1, "até 5.000 o legado atende"
+
+
+def test_no_listing_anomaly_detail_triggers_the_fallback():
+    from app.integrations.instagram.composite import NO_FALLBACK_DETAILS
+    from app.integrations.instagram.downloader import LISTING_ANOMALY_DETAILS
+    from app.integrations.instagram.web.errors import InstagramWebError
+
+    assert LISTING_ANOMALY_DETAILS <= NO_FALLBACK_DETAILS
+    for detail in sorted(LISTING_ANOMALY_DETAILS):
+        web = Recording("web", items=[])
+        gallery = Recording("gallery", items=[remote("ABCDE1")])
+
+        def broken(username, content, limit, *, cancel=None, _detail=detail, **kwargs):
+            raise InstagramWebError("contract_changed", "fim anômalo FAKE", stage="graphql",
+                                    diagnostic={"detail": _detail})
+            yield   # gerador: o erro sai antes de qualquer item, como numa página só com itens filtrados
+
+        web.iter_profile_media = broken
+        dl = CompositeInstagramDownloader(web, gallery, strategy="auto")
+        with pytest.raises(InstagramError) as info:
+            list(dl.iter_profile_media("perfil_teste", "reels", 5))
+        assert info.value.code == "contract_changed" and info.value.diagnostic["detail"] == detail
+        assert gallery.calls == [], detail

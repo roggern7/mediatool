@@ -207,6 +207,7 @@ def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
             duration=duration,
             taken_at=taken_at,
             extension=extension,
+            in_carousel=media_type == MEDIA_CAROUSEL,
         ))
     stats.items += len(result)
     return result
@@ -214,7 +215,10 @@ def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
 
 def filter_by_content(items: list[RemoteMedia], content: ContentType) -> list[RemoteMedia]:
     if content == "reels":
-        return [item for item in items if item.is_reel]
+        return [item for item in items if item.is_reel and not item.in_carousel]
+    if content == "photos_carousels":
+        # Fotos simples + TODOS os itens de carrossel (inclusive vídeos de carrossel); Reels e vídeos avulsos fora.
+        return [item for item in items if item.in_carousel or item.media_type == "image"]
     if content == "videos":
         return [item for item in items if item.media_type == "video"]
     if content == "images":

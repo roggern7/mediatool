@@ -6,7 +6,7 @@ Relógio e espera injetáveis (testes com relógio simulado).
 
 Seção 9 (A2): depois de um 429 a listagem anda em ritmo lento (6-12 s por página) por 1 h (``slow_listing``; quem
 persiste o prazo é o controlador de recuperação) e há um teto global de páginas de listagem por hora
-(``wait_listing_page``, padrão 300, configurável por ``MEDIA_TOOL_IG_MAX_PAGES_PER_HOUR``).
+(``wait_listing_page``, padrão 600, configurável por ``MEDIA_TOOL_IG_MAX_PAGES_PER_HOUR``).
 
 Visibilidade da espera pelo teto por hora: o portão avisa o início e o fim da espera a ``listing_wait_observer`` (o
 import runner grava o estado no lote e registra uma linha de log na entrada e outra na saída) e persiste as reservas
@@ -32,7 +32,7 @@ DEFAULT_INTERVAL = (2.0, 4.0)
 SLOW_PAGE_DELAY = (6.0, 12.0)        # ritmo da listagem depois de um 429
 SLOW_PACE_SECONDS = 3600.0           # duração do ritmo lento
 WAIT_NOTICE_MIN_SECONDS = 30.0       # espera pelo teto por hora menor que isto não é avisada (estado/log)
-DEFAULT_MAX_PAGES_PER_HOUR = 300     # teto global de páginas de listagem por hora
+DEFAULT_MAX_PAGES_PER_HOUR = 600     # teto global de páginas de listagem por hora
 PAGE_WINDOW_SECONDS = 3600.0
 PAGES_STATE_KEY = "instagram_listing_pages"   # app_state: reservas de página da última hora (epoch, JSON)
 
@@ -206,10 +206,11 @@ class InstagramRequestGate:
         except Exception:  # noqa: BLE001 - falha ao persistir não interrompe a listagem (a janela segue em memória)
             logger.warning("Falha ao persistir a janela de páginas por hora", exc_info=True)
 
-    def restore_listing_pages(self, raw: str | None) -> int:
+    def restore_listing_pages(self, raw: str | None, *, max_per_hour: int = DEFAULT_MAX_PAGES_PER_HOUR) -> int:
         """Reconstrói a janela gravada por ``save_pages`` (inicialização). Entradas com mais de 1 h são descartadas;
         entrada no futuro ou ilegível conta como página usada agora (nunca espera mais que 1 h); valor inteiro
-        ilegível conta como janela cheia agora. Retorna quantas páginas ficaram na janela."""
+        ilegível conta como janela cheia agora (``max_per_hour`` = teto vigente). Retorna quantas páginas ficaram na
+        janela."""
         if not raw:
             return 0
         try:
@@ -218,7 +219,7 @@ class InstagramRequestGate:
                 raise ValueError("lista esperada")
         except (ValueError, RecursionError):
             logger.warning("Janela de páginas por hora ilegível: considerada cheia por até 1 h")
-            values = [None] * DEFAULT_MAX_PAGES_PER_HOUR
+            values = [None] * max(1, int(max_per_hour))
         now, wall = self._clock(), self._wall()
         ages = []
         for value in values:

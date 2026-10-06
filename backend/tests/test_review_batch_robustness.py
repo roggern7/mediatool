@@ -272,7 +272,8 @@ def refresh_posts(feed: Feed, since: int) -> list[dict]:
     return feed.posts_vars[since:]
 
 
-def max_pages_safety(limit: int, content: str) -> int:
+def old_safety_cap(limit: int, content: str) -> int:
+    """Teto proporcional ANTIGO de páginas (removido): os testes provam que a listagem passa dele."""
     factor = {"all": 2, "posts": 2, "images": 4, "reels": 8, "videos": 8}[content]
     return math.ceil(limit / PAGE) * factor + 2
 
@@ -294,21 +295,14 @@ def test_budget_formula_and_no_small_absolute_cap():
     from app.integrations.instagram.web import budget
 
     assert budget.PAGE_SIZE == 12
-    f = budget.max_pages_for
-    assert f(10, "all") == max_pages_safety(10, "all")
-    assert f(100, "reels") == max_pages_safety(100, "reels")
-    assert f(100, "images") == max_pages_safety(100, "images")
-    assert 1660 <= f(10000, "all") <= 1680
-    assert 6600 <= f(10000, "reels") <= 6700
-    assert f(10000, "all") > 40, "não existe mais teto absoluto de 40 páginas"
-    for content in ("all", "posts", "images", "reels", "videos"):
-        assert f(300, content) >= math.ceil(300 / PAGE), content
+    # Mudança confirmada pelo dono: não existe mais teto de páginas (nem o absoluto de 40, nem o proporcional).
+    assert not hasattr(budget, "max_pages_for") and not hasattr(budget, "ListingBudget")
 
 
 # --------------------------------------------------------------------------------------------- 1, 2, 3 paginação
 
 
-def test_01a_few_reels_in_photo_profile_stops_by_safety_cap_or_yield_and_completes(make_env, caplog):
+def test_01a_few_reels_in_photo_profile_reaches_the_requested_quantity(make_env, caplog):
     kinds = ["reel" if i % 20 == 19 else "img" for i in range(600)]
     env = make_env(kinds)
     h = env.h
@@ -316,32 +310,35 @@ def test_01a_few_reels_in_photo_profile_stops_by_safety_cap_or_yield_and_complet
         batch_id = start(h, 10, "reels")
         batch = drain(h, batch_id)
     pages = len(env.feed.posts_vars)
-    assert pages <= max_pages_safety(10, "reels"), pages
+    # Mudança confirmada: "10 Reels" = 10 Reels. Antes parava no teto proporcional/rendimento com menos de 10.
+    assert pages > old_safety_cap(10, "reels"), pages
     assert batch["status"] == "completed", batch
-    assert 1 <= batch["found"] < 10
+    assert batch["found"] == 10 and batch["listing_end"] == "limit"
     assert all(j["status"] == "completed" for j in batch["jobs"])
-    assert batch_message(batch), "o lote deve explicar por que parou antes da quantidade pedida"
     assert env.cdn.calls and all(c.split(":")[0] in {env.feed.code(i) for i in range(19, 600, 20)} for c in env.cdn.calls)
 
 
-def test_01b_sparse_reels_stop_by_unproductive_streak_of_6_pages(make_env):
+def test_01b_sparse_reels_are_found_after_a_long_unproductive_streak(make_env):
+    # Mudança confirmada: 6 páginas seguidas sem Reel não encerram mais; a listagem vai até o fim real do perfil.
     kinds = ["reel" if i == 400 else "img" for i in range(600)]
     env = make_env(kinds)
     batch_id = start(env.h, 10, "reels")
     batch = drain(env.h, batch_id)
-    assert len(env.feed.posts_vars) == 6
-    assert batch["status"] == "completed" and batch["found"] == 0 and batch["error_code"] is None
-    assert batch_message(batch)
+    assert len(env.feed.posts_vars) >= 600 // PAGE
+    assert batch["status"] == "completed" and batch["found"] == 1 and batch["error_code"] is None
+    assert batch["listing_end"] == "profile_end"
+    assert batch_message(batch), "o lote explica que o perfil terminou antes da quantidade pedida"
 
 
-def test_02_no_compatible_media_stops_after_unproductive_pages_filter(make_env, caplog):
+def test_02_no_compatible_media_goes_to_the_real_end_of_the_profile(make_env, caplog):
     env = make_env(["img"] * 300)
     with caplog.at_level("DEBUG"):
         batch_id = start(env.h, 20, "videos")
         batch = drain(env.h, batch_id)
-    assert len(env.feed.posts_vars) == 6
+    assert len(env.feed.posts_vars) >= 300 // PAGE, "antes parava em 6 páginas (filter_exhausted)"
     assert batch["status"] == "completed" and batch["found"] == 0 and batch["error_code"] is None
-    assert "filter_exhausted" in "\n".join(r.getMessage() for r in caplog.records)
+    assert batch["listing_end"] == "profile_end"
+    assert "filter_exhausted" not in "\n".join(r.getMessage() for r in caplog.records)
     assert env.h.ctx.worker.pause_state() == (None, None)
 
 
@@ -355,16 +352,17 @@ def test_03_unproductive_counter_resets_on_productive_page(make_env):
     assert batch["found"] == 13 and batch["status"] == "completed"
 
 
-def test_03b_low_yield_after_20_pages(make_env, caplog):
-    # 1 reel a cada 6 páginas: sequência improdutiva 5 (< 6) mas rendimento 0,167 < 0,25 -> low_yield em ~20 páginas
+def test_03b_low_yield_does_not_stop_the_listing(make_env, caplog):
+    # 1 reel a cada 6 páginas (rendimento 0,167): antes parava em ~20 páginas (low_yield); agora lista o perfil todo.
     kinds = ["reel" if (i % (PAGE * 6) == PAGE * 5) else "img" for i in range(PAGE * 120)]
     env = make_env(kinds)
     with caplog.at_level("DEBUG"):
         batch_id = start(env.h, 100, "reels")
         batch = drain(env.h, batch_id)
-    assert 20 <= len(env.feed.posts_vars) <= 21, len(env.feed.posts_vars)
-    assert batch["found"] == 3 and batch["status"] == "completed" and batch["error_code"] is None
-    assert "low_yield" in "\n".join(r.getMessage() for r in caplog.records)
+    assert len(env.feed.posts_vars) == 120, len(env.feed.posts_vars)
+    assert batch["found"] == 20 and batch["status"] == "completed" and batch["error_code"] is None
+    assert batch["listing_end"] == "profile_end"
+    assert "low_yield" not in "\n".join(r.getMessage() for r in caplog.records)
 
 
 def test_04_repeated_cursor_is_contract_changed_without_pause(make_env):
@@ -697,12 +695,13 @@ def test_16_contract_changed_listing_no_pause_no_loop(make_env):
 # --------------------------------------------------------------------------------------------- 17 "Todos"
 
 
-def test_17_limit_all_is_422(make_env):
+def test_17_limit_all_is_accepted(make_env):
+    # Mudança confirmada pelo dono: "Todos" (limit null) deixou de responder 422 limit_all_disabled.
     env = make_env()
-    r = env.h.client.post("/api/imports", json={"profile": PROFILE, "content_type": "all", "limit": None,
+    r = env.h.client.post("/api/imports", json={"profile": f"{PROFILE}_todos", "content_type": "all", "limit": None,
                                                 "preset_id": None, "process": False})
-    assert r.status_code == 422 and r.json()["code"] == "limit_all_disabled" and r.json()["detail"]
-    assert env.h.ctx.db.scalar("SELECT COUNT(*) FROM batches") == 0
+    assert r.status_code == 202 and r.json()["requested_limit"] is None
+    assert env.h.ctx.db.scalar("SELECT COUNT(*) FROM batches") == 1
     for limit in ALLOWED_API_LIMITS:  # perfis distintos (mesmo perfil com listagem aberta: 409)
         assert env.h.client.post("/api/imports", json={"profile": f"{PROFILE}_{limit}", "content_type": "all",
                                                        "limit": limit,
