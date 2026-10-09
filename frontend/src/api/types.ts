@@ -51,6 +51,14 @@ export interface PresetParams {
   speed: number;
   auto_adjust: boolean;
   reencode: boolean;
+  // Ajustes opcionais: ausente = desligado (a API só devolve os que estão ligados; presets antigos não têm nenhum).
+  zoom?: number;
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  trim_end?: number;
+  pitch_shift?: number;
+  grain?: number;
 }
 
 export interface Preset {

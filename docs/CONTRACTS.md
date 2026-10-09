@@ -226,7 +226,9 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
 `schema_migrations(version, name, applied_at)`. Datas ISO 8601 UTC com `Z`.
 
 - `presets(id, name UNIQUE, is_builtin, params json, created_at, updated_at)`; seed `Padrão` e `Anti-duplicidade`
-  (builtin, editáveis, não excluíveis), ambos com os params padrão.
+  (builtin, editáveis, não excluíveis). `Padrão` tem os 6 params padrão; `Anti-duplicidade` tem os mesmos 6 mais
+  `zoom: 3`, `brightness: 0.01`, `contrast: 1.02`, `saturation: 1.03`, `trim_end: 0.3` (migration 0015, que só
+  atualiza a linha embutida se ela ainda tiver exatamente os 6 params originais; renditions, jobs e lotes não mudam).
 - `media(id, source_platform, source_profile, source_url, source_post_id, source_media_index DEFAULT 0, post_id, media_id_remote,
   media_type, original_filename, original_path /*relativo a storage*/, original_sha256 UNIQUE, file_size, duration, width,
   height, fps, has_audio, mime_type, thumbnail_path, taken_at, created_at, updated_at)`;
@@ -358,7 +360,15 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 
 ```ts
 PresetParams = { metadata_cleanup: bool, trim_start: number /*0..30*/, mirror: bool, speed: number /*0.5..2*/,
-  auto_adjust: bool, reencode: bool }      // chaves extras rejeitadas
+  auto_adjust: bool, reencode: bool,       // os 6 acima são obrigatórios; chaves extras rejeitadas
+  // Ajustes opcionais (ausente = neutro = desligado):
+  zoom?: number /*0..10, % de zoom central; neutro 0*/, brightness?: number /*-0.1..0.1; neutro 0*/,
+  contrast?: number /*0.9..1.1; neutro 1*/, saturation?: number /*0.8..1.2; neutro 1*/,
+  trim_end?: number /*0..30 s cortados do final; neutro 0*/, pitch_shift?: number /*-3..3, % de tom; neutro 0*/,
+  grain?: number /*0..4, granulação; neutro 0*/ }
+// Ajuste opcional com valor neutro nunca é gravado nem devolvido: o backend omite a chave (presets e, por cópia,
+// jobs, lotes e renditions). Assim os params de um preset sem ajustes opcionais são exatamente as 6 chaves de
+// sempre e a dedupe de renditions por `canonical_json(params)` continua casando com as já existentes.
 Preset = { id, name, is_builtin, params, created_at, updated_at }
 ProfileInfo = { username, user_id|null, full_name|null, avatar_url|null, post_count|null, is_private|null, is_verified|null }
 Rendition = { id, media_id, preset_id|null, preset_name|null, job_id|null, processed_sha256, file_size, duration|null,
@@ -975,7 +985,9 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
 from media_processor import (MediaProcessor, ProcessingOptions, ProbeResult, ProcessResult, ToolInfo, ProcessorError,
     FFmpegNotFoundError, InvalidMediaError, ProcessingFailedError, ProcessingCancelledError, sha256_file)
 @dataclass(frozen=True) class ProcessingOptions: metadata_cleanup=True; trim_start=0.5; mirror=True; speed=1.05;
-    auto_adjust=True; reencode=True;  @classmethod from_params(cls, params: dict)
+    auto_adjust=True; reencode=True;
+    zoom=0.0; brightness=0.0; contrast=1.0; saturation=1.0; trim_end=0.0; pitch_shift=0.0; grain=0.0;  # opcionais
+    @classmethod from_params(cls, params: dict)   # chave desconhecida ou valor fora da faixa -> ValueError
 @dataclass class ToolInfo: found: bool; path: str|None; version: str|None; error: str|None
 @dataclass class ProbeResult: media_type: "video"|"image"; format_name; duration|None; width|None; height|None; fps|None;
     has_audio: bool; has_video: bool; video_codec|None; audio_codec|None; rotation: int; tags: dict; stream_tags: list[dict]; raw: dict
@@ -996,6 +1008,20 @@ subprocess com lista e `shell=False`; nunca tocar `src`; escrever temp e renomea
 yuv420p, dimensões pares, SAR 1, AAC se houver áudio, `+faststart`, `-map_metadata -1`, `-map_chapters -1`, bitexact,
 `setpts=PTS/speed` + `atempo`, trim com A/V em sincronia, sem áudio não falha. Com `reencode=False` e filtro ativo
 força reencode; só cleanup -> stream copy. Imagem: JPEG alta qualidade (PNG fica PNG), hflip, sem EXIF, orientação aplicada.
+
+Ajustes opcionais (com todos neutros o comando do ffmpeg é idêntico ao de um preset sem eles; qualquer um ativo
+conta como filtro ativo e entra na duração esperada do progresso):
+- `zoom`: recorte central de 1/(1+zoom/100) e reescala lanczos de volta às dimensões que o frame teria sem o zoom
+  (depois do `hflip`), sem alterar o SAR que a saída teria sem o zoom; `brightness`/`contrast`/`saturation`: filtro `eq` só com os não neutros; `grain`:
+  `noise=alls=<n>:allf=t`. Valem para vídeo e imagem.
+- `trim_end`: `trim`/`atrim` com `end = duração - trim_end`, mesmo ponto para vídeo e áudio. **Vídeo curto**: se
+  `duração - trim_start - trim_end < 1,0 s`, o corte final é ignorado naquela mídia e o resto do preset é aplicado
+  (nunca falha por causa do corte final; o 1,0 s é medido antes da velocidade, saída mínima ≈ 1,0/speed). O erro do `trim_start` (sobra menor que max(0,1 s, 1 frame)) não muda.
+- `pitch_shift`: `asetrate=<sr*f>,aresample=<sr>` com `f = 1 + pitch_shift/100`, e `atempo = speed/f` para a
+  velocidade final continuar a do preset. Sem áudio, nada. Limitação conhecida: quando o áudio começa depois do
+  vídeo, o início do áudio se desloca em até |`pitch_shift`| % do atraso inicial (~28 ms para 1 s com 3 %),
+  constante ao longo do arquivo e zero quando áudio e vídeo começam juntos.
+- Imagem: `trim_end` e `pitch_shift` são ignorados.
 
 ## 10. Design (frontend)
 

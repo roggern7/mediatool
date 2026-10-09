@@ -3,13 +3,18 @@ import { Copy, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
 import type { Preset, PresetParams } from "../api/types";
 import { ConfirmDialog, Empty, ErrorLine, Field, Modal, SkeletonRows, Spinner, Switch } from "../components/ui";
-import { formatSeconds, formatSpeed, parseDecimal, toDecimalInput } from "../lib/format";
+import { OptionalAdjustmentsForm } from "../components/OptionalAdjustmentsForm";
+import { formatSeconds, formatSpeed, toDecimalInput } from "../lib/format";
 import {
   DEFAULT_PARAMS,
   NAME_MAX,
   SPEED_STEPS,
   TRIM_STEPS,
+  compactParams,
+  editorParams,
   forcesReencode,
+  initialOptionalState,
+  optionalSummary,
   validatePreset,
 } from "../lib/presets";
 import { useQuery } from "../lib/useQuery";
@@ -22,6 +27,7 @@ function summary(p: PresetParams): string {
   if (p.mirror) parts.push("Espelha");
   if (p.speed !== 1) parts.push(formatSpeed(p.speed));
   if (p.auto_adjust) parts.push("Ajustes automáticos");
+  parts.push(...optionalSummary(p));
   parts.push(p.reencode || forcesReencode(p) ? "Reencode" : "Sem reencode");
   return parts.join(" · ");
 }
@@ -190,15 +196,13 @@ function PresetEditor({
   });
   const [trimText, setTrimText] = useState(toDecimalInput(start.trim_start));
   const [speedText, setSpeedText] = useState(toDecimalInput(start.speed));
+  // Ajustes opcionais: desligado = neutro (a chave nem vai para o preset). Preset antigo começa com todos desligados.
+  const [optional, setOptional] = useState(() => initialOptionalState(start));
   const [saving, setSaving] = useState(false);
   const [touched, setTouched] = useState(false);
   const [nameTaken, setNameTaken] = useState<string | null>(null);
 
-  const params: PresetParams = {
-    ...flags,
-    trim_start: parseDecimal(trimText) ?? Number.NaN,
-    speed: parseDecimal(speedText) ?? Number.NaN,
-  };
+  const params = editorParams(flags, trimText, speedText, optional);
   const errors = validatePreset(name, params);
   const valid = Object.keys(errors).length === 0;
   const builtin = preset?.is_builtin ?? false;
@@ -211,9 +215,10 @@ function PresetEditor({
     if (!valid) return;
     setSaving(true);
     try {
+      const body = compactParams(params);
       const saved = preset
-        ? await api.updatePreset(preset.id, builtin ? { params } : { name: name.trim(), params })
-        : await api.createPreset(name.trim(), params);
+        ? await api.updatePreset(preset.id, builtin ? { params: body } : { name: name.trim(), params: body })
+        : await api.createPreset(name.trim(), body);
       onSaved(saved);
     } catch (err) {
       if (err instanceof ApiError && err.code === "preset_name_taken") setNameTaken(name.trim());
@@ -336,6 +341,8 @@ function PresetEditor({
           checked={flags.auto_adjust}
           onChange={(v) => setFlags({ ...flags, auto_adjust: v })}
         />
+
+        <OptionalAdjustmentsForm optional={optional} errors={errors} onChange={setOptional} />
 
         <div>
           <Switch label="Reencode" checked={flags.reencode} onChange={(v) => setFlags({ ...flags, reencode: v })} />

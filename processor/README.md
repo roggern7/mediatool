@@ -80,7 +80,7 @@ fps declarado nesses casos é o padrão 25 do demuxer, não o real).
   porque o libx264 em yuv420p exige.
 - **Reencode**: libx264 `-preset medium -crf 20 -profile:v high -pix_fmt yuv420p`, AAC 160k (mais de 2 canais vira
   estéreo; mono continua mono), `-movflags +faststart`, `.mp4`. `reencode=False` com qualquer filtro ativo (trim,
-  mirror, velocidade ou ajuste automático com algo a corrigir: rotação, dimensão ímpar, SAR, pix_fmt) força reencode
+  mirror, velocidade, ajuste opcional ou ajuste automático com algo a corrigir: rotação, dimensão ímpar, SAR, pix_fmt) força reencode
   (`forced_reencode=True`). Só cleanup -> `-c copy` remuxando sempre para mp4 (o mp4 é o único container em que o
   cleanup fica completo: matroska/webm gravam o MuxingApp obrigatório "Lavf", que o ffprobe mostra como tag
   `encoder`, e mov grava `vendor_id=FFMP`). Codecs de vídeo h264/hevc/av1/vp9/mpeg4 e de áudio
@@ -91,6 +91,32 @@ fps declarado nesses casos é o padrão 25 do demuxer, não o real).
   canal alpha vira PNG (preserva a transparência). Imagens são sempre recodificadas: copiar o pacote JPEG manteria o
   segmento APP1 (EXIF) e perderia a orientação. Por isso `reencode=False` em imagem retorna `forced_reencode=True`.
   O encoder mjpeg do ffmpeg 9 não escreve EXIF, e com bitexact também não grava o comentário `Lavc`.
+- **Ajustes opcionais** (`zoom`, `brightness`, `contrast`, `saturation`, `trim_end`, `pitch_shift`, `grain`; faixas
+  em `options.OPTIONAL_RANGES`): neutro = desligado, e com todos neutros `build_command` devolve a mesma lista de
+  argumentos de antes (travado em `tests/test_optional_adjustments.py`). Qualquer um ativo conta como filtro ativo
+  (força reencode com `reencode=False`) e entra em `expected_duration`. Ordem no vídeo: `trim`, SAR/recorte par,
+  `hflip`, zoom, `eq`, `noise`, `setpts`, `fps`, `setsar`.
+  - Zoom: `crop=w=..:h=..` central de 1/(1+zoom/100) (dimensões pares, mínimo 2 px) e `scale=..:flags=lanczos` de
+    volta ao tamanho que o frame teria sem o zoom, calculado do probe (rotação, SAR e recorte par considerados).
+    Sem o que recortar (mídia minúscula), o zoom não entra na cadeia. O recorte arredondado para par tem proporção
+    um pouco diferente da do frame e o `scale` compensaria alterando o SAR; por isso a saída volta ao SAR que teria
+    sem o zoom: 1:1 com `auto_adjust` (o `setsar=1` do fim da cadeia) e, em imagens e em vídeo com
+    `auto_adjust=False`, um `setsar` com o SAR de origem logo depois do `scale` (`setsar=1` ou
+    `setsar=r=<num>/<den>:max=..`; nada quando a origem não declara SAR). Sobra uma deformação geométrica abaixo de
+    1 % (o arredondamento do recorte).
+  - Cor: `eq=` só com os argumentos não neutros. Granulação: `noise=alls=<n>:allf=t` (semente fixa do ffmpeg:
+    saída determinística); em imagem com alpha, só nos componentes de cor (`c0s/c1s/c2s`), o alpha fica intacto.
+  - Corte final: `trim`/`atrim` com `end = duração - trim_end` na mesma linha do tempo do corte inicial, mesmo
+    ponto para vídeo e áudio. Proteção de vídeo curto (`commands.MIN_DURATION_AFTER_TRIM_END = 1.0`): se
+    `duração - trim_start - trim_end` ficar abaixo de 1,0 s, o corte final é ignorado naquela mídia e o resto do
+    preset é aplicado. O `InvalidMediaError` do corte inicial não muda. O mínimo de 1,0 s é medido na linha do tempo
+    da origem, antes da velocidade: a saída mínima com o corte final aplicado é de cerca de `1,0 / speed` s.
+  - Tom: `asetrate=<sr*f>,aresample=<sr>` (f = 1 + pitch_shift/100) e `atempo=speed/f`, para a duração e a
+    velocidade final continuarem as do preset. Sem áudio (ou sem sample rate no probe), nada.
+    Limitação conhecida: quando o áudio começa depois do vídeo, o início do áudio se desloca em até
+    |`pitch_shift`| % do atraso inicial (cerca de 28 ms para 1 s de atraso com 3 %). O deslocamento é constante ao
+    longo do arquivo e é zero quando áudio e vídeo começam juntos. A opção vem desligada por padrão.
+  - Imagens: zoom, cor e granulação valem; `trim_end` e `pitch_shift` são ignorados.
 - **Miniatura**: frame em 1 s (0 s se o vídeo tiver até 1,5 s), largura 320, altura proporcional par, JPEG.
 - **Aceleração de hardware**: não usada na V1. Sempre codificação por software (libx264), o que dá saída
   determinística e funciona em qualquer máquina.
