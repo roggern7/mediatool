@@ -49,6 +49,14 @@ def queries(h, path: str, **params) -> tuple[int, dict]:
     return counter.count, response.json()
 
 
+def traced_bytes() -> int:
+    # Fora da conta: a tabela de strings internadas do CPython, que o pathlib alimenta com cada nome de arquivo
+    # distinto e que é realocada em um bloco grande (MBs) em momentos que dependem do que o processo já fez antes
+    # (ex.: outro teste de escala rodado na mesma sessão). Não é memória retida pela importação.
+    snapshot = tracemalloc.take_snapshot().filter_traces([tracemalloc.Filter(False, "*pathlib*")])
+    return sum(stat.size for stat in snapshot.statistics("filename"))
+
+
 @pytest.mark.slow
 def test_group_with_300_profiles_and_an_all_profile_of_2100_pages(harness_factory):
     small = [f"perfil_{i:03d}" for i in range(300)]
@@ -73,11 +81,11 @@ def test_group_with_300_profiles_and_an_all_profile_of_2100_pages(harness_factor
             giant = h.ctx.batches.get(giant_id)
             if early is None and giant["found"] >= GIANT_PAGES // 3:
                 gc.collect()
-                early = (giant["found"], tracemalloc.get_traced_memory()[0])
+                early = (giant["found"], traced_bytes())
             if giant["status"] == "completed":
                 break
         gc.collect()
-        late = tracemalloc.get_traced_memory()[0]
+        late = traced_bytes()
     finally:
         tracemalloc.stop()
         logging.disable(logging.NOTSET)
