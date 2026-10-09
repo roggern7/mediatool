@@ -183,7 +183,6 @@ def test_network_error_pauses_with_backoff_and_resumes_from_the_pending_links(ha
 
 @pytest.mark.parametrize("error, code", [
     (InstagramError("contract_changed"), "contract_changed"),
-    (InstagramError("access_refused"), "access_refused"),
     (InstagramError("session_missing"), "session_missing"),
     (InstagramError("internal_error"), "internal_error"),
     (RuntimeError("falha FAKE"), "internal_error"),
@@ -240,7 +239,7 @@ def _resume(h, batch_id: int) -> None:
     h.run_all()
 
 
-@pytest.mark.parametrize("code", ["contract_changed", "internal_error", "access_refused"])
+@pytest.mark.parametrize("code", ["contract_changed", "internal_error"])   # access_refused: test_import_links_refused
 def test_link_that_always_fails_with_a_batch_error_is_failed_on_the_second_time(harness_factory, code):
     h, dl = links_app(harness_factory, {A: photo(A), C: photo(C)})
     dl.errors = {B: [InstagramError(code) for _ in range(10)]}
@@ -575,7 +574,8 @@ def test_refresh_failure_follows_normal_classification(harness_factory, code, pa
         assert job["stage"] == "waiting_retry" and job["attempts"] == 0
 
 
-@pytest.mark.parametrize("code", ["content_unavailable", "contract_changed", "access_refused", "network_error"])
+# (`access_refused` saiu daqui: a renovação recusada espera a ação do dono; test_import_links_refresh_refused.py.)
+@pytest.mark.parametrize("code", ["content_unavailable", "contract_changed", "network_error"])
 def test_failed_refresh_of_a_carousel_makes_a_single_request_for_all_siblings(harness_factory, code):
     post = carousel(A, 10)
     h, dl = links_app(harness_factory, {A: post})

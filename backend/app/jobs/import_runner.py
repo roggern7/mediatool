@@ -43,6 +43,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from app.db.connection import utc_now
+from app.db.repositories.batches import LINKS_PARTIAL_MESSAGE
 from app.db.repositories.common import canonical_json
 from app.integrations.instagram.downloader import (
     LISTING_ANOMALY_DETAILS,
@@ -50,8 +51,8 @@ from app.integrations.instagram.downloader import (
     ListingCheckpoint,
     RemoteMedia,
 )
-from app.jobs.errors import safe_message
-from app.jobs.pipeline import instagram_paused
+from app.jobs.errors import JobCancelled, message_with_diagnostic, safe_diagnostic, safe_message
+from app.jobs.pipeline import LINKS_HOLD_DONE_MESSAGE, instagram_paused, links_query_lock
 from app.services import disk
 from app.services.instagram_gate import DEFAULT_MAX_PAGES_PER_HOUR, PAGES_STATE_KEY, InstagramPaused
 
@@ -91,11 +92,17 @@ LISTING_STALLED_MESSAGE = (
 LINK_ERROR_CODES = frozenset({
     "content_unavailable", "profile_private", "profile_not_found", "unsupported_media", "invalid_input",
 })
+# Detail de `contract_changed` que é erro de UMA publicação: formato desconhecido e resposta de OUTRA publicação.
+LINK_CONTRACT_DETAILS = frozenset({"post_shape_unknown", "post_mismatch"})
+# Defesa do runner (vale para qualquer provider): a resposta trouxe mídia de uma publicação que não é a pedida.
+LINK_MISMATCH_MESSAGE = (
+    "O Instagram respondeu com outra publicação, diferente da pedida. Nada foi importado deste link."
+)
 LINKS_INTERNAL_ERROR = "Erro inesperado ao consultar um link. Consulte o log do aplicativo."
 LINK_EMPTY_MESSAGE = "A publicação não trouxe nenhuma mídia que possa ser baixada."
 LINKS_ALL_FAILED = "Nenhum dos {total} links pôde ser importado."
 LINKS_ALL_FAILED_ONE = "O link não pôde ser importado."
-LINKS_PARTIAL = "{failed} de {total} links não puderam ser importados."
+LINKS_PARTIAL = LINKS_PARTIAL_MESSAGE
 # Erro do lote/ambiente que NUNCA marca o link como falho (sessão, pausa do Instagram, rede): o link segue pendente.
 _LINK_KEEP_PENDING_CODES = frozenset({
     "session_missing", "session_invalid", "session_expired", "checkpoint_required", "rate_limited", "action_blocked",
@@ -107,18 +114,32 @@ LINK_ATTENTION_LIMIT = 2
 LINK_FAIL_BREAKER = 3
 LINKS_FAILING_MESSAGE = (
     "3 links seguidos não puderam ser importados. Confira os links; se eles abrem no navegador, o Media Tool pode "
-    "precisar de atualização. Retomar continua pelos próximos links."
+    "precisar de atualização. \"Retomar importação\" continua pelos próximos links."
+)
+# Lote por link: a consulta de uma publicação devolveu `access_refused`. O lote inteiro para e espera a ação do dono
+# (`needs_attention` SEM `listing_retry_at`): nenhuma nova tentativa automática e nenhum outro link é pedido.
+# O estado é a recusa em espera do lote (`BatchRepository.links_hold`), a MESMA que a renovação de URL consulta e
+# arma (pipeline). "Retomar importação" é o rótulo real do botão.
+LINKS_REFUSED_CODE = "access_refused"
+LINKS_REFUSED_MESSAGE = (
+    "O Instagram recusou a consulta desta publicação. Isso não indica sessão inválida. Não haverá nova tentativa "
+    "automática: use \"Retomar importação\" para tentar de novo (uma consulta por vez) ou cancele o lote."
 )
 
 
+def _diagnostic_suffix(diagnostic: str) -> str:
+    """Sufixo de log com o diagnóstico seguro do erro (`safe_diagnostic`); vazio se o erro não trouxe nenhum."""
+    return f" [{diagnostic}]" if diagnostic else ""
+
+
 def _is_link_error(exc: InstagramError) -> bool:
-    """Erro DO LINK: os códigos de `LINK_ERROR_CODES` e a publicação com formato desconhecido (o provider levanta
-    `contract_changed` com detail `post_shape_unknown` para UMA publicação específica)."""
+    """Erro DO LINK: os códigos de `LINK_ERROR_CODES` e o `contract_changed` de UMA publicação específica (detail
+    `post_shape_unknown`: formato desconhecido; `post_mismatch`: a resposta é de outra publicação)."""
     if exc.code in LINK_ERROR_CODES:
         return True
     diagnostic = getattr(exc, "diagnostic", None)
     return (exc.code == "contract_changed" and isinstance(diagnostic, dict)
-            and diagnostic.get("detail") == "post_shape_unknown")
+            and diagnostic.get("detail") in LINK_CONTRACT_DETAILS)
 
 
 class _Chunk:
@@ -136,6 +157,7 @@ class _Chunk:
         self.retryable = False  # o erro do trecho é retryable
         self.anomaly = False  # o erro do trecho é um fim anômalo da paginação (não é fim do perfil)
         self.link_position: int | None = None  # lote por link: link que estava sendo pedido quando o trecho parou
+        self.diagnostic = ""  # diagnóstico seguro do erro do trecho (safe_diagnostic), só para o log/mensagem
 
     @property
     def progressed(self) -> bool:
@@ -228,8 +250,16 @@ class ImportRunner:
             group_id = batch.get("group_id")
             if group_id is not None and group_id in waiting_groups:
                 continue
+            if batch.get("import_mode") == "links" and batch["error_code"] == LINKS_REFUSED_CODE:
+                # Lote por link com a recusa em espera (armada pelo runner ou por uma renovação de URL; inclusive
+                # um lote agendado por uma versão anterior, ou interrompido com o trecho em andamento): nunca é
+                # escolhido. Fica em `needs_attention` sem nova tentativa, o estado que "Retomar importação" aceita.
+                if batch["listing_state"] != "needs_attention" or batch["listing_retry_at"]:
+                    self._set_listing(batch_id, listing_state="needs_attention", listing_retry_at=None)
+                continue
             if batch["listing_state"] == "needs_attention" and not batch["listing_retry_at"]:
-                continue  # tentativas automáticas esgotadas: só a ação do usuário (resume-listing) retoma
+                # Tentativas automáticas esgotadas: só a ação do usuário (resume-listing) retoma.
+                continue
             if (batch["listing_retry_at"] or "") > now or self._batch_paused(batch, now):
                 continue
             waiting = batch["listing_state"] == "waiting_backpressure"
@@ -237,7 +267,7 @@ class ImportRunner:
             full = (pending >= RESUME_PENDING_INGEST) if waiting else (pending + PAGE_ESTIMATE > MAX_PENDING_INGEST)
             if full or global_full or self._process_backlog_full(batch):
                 if not waiting:
-                    self.ctx.batches.update_listing(batch_id, listing_state="waiting_backpressure")
+                    self._set_listing(batch_id, listing_state="waiting_backpressure")
                 if group_id is not None:
                     waiting_groups.add(group_id)
                 continue
@@ -462,6 +492,7 @@ class ImportRunner:
             if not cancel.is_set():
                 error = (exc.code, safe_message(exc.message))
                 chunk.retryable = bool(exc.retryable)
+                chunk.diagnostic = safe_diagnostic(exc)
                 diagnostic = getattr(exc, "diagnostic", None)
                 chunk.anomaly = isinstance(diagnostic, dict) and diagnostic.get("detail") in LISTING_ANOMALY_DETAILS
         except Exception as exc:  # noqa: BLE001
@@ -568,17 +599,17 @@ class ImportRunner:
             logger.info("Lote %s: páginas sem mídia suportada puladas; a listagem continua do checkpoint", batch_id)
             error = None
             if current["listing_has_next"] and chunk.pages_ok > 0:
-                self.ctx.batches.update_listing(batch_id, listing_state="pending")  # próximo trecho do checkpoint
+                self._set_listing(batch_id, listing_state="pending")  # próximo trecho do checkpoint
                 return
         if error is not None:
             self._handle_listing_error(current, error, chunk)
             return
         if chunk.stop == "backpressure":
-            self.ctx.batches.update_listing(batch_id, listing_state="waiting_backpressure")
+            self._set_listing(batch_id, listing_state="waiting_backpressure")
             logger.info("Lote %s: listagem aguardando downloads (backpressure)", batch_id)
             return
         if chunk.stop == "paused":
-            self.ctx.batches.update_listing(batch_id, listing_state="paused")
+            self._set_listing(batch_id, listing_state="paused")
             logger.info("Lote %s: listagem pausada (Instagram pausado); será retomada do checkpoint", batch_id)
             return
         limit = batch["requested_limit"]
@@ -596,7 +627,7 @@ class ImportRunner:
         if chunk.pages_ok > 0 or (chunk_limit is not None and yielded >= chunk_limit and chunk.progressed):
             # Ainda há páginas e o trecho avançou (o provider parou pelo teto de páginas do trecho, ou pelo limite
             # contando itens repetidos da página retomada): novo trecho do checkpoint.
-            self.ctx.batches.update_listing(batch_id, listing_state="pending")
+            self._set_listing(batch_id, listing_state="pending")
             return
         # Trecho encerrado sem erro, sem avançar e com próxima página pendente: não é fim do perfil.
         chunk.anomaly = True
@@ -607,8 +638,9 @@ class ImportRunner:
         code, message = error
         if self.ctx.worker is not None and self.ctx.worker.pause_for(code):
             # Pausa do Instagram: a listagem fica pausada e retoma do checkpoint quando a pausa termina.
-            self.ctx.batches.update_listing(batch_id, listing_state="paused", error_code=code, error_message=message)
-            logger.warning("Lote %s: listagem pausada por %s; será retomada do checkpoint", batch_id, code)
+            self._set_listing(batch_id, listing_state="paused", error_code=code, error_message=message)
+            logger.warning("Lote %s: listagem pausada por %s; será retomada do checkpoint%s", batch_id, code,
+                           _diagnostic_suffix(chunk.diagnostic))
             return
         # O checkpoint nunca é apagado aqui: recomeçar da página 1 só por ação do usuário (restart-listing).
         # Fim anômalo da paginação não é recusa do cursor: sem nova tentativa em 1 min (nenhuma requisição extra).
@@ -635,48 +667,74 @@ class ImportRunner:
         if cursor_refused or mid_batch or first_page_partial:
             tries = int(batch["listing_attention_tries"] or 0)
             retry_at = utc_now(ATTENTION_RETRY_SECONDS) if tries < ATTENTION_MAX_TRIES else None
-            self.ctx.batches.update_listing(
+            self._set_listing(
                 batch_id, listing_state="needs_attention", error_code=code, error_message=message,
                 listing_retry_at=retry_at, listing_attention_tries=min(tries + 1, ATTENTION_MAX_TRIES),
                 listing_cursor_refusals=1,  # a nova tentativa automática recusada volta direto para needs_attention
             )
-            logger.warning("Lote %s: listagem aguardando ação (%s); checkpoint mantido%s", batch_id, code,
-                           "; nova tentativa automática em 6 h" if retry_at else "")
+            logger.warning("Lote %s: listagem aguardando ação (%s); checkpoint mantido%s%s", batch_id, code,
+                           "; nova tentativa automática em 6 h" if retry_at else "",
+                           _diagnostic_suffix(chunk.diagnostic))
             return
-        self._finish_listing(batch_id, error, None)
+        self._finish_listing(batch_id, error, None, diagnostic=chunk.diagnostic)
 
     def _pause_with_backoff(self, batch: dict[str, Any], chunk: _Chunk, code: str, message: str, **fields: Any) -> None:
         """Listagem `paused` com o backoff do lote (1m, 5m, 15m, 1h, 1h...); retoma do checkpoint no prazo."""
         level = 0 if chunk.progressed else int(batch["listing_retry_level"] or 0)
         delay = LISTING_BACKOFF_SECONDS[min(level, len(LISTING_BACKOFF_SECONDS) - 1)]
-        self.ctx.batches.update_listing(
+        self._set_listing(
             batch["id"], listing_state="paused", listing_retry_level=level + 1, listing_retry_at=utc_now(delay),
             error_code=code, error_message=message, **fields,
         )
-        logger.warning("Lote %s: falha na listagem (%s); retomada do checkpoint em %ss", batch["id"], code, delay)
+        logger.warning("Lote %s: falha na listagem (%s); retomada do checkpoint em %ss%s", batch["id"], code, delay,
+                       _diagnostic_suffix(chunk.diagnostic))
+
+    def _set_listing(self, batch_id: int, **fields: Any) -> bool:
+        """Grava o estado de fim de trecho SÓ se o lote ainda está em `listing` (conferência e gravação na mesma
+        transação, como em `_flush`): um lote cancelado, ou já fora de `listing`, nunca é tirado do estado terminal por
+        uma gravação atrasada do runner. False se nada foi gravado."""
+        with self.ctx.db.transaction():
+            current = self.ctx.batches.get(batch_id)
+            if current is None or current["status"] != "listing":
+                return False
+            self.ctx.batches.update_listing(batch_id, **fields)
+            return True
 
     def _finish_listing(self, batch_id: int, error: tuple[str, str] | None, message: str | None, *,
-                        listing_end: str | None = None) -> None:
+                        listing_end: str | None = None, diagnostic: str = "") -> None:
         """Listagem encerrada (`done`): o lote sai de `listing` e termina quando todos os jobs forem terminais.
-        `listing_end`: "limit" (quantidade atingida) ou "profile_end" (fim real do perfil); None em erro."""
+        `listing_end`: "limit" (quantidade atingida) ou "profile_end" (fim real do perfil); None em erro.
+        Lote cancelado (ou já fora de `listing`) não é tocado: a conferência do status e todas as gravações ficam na
+        mesma transação, então o cancelamento que chega no meio nunca é desfeito (`running`/`completed`)."""
         batches = self.ctx.batches
+        failed = False
         with self.ctx.db.transaction():
+            current = batches.get(batch_id)
+            if current is None or current["status"] != "listing":
+                logger.info("Lote %s: fim da listagem ignorado (lote cancelado ou já encerrado)", batch_id)
+                return
             # Página final sem checkpoint (limite no meio dela): os descartes até o último item gravado entram agora,
             # uma única vez (a coluna parcial é apagada na mesma instrução).
             batches.add_listing_dropped(batch_id, merge_partial=True)
             batches.update_listing(batch_id, listing_state="done", listing_cursor=None, listing_end=listing_end)
-        batches.sync_found(batch_id)
-        found = batches.get(batch_id)["found"]
-        if error is not None and found == 0:
-            batches.update(batch_id, status="failed", error_code=error[0], error_message=error[1], finished_at=utc_now())
-            logger.warning("Lote %s falhou na listagem: %s", batch_id, error[0])
+            batches.sync_found(batch_id)
+            found = batches.get(batch_id)["found"]
+            if error is not None and found == 0:
+                batches.update(batch_id, status="failed", error_code=error[0], error_message=error[1],
+                               finished_at=utc_now())
+                failed = True
+            else:
+                fields: dict[str, Any] = {"status": "running", "error_code": None, "error_message": message}
+                if error is not None:
+                    fields.update(error_code=error[0], error_message=error[1])
+                batches.update(batch_id, **fields)
+                batches.refresh_status(batch_id)
+        if failed:
+            logger.warning("Lote %s falhou na listagem: %s%s", batch_id, error[0], _diagnostic_suffix(diagnostic))
             return
-        fields: dict[str, Any] = {"status": "running", "error_code": None, "error_message": message}
         if error is not None:
-            fields.update(error_code=error[0], error_message=error[1])
-            logger.warning("Lote %s: listagem parcial (%s itens) com erro %s", batch_id, found, error[0])
-        batches.update(batch_id, **fields)
-        batches.refresh_status(batch_id)
+            logger.warning("Lote %s: listagem parcial (%s itens) com erro %s%s", batch_id, found, error[0],
+                           _diagnostic_suffix(diagnostic))
         logger.info("Lote %s: listagem concluída com %s itens", batch_id, found)
         self.ctx.wake_worker()
 
@@ -691,11 +749,20 @@ class ImportRunner:
             self._current_thread = threading.get_ident()
         logger.info("Lote %s: resolvendo links (%s)", batch_id,
                     "início" if batch["listing_state"] in (None, "pending") else "retomada")
-        if not self.ctx.batches.start_listing(batch_id, clear_error=batch["listing_state"] == "paused"):
+        try:
+            with links_query_lock(self.ctx, batch_id, cancel):
+                # Sob a trava do lote: a recusa em espera armada por uma renovação depois da escolha do lote não é
+                # apagada pelo `clear_error` (o próximo `_next_eligible` deixa o lote em `needs_attention`).
+                started = (not self.ctx.batches.links_hold(batch_id)
+                           and self.ctx.batches.start_listing(batch_id, clear_error=batch["listing_state"] == "paused"))
+        except JobCancelled:
+            started = False
+        if not started:
             with self._lock:
                 self._current = None
                 self._current_thread = None
-            logger.info("Lote %s: cancelado ou encerrado antes do início do trecho; nenhum link foi pedido", batch_id)
+            logger.info("Lote %s: cancelado, encerrado ou aguardando ação manual antes do início do trecho; nenhum "
+                        "link foi pedido", batch_id)
             return
         chunk = _Chunk()
         error: tuple[str, str] | None = None
@@ -708,6 +775,7 @@ class ImportRunner:
             if not cancel.is_set():
                 error = (exc.code, safe_message(exc.message))
                 chunk.retryable = bool(exc.retryable)
+                chunk.diagnostic = safe_diagnostic(exc)
         except Exception:  # noqa: BLE001
             if not cancel.is_set():
                 logger.exception("Lote %s: erro inesperado ao resolver um link", batch_id)
@@ -743,15 +811,39 @@ class ImportRunner:
             failure: tuple[str, str] | None = None
             items: list[RemoteMedia] = []
             try:
-                items = downloader.resolve_post(link["shortcode"], cancel=cancel)
-            except InstagramError as exc:
-                if cancel.is_set() or not _is_link_error(exc):
-                    raise
-                failure = (exc.code, safe_message(exc.message))
+                # Trava ÚNICA das consultas do lote (a mesma da renovação de URL): confere a recusa em espera sob
+                # ela, consulta, e arma a espera antes de soltá-la se a consulta for recusada.
+                with links_query_lock(self.ctx, batch_id, cancel):
+                    if batches.links_hold(batch_id):
+                        # Uma renovação de URL foi recusada: o link continua pendente e nada é pedido.
+                        chunk.link_position = None
+                        chunk.stop = "refused_hold"
+                        return
+                    try:
+                        items = downloader.resolve_post(link["shortcode"], cancel=cancel)
+                    except InstagramError as exc:
+                        if exc.code == LINKS_REFUSED_CODE:
+                            # Vale mesmo com o trecho cancelado/encerrando durante a consulta: a recusa aconteceu.
+                            batches.arm_links_hold(batch_id, LINKS_REFUSED_MESSAGE)
+                        if cancel.is_set() or not _is_link_error(exc):
+                            raise
+                        failure = (exc.code, safe_message(exc.message))
+                        # Só a posição do link no lote: o shortcode nunca vai para o log.
+                        logger.warning("Lote %s: link %s não pôde ser importado (%s)%s", batch_id, link["position"],
+                                       exc.code, _diagnostic_suffix(safe_diagnostic(exc)))
+            except JobCancelled:
+                return  # cancelado ou app encerrando enquanto esperava a trava do lote: o link continua pendente
             if cancel.is_set():
                 return  # cancelado ou app encerrando durante a requisição: o link continua pendente
             # A requisição do link terminou: erro local depois daqui (ex.: ao gravar os jobs) não é erro do link.
             chunk.link_position = None
+            if failure is None and any(item.source_post_id != link["shortcode"] for item in items):
+                # Resposta de OUTRA publicação (comparação exata, diferenciando maiúsculas): nada é gravado e o link
+                # não fica resolvido. O provider web já recusa antes (`post_mismatch`); isto cobre os demais.
+                failure = ("contract_changed", LINK_MISMATCH_MESSAGE)
+                items = []
+                logger.warning("Lote %s: link %s não pôde ser importado (contract_changed) [detail=post_mismatch]",
+                               batch_id, link["position"])
             if failure is None and not items:
                 failure = ("content_unavailable", LINK_EMPTY_MESSAGE)
             if failure is not None:
@@ -795,9 +887,71 @@ class ImportRunner:
         batches.update_listing(batch["id"], link_fail_streak=batch["link_fail_streak"])
         return tripped
 
+    def _links_refused(self, batch: dict[str, Any], chunk: _Chunk, message: str) -> bool:
+        """Lote por link com a consulta de uma publicação recusada (`access_refused`): o lote para em
+        `needs_attention` SEM `listing_retry_at` (nenhuma nova tentativa automática; `_next_eligible` não o escolhe)
+        e nenhum outro link é pedido. Só "Retomar" (resume-listing) faz uma nova consulta; cancelar encerra.
+
+        `LINK_ATTENTION_LIMIT` continua valendo: recusado pela 2a vez, o MESMO link fica `failed`, mas o lote
+        continua parado (o próximo link só é pedido por outra ação do dono). O disjuntor `links_failing` não é
+        acionado aqui: ele agendaria a nova tentativa de 6 h. Retorna False só quando esse link era o último
+        pendente (não há mais o que consultar: o lote encerra normalmente)."""
+        batch_id = batch["id"]
+        batches = self.ctx.batches
+        position = chunk.link_position
+        if position is not None and batches.bump_link_attention(batch_id, position) >= LINK_ATTENTION_LIMIT:
+            logger.warning("Lote %s: link %s marcado como falho depois de repetir o erro %s", batch_id, position,
+                           LINKS_REFUSED_CODE)
+            self._fail_link(batch, position, LINKS_REFUSED_CODE, message_with_diagnostic(message, chunk.diagnostic))
+            if batches.next_pending_link(batch_id) is None:
+                # A recusa em espera continua armada (`_consume_links`): quem encerra decide se ela ainda vale.
+                return False
+        self._set_listing(
+            batch_id, listing_state="needs_attention", error_code=LINKS_REFUSED_CODE,
+            error_message=message_with_diagnostic(LINKS_REFUSED_MESSAGE, chunk.diagnostic), listing_retry_at=None,
+        )
+        logger.warning("Lote %s: consulta por link recusada (%s); aguardando ação manual, sem nova tentativa "
+                       "automática%s", batch_id, LINKS_REFUSED_CODE, _diagnostic_suffix(chunk.diagnostic))
+        return True
+
     def _after_links_chunk(self, batch: dict[str, Any], chunk: _Chunk, error: tuple[str, str] | None) -> None:
+        """Fim de um trecho do lote por link, sob a trava de consultas do lote: a conferência da recusa em espera
+        e a gravação do estado/erro do fim do trecho acontecem juntas, então uma renovação recusada não arma a
+        espera no meio (ela armaria e a gravação a apagaria). Nada aqui consulta o Instagram nem adquire o portão
+        (sem inversão de travas). A espera pela trava é interrompida pelo encerramento do app."""
+        batch_id = batch["id"]
+        current: dict[str, Any] | None = None
+        try:
+            with links_query_lock(self.ctx, batch_id, self._stop):
+                # A espera pela trava pode durar uma renovação em voo: o lote é RELIDO aqui (status, estado da
+                # listagem, espera armada). Cancelado ou já fora de `listing` enquanto isso: nada é gravado.
+                current = self.ctx.batches.get(batch_id)
+                if current is not None and current["status"] == "listing":
+                    self._after_links_chunk_locked(current, chunk, error)
+                    return
+        except JobCancelled:
+            logger.info("Lote %s: fim do trecho interrompido pelo encerramento; os links pendentes serão retomados",
+                        batch_id)
+            return
+        if current is not None and current["status"] == "cancelled":
+            # Cancelado durante a espera: vale o encerramento de lote cancelado de `_after_chunk` (fora da trava).
+            self._after_chunk(batch, chunk, error, 0, None)
+
+    def _after_links_chunk_locked(self, batch: dict[str, Any], chunk: _Chunk,
+                                  error: tuple[str, str] | None) -> None:
         """Fim de um trecho do lote por link (já conferidos cancelamento e encerramento do app)."""
         batch_id = batch["id"]
+        if error is not None and error[0] == LINKS_REFUSED_CODE:
+            if self._links_refused(batch, chunk, error[1]):
+                return
+            error = None  # o link recusado pela 2a vez era o último pendente: o lote encerra pelas regras abaixo
+        elif self.ctx.batches.links_hold(batch_id) and self.ctx.batches.next_pending_link(batch_id) is not None:
+            # Recusa em espera armada por uma renovação de URL durante o trecho (qualquer que tenha sido o motivo
+            # da parada dele): o lote espera a ação do dono, sem contar tentativa de link e sem agendar nada.
+            self._set_listing(batch_id, listing_state="needs_attention", listing_retry_at=None)
+            logger.warning("Lote %s: renovação de link recusada (%s); links aguardando ação manual, sem nova "
+                           "tentativa automática", batch_id, LINKS_REFUSED_CODE)
+            return
         if error is not None:
             code, message = error
             position = chunk.link_position
@@ -819,22 +973,28 @@ class ImportRunner:
             self._handle_listing_error(batch, ("links_failing", LINKS_FAILING_MESSAGE), chunk)
             return
         if chunk.stop == "backpressure":
-            self.ctx.batches.update_listing(batch_id, listing_state="waiting_backpressure")
+            self._set_listing(batch_id, listing_state="waiting_backpressure")
             logger.info("Lote %s: links aguardando downloads (backpressure)", batch_id)
             return
         if chunk.stop == "paused":
-            self.ctx.batches.update_listing(batch_id, listing_state="paused")
+            self._set_listing(batch_id, listing_state="paused")
             logger.info("Lote %s: links pausados (Instagram pausado); os pendentes serão retomados", batch_id)
             return
         counts = self.ctx.batches.link_counts([batch_id]).get(batch_id, {})
         if counts.get("pending"):
-            self.ctx.batches.update_listing(batch_id, listing_state="pending")  # novo trecho dos links pendentes
+            self._set_listing(batch_id, listing_state="pending")  # novo trecho dos links pendentes
             return
         total, failed = counts.get("total", 0), counts.get("failed", 0)
         if self.ctx.jobs.count_for_batch(batch_id) == 0:
             # Nenhum job criado: todos os links falharam; o lote falha com erro visível.
             message = LINKS_ALL_FAILED_ONE if total == 1 else LINKS_ALL_FAILED.format(total=total)
             self._finish_listing(batch_id, ("links_failed", message), None)
+            return
+        if self.ctx.batches.links_hold(batch_id):
+            # Recusa em espera ainda armada (ex.: o último link pendente foi recusado pela 2a vez): o lote sai de
+            # `listing` SEM desarmar. Quando o lote conclui sem job falho que o dono possa repetir, a espera é
+            # desarmada e o aviso normal volta (`BatchRepository.refresh_status`, chamado já em `_finish_listing`).
+            self._finish_listing(batch_id, (LINKS_REFUSED_CODE, LINKS_HOLD_DONE_MESSAGE), None)
             return
         message = LINKS_PARTIAL.format(failed=failed, total=total) if failed else None
         self._finish_listing(batch_id, None, message)

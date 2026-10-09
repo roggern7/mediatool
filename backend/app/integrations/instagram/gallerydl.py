@@ -247,7 +247,16 @@ class GalleryDlInstagramDownloader(InstagramDownloader):
                 raise
             log.info("URL de mídia expirada para %s#%s; renovando", item.source_post_id, item.source_media_index)
 
-        fresh = self._match_fresh(item, self.resolve_post(item.source_post_id))
+        candidates = self.resolve_post(item.source_post_id)
+        if any(candidate.source_post_id != item.source_post_id for candidate in candidates):
+            # Resposta de OUTRA publicação (comparação exata, diferenciando maiúsculas): nenhuma URL dela é usada.
+            error = InstagramError(
+                "contract_changed", "O Instagram respondeu com outra publicação ao renovar o link de download. "
+                "Nenhum arquivo foi baixado.", retryable=False)
+            error.stage = "normalize"
+            error.diagnostic = {"detail": "post_mismatch"}
+            raise error
+        fresh = self._match_fresh(item, candidates)
         if fresh is None:
             raise InstagramError("content_unavailable", "A mídia não está mais disponível no post.")
         try:

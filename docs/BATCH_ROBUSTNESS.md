@@ -107,6 +107,19 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   os jobs de todas as mídias da publicação (ordem do carrossel; `listing_page_index`/cursor/`listing_page_size`
   NULL) e marca o link `resolved` (`items_found`, `profile`, `resolved_at`). Link `resolved` ou `failed` nunca é
   pedido de novo; o mesmo shortcode nunca aparece duas vezes no lote (UNIQUE).
+- **Resposta de outra publicação** (`post_mismatch`): o shortcode devolvido tem de ser EXATAMENTE o pedido
+  (comparação que diferencia maiúsculas). Fonte única no provider web (`InstagramWebDownloader.resolve_post`, com
+  `normalize.post_code`: `code` no formato v1, `shortcode` no legado, do mesmo nó que `normalize_post` usa; os
+  filhos de carrossel têm shortcode próprio e não entram na comparação): resposta de outra publicação levanta
+  `contract_changed` com `detail = post_mismatch` antes de normalizar, sem devolver mídia; vale para a resolução e
+  para a renovação de URL. Resposta SEM shortcode não é `post_mismatch`: continua como antes (`normalize_node` não
+  devolve mídia e o provider levanta `contract_changed`/`post_shape_unknown`), então nenhum formato que hoje
+  funciona passa a falhar. Defesa para qualquer provider (fakes, gallery-dl): o runner (`_consume_links`) recusa a
+  resposta inteira se algum item tem `source_post_id` diferente do shortcode do link (link `failed` com
+  `contract_changed`, nenhum job criado, link nunca `resolved`), e a renovação (`pipeline._refresh_post`) falha o
+  job com `contract_changed` sem gravar URL em job nenhum; a renovação interna do provider `gallery-dl`
+  (`GalleryDlInstagramDownloader.download`) faz a mesma conferência antes de escolher a URL nova. `post_mismatch` é erro DO LINK (como
+  `post_shape_unknown`): o lote segue para o próximo. Nenhum dos dois shortcodes vai para o log.
 - **Erro do link** (`content_unavailable`, `profile_private`, `profile_not_found`, `unsupported_media`,
   `invalid_input`, ou resposta sem nenhuma mídia): o link fica `failed` com o código e a mensagem, e o runner segue
   para o próximo. Não muda o estado dos outros links nem pausa nada.
@@ -115,9 +128,117 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   `rate_limited`, `action_blocked`, `request_auth_failed`, `checkpoint_required`, `session_invalid`/`expired`) ->
   listagem `paused`, retomada sozinha no fim da pausa. Erro retryable ou de rede (`network_error`, `timeout`) ->
   `paused` com o backoff do lote (1 min, 5 min, 15 min, 1 h...). Qualquer outro (`session_missing`,
-  `access_refused`, `contract_changed`, `internal_error`, exceção inesperada) -> `needs_attention` com o erro
+  `contract_changed`, `internal_error`, exceção inesperada) -> `needs_attention` com o erro
   visível, nova tentativa automática a cada 6 h (máx. 4) e "Retomar" (`resume-listing`). Link resolvido zera o
   backoff e as tentativas.
+- **Recusa em espera** (`access_refused` em lote por link; UM bloqueio por lote, compartilhado pelo runner e pela
+  renovação de URL). A recusa é da consulta, não do link, e a consulta de publicação isolada ainda não foi
+  verificada no Instagram real; repetir sozinho só mandaria mais requisições recusadas.
+  - **Estado** (persistente, sem coluna nova): `batches.error_code = 'access_refused'` num lote `import_mode =
+    'links'` (`BatchRepository.links_hold` / `arm_links_hold` / `clear_links_hold`; a MESMA função é consultada
+    pelos dois caminhos). Por que este campo: já é o que o lote parado por recusa gravava e a API/presenters
+    mostram (`error_code`/`error_message`), vale em qualquer `status` (lote que já saiu de `listing` com erro
+    visível é um estado que já existia, o da listagem parcial), sobrevive ao reinício e não mexe na máquina de
+    estados. Os campos de pausa do disjuntor (`paused_*`) foram descartados: param também os downloads com URL
+    válida, têm prazo e retomada automática e são zerados por `pause_batch`; os contadores `refresh_fail_*` também
+    são zerados por `pause_batch`. Nenhum lote por link grava `access_refused` em `error_code` por outro motivo.
+  - **Trava** (`pipeline.links_query_lock`, em memória, por app e lote): toda consulta `resolve_post` do lote, do
+    runner (`_consume_links`) ou da renovação (`_download_after_expired_post`), adquire a trava, RE-CONFERE a
+    espera sob ela, só então consulta e, recusada, ARMA a espera antes de soltar a trava. Duas consultas do mesmo
+    lote nunca ficam em voo ao mesmo tempo e a segunda sempre vê a recusa da primeira. O início do trecho do
+    runner (`start_listing`, que apaga o erro de um lote `paused`) também acontece sob a trava e não começa com a
+    espera armada. Ordem das travas: trava do lote primeiro; dentro dela `resolve_post` usa o portão do Instagram e
+    a espera do teto de páginas; nada adquire a trava do lote segurando aquelas (sem inversão). A espera pela
+    trava é cancelável (confere o `cancel` a cada 0,1 s: job cancelado sai com `JobCancelled`; o runner abandona o
+    trecho com o link ainda pendente).
+  - **Arma**: qualquer `access_refused` de `resolve_post` em lote por link. Runner: em `_consume_links`, mesmo com
+    o trecho cancelado/encerrando durante a consulta. Renovação: em `_refresh_post`, mesmo com o job cancelado
+    durante a consulta (o job fica `cancelled`; a espera fica armada).
+  - **Com a espera armada**: `_next_eligible` nunca escolhe o lote e o deixa em `needs_attention` com
+    `listing_retry_at = NULL` (o estado que "Retomar importação" aceita), venha ele de `running` interrompido,
+    `paused` por backoff, `pending`, backpressure ou de um agendamento de versão anterior; o trecho em andamento
+    para antes do próximo link (`_after_links_chunk`, sem contar tentativa do link e sem agendar nada); a
+    renovação não consulta: o job falha com `access_refused` e `LINKS_REFRESH_BLOCKED_MESSAGE` (ou
+    `LINKS_REFRESH_BLOCKED_LISTING_MESSAGE` com o lote ainda em `listing`, onde `retry-failed` responde 409), sem
+    requisição, sem pausa do Instagram e sem contar no disjuntor de jobs do lote. Job com URL ainda válida, ou já
+    renovada por um irmão, baixa normalmente. Nada é pausado: a renovação recusada não conta no disjuntor de jobs
+    e 3 renovações recusadas seguidas não acionam `BREAKER_REFRESH_FAILURES` (a pausa do lote retomaria sozinha).
+  - **Desarma** (só ação explícita do dono): "Retomar importação" (`resume_listing`, que já apagava
+    `error_code`; lote em `listing`) e "Tentar falhas novamente" (`retry_failed`) ou repetir um job falho
+    (`retry_job`), estes com o lote fora de `listing` (`clear_links_hold`). Depois de desarmada, no máximo UMA
+    consulta recusada acontece antes de ela se armar de novo, no lote inteiro e em qualquer dos dois caminhos:
+    12 publicações com URL vencida = 1 consulta, não 12; worker antes do runner, ou runner antes do worker = 1.
+    A primeira renovação depois da ação consulta mesmo dentro de `REFRESH_MIN_INTERVAL` (o registro recente com
+    `access_refused` não é repetido sem requisição, ao contrário dos outros códigos).
+  - **2a recusa do mesmo link** (`LINK_ATTENTION_LIMIT`, `_links_refused`): o link fica `failed` e o lote continua
+    parado (o próximo link só sai por outra ação). O disjuntor `links_failing` não é acionado por essa recusa (ele
+    agendaria a tentativa de 6 h). Se era o ÚLTIMO link pendente, o lote sai de `listing` SEM desarmar
+    (`_finish_listing` com `error_code = access_refused` e `LINKS_HOLD_DONE_MESSAGE`; `links_failed` se nenhum
+    job foi criado).
+  - **Fim do lote** (`BatchRepository.refresh_status`, o ponto único em que `running` vira `completed`: worker
+    ao terminar o último job, recovery, fim da listagem): a espera só faz sentido enquanto ainda pode haver
+    consulta. Lote concluído SEM job `failed` (nada que o dono possa repetir) -> a espera é desarmada ali
+    mesmo (`_release_finished_links_hold`) e o lote fica com o aviso normal ("X de N links não puderam ser
+    importados." quando há link falho; senão nenhum erro). Com job `failed` a espera permanece e "Tentar
+    falhas novamente" existe na tela e desarma. Enquanto o lote está `running` com a espera armada e ainda sem
+    falha, a mensagem do lote não manda clicar em botão ausente: "... Se algum item do lote falhar, use
+    "Tentar falhas novamente" ...".
+  - **Cancelamento** (`_cancel_batch_rows`): lote cancelado não tem espera (`links_hold` é falso e
+    `arm_links_hold` não grava em lote cancelado); o `error_code` fica como registro do motivo, como nos
+    outros erros de lote cancelado, e a mensagem vira `LINKS_HOLD_CANCELLED_MESSAGE` (sem apontar botões).
+  - **Fim do trecho sob a trava** (`_after_links_chunk`): a conferência da espera e a gravação do estado/erro
+    do fim do trecho (`_handle_listing_error`, `_finish_listing`) acontecem sob a MESMA trava do lote; uma
+    renovação recusada não consegue armar a espera entre as duas (a gravação a apagaria). Nada ali consulta o
+    Instagram nem adquire o portão; a espera pela trava é interrompida pelo encerramento do app.
+  - A listagem por perfil (`_refresh_page`, `_handle_listing_error`) e os outros códigos (`content_unavailable`,
+    `rate_limited`, `network_error`, raiz nula, mídia que sumiu) não mudam. Dois lotes por link são isolados.
+  - **Cancelamento durante o fim do trecho**: o fim do trecho espera a trava do lote, que pode durar uma
+    renovação em voo; ao obtê-la o runner RELÊ o lote e, se ele foi cancelado (ou saiu de `listing`), não grava
+    nada (lote cancelado segue o encerramento de cancelado de `_after_chunk`). Defesa em profundidade, para
+    lote por link e por perfil: toda gravação de estado de fim de trecho passa por `_set_listing` e
+    `_finish_listing`, que conferem `status = 'listing'` na MESMA transação da gravação; um lote cancelado
+    nunca volta a `running`/`completed`/`paused` por uma gravação atrasada. A espera pela trava no fim do
+    trecho é interrompida só pelo encerramento do app, não pelo cancelamento do lote (o `cancel` do trecho já
+    foi desregistrado nesse ponto); o cancelamento sinaliza o job da renovação em voo, que solta a trava.
+    `arm_links_hold` só grava em lote `listing`/`running`.
+  - **Limitações conhecidas**: (-2) o runner espera uma renovação em voo do MESMO lote antes de gravar o fim
+    do trecho (equivalente ao que já acontecia com o teto global de páginas: uma consulta por vez). (-1) A
+    retenção de jobs (`purge_finished_before`) pode apagar o job falho de um lote concluído com a espera
+    armada; o lote fica com a mensagem de "Tentar falhas novamente" sem job para repetir (a espera não é
+    liberada nesse caminho; não foi alterado). (0) durante uma pausa do Instagram com a espera armada por uma renovação, o
+    lote pode ficar em `paused`/`pending` com o erro visível e sem o botão "Retomar importação" até a pausa
+    acabar (o runner só passa o lote a `needs_attention` quando volta a rodar); nenhuma consulta acontece nesse
+    intervalo. (i) app encerrado DURANTE a consulta de um link (ou de uma renovação): resultado
+    desconhecido, o link continua `pending` e é consultado de novo no próximo início. (ii) Processo morto entre a
+    resposta recusada e o UPDATE que arma a espera: a recusa não fica registrada, 1 consulta extra no próximo
+    início. (iii) Cancelar o job exatamente durante a consulta recusada: o job fica `cancelled` e a espera é armada
+    do mesmo jeito (sem consulta extra). (iv) Provider `gallery-dl` (estratégia não padrão):
+    `GalleryDlInstagramDownloader.download` renova a URL vencida por conta própria, dentro do download, sem
+    passar por `pipeline._refresh_post`; essa renovação interna NÃO respeita a espera (faltou: o provider não
+    recebe lote nem contexto no `download`, e a pipeline não tem como impedir a consulta sem mudar a interface
+    `InstagramDownloader.download` ou o comportamento da listagem por perfil nessa estratégia) nem arma a espera
+    quando é recusada. A resolução dos links pelo runner respeita e arma a espera em qualquer estratégia, e a
+    renovação interna nunca usa mídia de outra publicação (`contract_changed`/`post_mismatch`).
+- **Diagnóstico seguro no log** (`app.jobs.errors.safe_diagnostic`): os avisos (WARNING) de falha de link e de
+  listagem (por link e por perfil) terminam com `[stage=... status=... redirect=... detail=... content_type=...
+  size=... path=...]`, só com os campos presentes e válidos, numa linha só. Lista de permissão: `stage` e `detail`
+  casam POR INTEIRO `[a-z][a-z0-9_]{0,63}` (começam por letra minúscula, até 64 caracteres) e não podem ter 6 ou
+  mais dígitos seguidos (pareceria um id); `redirect` só se for um dos 6 valores de `web/errors.redirect_kind`;
+  `status` de 100 a 599 e `size` de 0 a 10^12, só `int` exato (nem `bool` nem subclasse); content-type só da
+  lista fixa (`text/html`, `application/json`, `text/javascript`, `application/x-javascript`, `text/plain`,
+  `application/octet-stream`, `image/jpeg`, `image/png`, `image/webp`, `video/mp4`); `path` só quando é um dos
+  paths fixos do provider web (`/`, `/graphql/query`, `/web/search/topsearch/`). Todo texto tem de ser `str` exato
+  (subclasse é omitida). Valor fora do formato é omitido, nunca truncado; a única normalização é a do
+  content-type, que perde parâmetros (`; charset=...`), espaços em volta e maiúsculas antes da comparação com a
+  lista (o que sai é sempre o valor da lista). O `stage` do erro tem precedência sobre `diagnostic["stage"]`.
+  Nenhum valor aceito contém espaço ou quebra de linha, e o resultado ainda passa por `redact`. `location_path`,
+  query, corpo, cookies, tokens, shortcode e ids nunca entram. O link aparece pela posição no lote. Exemplo:
+  `Lote 7: consulta por link recusada (access_refused); aguardando ação manual, sem nova tentativa automática
+  [stage=graphql status=302 redirect=redirect_home detail=redirect_home content_type=text/html size=0
+  path=/graphql/query]`. No lote por link recusado o mesmo resumo vai no fim de `error_message` (sem coluna nova),
+  e também no `error_message` do link que vira `failed` na 2a recusa (`errors.message_with_diagnostic`). O texto
+  final respeita o teto de 500 caracteres de `safe_message`: se não couber, o diagnóstico perde campos INTEIROS do
+  fim (nunca um valor cortado ao meio) e, se nem o primeiro couber, a mensagem vai sem sufixo.
 - **Link que trava o lote** (`batch_links.attention_count`): cada vez que um link leva o lote a `needs_attention`
   por erro não retryable que não é de sessão/pausa/rede, o contador do link sobe. Na 1a vez vale a regra acima
   (link pendente, nenhum outro pedido). Na 2a vez do MESMO link (`LINK_ATTENTION_LIMIT`), ele fica `failed` com esse
@@ -158,8 +279,12 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   depois de uma FALHA, os itens irmãos do carrossel repetem o mesmo código sem requisição nova (retryable só para
   `RETRYABLE_REFRESH_CODES`, sem aplicar pausa de novo): carrossel de 10 itens = 1 consulta, não 10; 3 renovações
   seguidas falhas com o mesmo código pausam o lote (`BREAKER_REFRESH_FAILURES`). Lotes por perfil não mudam.
+- **Renovação e `access_refused`**: a renovação usa a trava e a recusa em espera do lote descritas acima em
+  "Recusa em espera" (não há estado próprio da renovação).
 - **Log**: só id do lote e contagens; shortcode, link colado e URL de mídia nunca são registrados.
-- Testes: `backend/tests/test_import_links.py`, `test_import_links_runner.py`.
+- Testes: `backend/tests/test_import_links.py`, `test_import_links_runner.py`, `test_import_links_refused.py`,
+  `test_import_links_refused_diag.py`, `test_import_links_mismatch.py`, `test_import_links_refresh_refused.py`,
+  `test_import_links_hold.py`, `test_gallerydl_post_mismatch.py`.
 
 ## 0. Meta de escala (REVISÃO, prevalece sobre o resto deste documento)
 

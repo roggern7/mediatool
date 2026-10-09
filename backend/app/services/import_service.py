@@ -310,6 +310,8 @@ def _cancel_batch_rows(ctx: AppContext, batch_id: int, status: str) -> list[int]
     else:
         ctx.batches.update_listing(batch_id, listing_cursor=None)
     running = ctx.jobs.cancel_batch_jobs(batch_id)
+    # Lote por link com a recusa em espera: cancelado, a espera deixa de existir (fica só o motivo).
+    ctx.batches.release_cancelled_links_hold(batch_id)
     # Descartes da página que estava aberta (sem checkpoint): a página não será refeita, então são perda real do
     # que já tinha sido listado; somam uma única vez (o parcial é apagado na mesma instrução).
     ctx.batches.add_listing_dropped(batch_id, merge_partial=True)
@@ -366,7 +368,7 @@ def restart_listing(ctx: AppContext, batch_id: int, *, confirm: bool) -> None:
     if batch.get("import_mode") == "links":
         # Lote por link não tem "página 1": os links pendentes continuam de onde pararam (resume-listing).
         raise AppError(409, "listing_not_resumable",
-                       "Importação por link não recomeça do início: use \"Retomar\" para continuar dos links que "
+                       "Importação por link não recomeça do início: use \"Retomar importação\" para continuar dos links que "
                        "ainda faltam.")
     if not confirm:
         raise AppError(409, "restart_confirmation_required",
@@ -392,6 +394,8 @@ def retry_failed(ctx: AppContext, batch_id: int) -> None:
         if batch["status"] != "running":
             ctx.batches.reopen(batch_id)
             ctx.batches.update(batch_id, error_code=None, error_message=None)
+        # Lote por link com a recusa em espera: esta ação do dono a desarma (uma nova consulta; recusada, rearma).
+        ctx.batches.clear_links_hold(batch_id)
     ctx.wake_worker()
 
 
@@ -406,6 +410,8 @@ def retry_job(ctx: AppContext, job_id: int) -> None:
             raise AppError(409, "job_not_retryable", "O job mudou de estado e não foi reenfileirado.")
         if job["batch_id"] is not None:
             ctx.batches.reopen(job["batch_id"])
+            # Recusa em espera de lote por link fora de `listing`: repetir um job também é ação do dono e desarma.
+            ctx.batches.clear_links_hold(job["batch_id"])
     ctx.wake_worker()
 
 

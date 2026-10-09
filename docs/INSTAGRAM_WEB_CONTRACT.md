@@ -600,7 +600,9 @@ download, sem processamento. Usa a sessão salva (`LocalInstagramSessionProvider
 (`resolve_post`), retries 0 e sem re-bootstrap (token recusado vira `session_invalid`/`web_token_rejected` na hora).
 Tráfego: exatamente 1 GET `/` + 1 POST `/graphql/query`. Recusa rodar com o app escutando na porta (`app_running`,
 saída 2). Link inválido -> `invalid_input` sem nenhuma requisição (saída 1). Para no primeiro erro (saída 1) com só
-`code`/`message`/`stage`/`detail` seguros e, quando o erro traz, `top_keys`/`data_keys` (NOMES das chaves da resposta:
+`code`/`message`/`stage`/`detail` seguros e, quando o erro traz, `status` (HTTP, inteiro), `redirect` (tipo, ex.
+`redirect_home`), `content_type` (só `tipo/subtipo`) e `size` (pela lista de permissão de `jobs.errors.safe_diagnostic`;
+sem `location_path` nem nomes de cookie) e `top_keys`/`data_keys` (NOMES das chaves da resposta:
 `data_keys` mostra em qual campo raiz o Instagram respondeu). Ctrl+C -> `interrupted` (saída 130). O override de
 `doc_id` gravado no banco (setting) não é lido; valem o env/`.env` (`MEDIA_TOOL_IG_DOC_<NAME>`,
 `MEDIA_TOOL_IG_ROOT_<NAME>`) ou os valores embutidos. Relatório JSON (stdout): `query` (nome, `doc_id`, campo raiz e

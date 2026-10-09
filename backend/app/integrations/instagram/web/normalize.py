@@ -302,6 +302,22 @@ def normalize_post(root: Mapping, *, stats: NormalizeStats | None = None) -> lis
     return normalize_node(node if v1 else legacy_to_v1(node), profile=_post_owner(node), stats=stats)
 
 
+def post_code(root: Mapping) -> str | None:
+    """Shortcode que a raiz da consulta de UM post declara (`code` no formato v1, `shortcode` no legado), escolhendo
+    o nó como ``normalize_post``. None quando a resposta não traz nenhum (``normalize_post`` devolve lista vazia e
+    conta `node_no_code`: nada vira mídia)."""
+    node: object = root
+    items = root.get("items")
+    if isinstance(items, list):
+        node = next((item for item in items if isinstance(item, Mapping)), None)
+        if node is None:
+            return None
+    media_type = node.get("media_type")
+    v1 = isinstance(media_type, int) and not isinstance(media_type, bool)
+    code = node.get("code" if v1 else "shortcode")
+    return code if isinstance(code, str) and code else None
+
+
 def filter_by_content(items: list[RemoteMedia], content: ContentType) -> list[RemoteMedia]:
     if content == "reels":
         return [item for item in items if item.is_reel and not item.in_carousel]

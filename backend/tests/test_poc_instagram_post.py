@@ -170,8 +170,12 @@ def test_item_with_url_outside_cdn_is_flagged(tmp_path):
 
 def test_shortcode_mismatch_is_flagged_without_printing_codes(tmp_path):
     server = Server(fixture("post_video_reel.json"))   # a resposta traz outra publicação
-    _, report = run_tool(server, tmp_path=tmp_path)
-    assert report["items"][0]["shortcode_matches"] is False
+    code, report = run_tool(server, tmp_path=tmp_path)
+    # O provider recusa a resposta de outra publicação (`post_mismatch`): nenhuma mídia chega ao relatório.
+    assert code == 1 and report["outcome"] == "contract_changed"
+    assert report["error"]["detail"] == "post_mismatch" and report["error"]["stage"] == "normalize"
+    assert report["items"] == [] and report["media_count"] == 0
+    assert "FAKEPOSTREEL" not in json.dumps(report)
 
 
 def test_null_root_is_link_error(tmp_path):
@@ -216,6 +220,61 @@ def test_error_stops_immediately_without_retry(tmp_path, failure, code):
     assert [r[2] for r in server.requests] == ["/", "/graphql/query"]
     assert report["cdn_requests"] == 0 and report["items"] == [] and report["media_count"] == 0
     assert "falha FAKE" not in json.dumps(report)
+
+
+def test_refusal_by_403_reports_safe_http_diagnostic(tmp_path):
+    server = Server(_html_403())
+    code, report = run_tool(server, tmp_path=tmp_path)
+    assert code == 1 and report["outcome"] == "access_refused"
+    assert report["error"] == {
+        "code": "access_refused", "message": report["error"]["message"], "stage": "graphql", "detail": "http_403",
+        "status": 403, "content_type": "text/html", "size": len("<html>Forbidden</html>")}
+    assert "redirect" not in report["error"]
+    assert report["requests"] == [{"method": "GET", "path": "/", "status": 200},
+                                  {"method": "POST", "path": "/graphql/query", "status": 403}]
+
+
+def test_refusal_by_redirect_home_reports_redirect_kind(tmp_path):
+    server = Server(httpx.Response(302, headers={"location": "https://www.instagram.com/?next=FAKEQUERY123"}))
+    code, report = run_tool(server, tmp_path=tmp_path)
+    error = report["error"]
+    assert code == 1 and report["outcome"] == "access_refused"
+    assert error["status"] == 302 and error["redirect"] == "redirect_home" and error["detail"] == "redirect_home"
+    assert error["stage"] == "graphql" and error["size"] == 0
+    assert "location_path" not in error and "path" not in error and "set_cookie_names" not in error
+    assert report["requests"][-1] == {"method": "POST", "path": "/graphql/query", "status": 302}
+    assert [r[2] for r in server.requests] == ["/", "/graphql/query"]
+
+
+PLANTED = ("FAKE-COOKIE-PLANTED-01", "FAKE_TOKEN_PLANTED_01", "FAKEPLANTSC1", "igsh=FAKEPLANTQS",
+           "scontent-plant.cdninstagram.com", "plantcookie")
+
+
+def test_planted_sensitive_values_never_reach_the_report(tmp_path):
+    # Pela resposta: cookie, token, shortcode, query string e URL de CDN no Location, Set-Cookie, content-type e corpo.
+    body = (f'<html>https://scontent-plant.cdninstagram.com/v/FAKEPLANTSC1.jpg?oh=FAKE_TOKEN_PLANTED_01 '
+            f'sessionid={PLANTED[0]}</html>')
+    server = Server(httpx.Response(302, text=body, headers=[
+        ("location", "https://www.instagram.com/p/FAKEPLANTSC1/?igsh=FAKEPLANTQS&token=FAKE_TOKEN_PLANTED_01"),
+        ("set-cookie", f"plantcookie={PLANTED[0]}; Path=/"),
+        ("content-type", "text/html; charset=utf-8; token=FAKE_TOKEN_PLANTED_01")]))
+    code, report = run_tool(server, tmp_path=tmp_path)
+    text = json.dumps(report, ensure_ascii=True)
+    for secret in PLANTED:
+        assert secret not in text, secret
+    error = report["error"]
+    assert code == 1 and error["status"] == 302 and error["redirect"] == "redirect_other"
+    assert error["content_type"] == "text/html" and error["size"] == len(body)
+    assert set(error) == {"code", "message", "stage", "detail", "status", "redirect", "content_type", "size"}
+
+    # Pelo próprio diagnóstico: valor fora do formato é omitido, e campo fora da lista de permissão nunca sai.
+    exc = poc.InstagramWebError("access_refused", "Recusado.", stage="graphql", diagnostic={
+        "status": f"403 {PLANTED[1]}", "redirect": "https://scontent-plant.cdninstagram.com/v/FAKEPLANTSC1.jpg",
+        "detail": f"sessionid={PLANTED[0]}", "content_type": f"text/{PLANTED[1]}?igsh=FAKEPLANTQS", "size": PLANTED[2],
+        "path": "/p/FAKEPLANTSC1/", "location_path": "/p/FAKEPLANTSC1/", "set_cookie_names": ["plantcookie"],
+        "json_keys": [PLANTED[1]], "token": PLANTED[1]})
+    error = poc.safe_error(exc)
+    assert error == {"code": "access_refused", "message": "Recusado.", "stage": "graphql", "detail": None}
 
 
 def test_token_rejected_does_not_log_rebootstrap(tmp_path, caplog):

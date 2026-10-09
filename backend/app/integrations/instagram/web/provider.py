@@ -301,13 +301,15 @@ class InstagramWebDownloader(InstagramDownloader):
         ``listing_ref=None`` e ``source_profile`` = dono da publicação ("" se ausente). Cada post conta como uma
         página no teto global por hora. Cancelado antes do POST -> lista vazia (quem chama confere o cancelamento).
         Sem mídia: só tipo não suportado -> ``unsupported_media``; objeto sem código de publicação ->
-        ``contract_changed``; demais (itens sem URL utilizável) -> ``content_unavailable``."""
+        ``contract_changed``; demais (itens sem URL utilizável) -> ``content_unavailable``.
+        Resposta cujo shortcode não é EXATAMENTE o pedido (outra publicação, ou só maiúsculas diferentes) ->
+        ``contract_changed`` com detail ``post_mismatch``, sem devolver mídia nenhuma."""
         try:
             shortcode = validate_shortcode(shortcode)
         except ValueError as exc:
             raise InstagramError("invalid_input", str(exc)) from None
         from app.integrations.instagram.web.errors import InstagramWebError
-        from app.integrations.instagram.web.normalize import NormalizeStats, normalize_post
+        from app.integrations.instagram.web.normalize import NormalizeStats, normalize_post, post_code
 
         if cancel is not None and cancel.is_set():
             return []
@@ -323,6 +325,16 @@ class InstagramWebDownloader(InstagramDownloader):
                     if cancel is not None and cancel.is_set():
                         return []
             root = ops.graphql.post_by_shortcode(shortcode)
+        answered = post_code(root)
+        if answered is not None and answered != shortcode:
+            # Resposta de OUTRA publicação (comparação exata, diferenciando maiúsculas): nunca vira mídia nem renova
+            # URL. Resposta sem shortcode nenhum segue para normalize_post, que não devolve mídia (abaixo:
+            # `post_shape_unknown`). Nenhum dos dois shortcodes vai para o log nem para o diagnóstico.
+            del root
+            log.warning("Publicação resolvida (web): a resposta é de outra publicação; descartada")
+            raise InstagramWebError(
+                "contract_changed", "O Instagram respondeu com outra publicação, diferente da pedida. Nada foi "
+                "importado deste link.", stage="normalize", diagnostic={"detail": "post_mismatch"})
         stats = NormalizeStats()
         items = normalize_post(root, stats=stats)
         del root

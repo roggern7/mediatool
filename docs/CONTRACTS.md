@@ -955,9 +955,80 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
 - `status: "listing"` enquanto há link pendente; `listing_state` segue a listagem: `running` (consultando),
   `waiting_backpressure` (aguardando downloads), `waiting_rate_limit` (teto de páginas por hora; `rate_limit_*`),
   `paused` (pausa do Instagram ou falha de rede com nova tentativa automática; o motivo vem em
-  `error_code`/`error_message`) e `needs_attention` (erro do ambiente: sessão, verificação, `access_refused`,
-  `contract_changed`, `internal_error`; nova tentativa automática a cada 6 h, no máximo 4, e botão **Retomar** =
+  `error_code`/`error_message`) e `needs_attention` (erro do ambiente: sessão, verificação, `contract_changed`,
+  `internal_error`; nova tentativa automática a cada 6 h, no máximo 4, e botão **Retomar** =
   `POST /api/batches/{id}/resume-listing`). Nesses estados o link da vez continua `pending` e nenhum outro é pedido.
+- Consulta recusada (`error_code: "access_refused"`) e a **recusa em espera** do lote: qualquer `access_refused`
+  numa consulta de publicação do lote (na resolução de um link OU na renovação de um link de download vencido)
+  arma UMA espera para o lote inteiro, gravada no próprio lote (`error_code: "access_refused"`; sem campo novo).
+  Enquanto ela vale, o Media Tool não faz NENHUMA consulta ao Instagram por esse lote: o próximo link não é pedido e
+  nenhum link de download é renovado; não há nova tentativa automática (nem a de 6 h, nem no reinício do app, nem
+  depois de pausa/backpressure) e o lote não é pausado nem retomado sozinho. Só uma ação explícita do dono desarma:
+  **Retomar importação** (`POST /api/batches/{id}/resume-listing`, com o lote ainda em `listing`) ou **Tentar
+  falhas novamente** (`POST /api/batches/{id}/retry-failed`, com o lote já fora de `listing`; repetir um job falho
+  pela fila, `POST /api/jobs/{id}/retry`, também vale nesse caso). Depois de desarmada, no máximo UMA consulta
+  recusada acontece, no lote inteiro e em qualquer dos dois caminhos, antes de a espera se armar de novo (as
+  consultas do lote são feitas uma por vez). Outro lote por link não é afetado; lote por perfil não muda.
+  - Lote ainda em `listing`: `listing_state: "needs_attention"` sem `listing_retry_at`; o link da vez continua
+    `pending`. `error_message` quando a recusa foi na resolução de um link: "O Instagram recusou a consulta desta
+    publicação. Isso não indica sessão inválida. Não haverá nova tentativa automática: use "Retomar importação"
+    para tentar de novo (uma consulta por vez) ou cancele o lote.", seguida, quando o erro trouxe diagnóstico, de
+    ` (diagnóstico: stage=graphql status=403 detail=http_403 ...)`. Quando foi numa renovação: "O Instagram recusou
+    a renovação de um link de download deste lote. Isso não indica sessão inválida. Não haverá nova tentativa
+    automática: use "Retomar importação" para tentar de novo (uma consulta por vez) ou cancele o lote.".
+  - Cada **Retomar importação** faz UMA consulta; recusado pela 2a vez, o MESMO link vira `failed` com
+    `access_refused` (o `error_message` do link leva o mesmo sufixo ` (diagnóstico: ...)`) e o lote continua
+    parado (o próximo link só é pedido por outra ação). Se esse era o último link pendente, o lote sai de `listing`
+    e a espera NÃO é liberada enquanto houver job que ainda possa precisar renovar o link de download: o lote segue
+    para `running` com `error_code: "access_refused"` e `error_message` "O Instagram recusou uma consulta deste
+    lote. Isso não indica sessão inválida. Não haverá nova tentativa automática. Se algum item do lote falhar,
+    use "Tentar falhas novamente" para tentar de novo (uma consulta por vez).". Sem nenhum job criado, o lote
+    falha com `links_failed`.
+  - Fim do lote com a espera armada: quando todos os jobs terminam SEM nenhum `failed` (nada que o dono possa
+    repetir), a espera é desarmada na conclusão e o lote fica `completed` com o estado normal: `error_code:
+    null` e `error_message` "X de N links não puderam ser importados." quando há link falho (senão `null`).
+    Com job `failed`, o lote conclui mantendo `error_code: "access_refused"` e a mensagem acima, e **Tentar
+    falhas novamente** (visível porque há falhas) desarma e vale uma consulta.
+  - Lote cancelado: a espera deixa de existir; `error_code: "access_refused"` fica como registro do motivo e
+    `error_message` vira "O Instagram recusou uma consulta deste lote antes do cancelamento. Isso não indica
+    sessão inválida.".
+  - Lote já fora de `listing` (todos os links resolvidos/falhos) com uma renovação recusada: `status` segue
+    `running` -> `completed`, com `error_code: "access_refused"` e a mesma mensagem (o job recusado fica
+    `failed`, então o botão existe).
+  - Job que precisa renovar o link de download com a espera armada: NÃO consulta; fica `failed` com
+    `error_code: "access_refused"` e `error_message` "O Instagram recusou uma consulta deste lote e o link de
+    download desta mídia precisa ser renovado. Não haverá nova tentativa automática: use "Tentar falhas novamente"
+    no lote para tentar de novo (uma consulta por vez)." ou, com o lote ainda em `listing` (onde `retry-failed`
+    responde 409 `batch_listing`), "... use "Retomar importação" no lote; quando a importação dos links terminar,
+    "Tentar falhas novamente" repete este item.". Job com link de download ainda válido baixa normalmente.
+  - **Cancelar** funciona como nos demais estados.
+- Diagnóstico (formato do sufixo e do log): `chave=valor` separados por espaço, numa linha só, nesta ordem e só com
+  os campos presentes e válidos: `stage` e `detail` (por inteiro `[a-z][a-z0-9_]{0,63}`, sem 6 ou mais dígitos
+  seguidos), `status` (inteiro de 100 a 599), `redirect` (só `redirect_login`, `redirect_challenge`,
+  `redirect_checkpoint`, `redirect_consent`, `redirect_home`, `redirect_other`), `content_type` (só `text/html`,
+  `application/json`, `text/javascript`, `application/x-javascript`, `text/plain`, `application/octet-stream`,
+  `image/jpeg`, `image/png`, `image/webp`, `video/mp4`; parâmetros como `; charset=...` e maiúsculas são
+  descartados antes da comparação), `size` (inteiro de 0 a 10^12) e `path` (só `/`,
+  `/graphql/query`, `/web/search/topsearch/`). Valor fora disso é omitido, nunca truncado. `error_message` com o
+  sufixo nunca passa de 500 caracteres: se não couber, o diagnóstico perde campos inteiros do fim (nenhum valor
+  cortado ao meio) e, se nem o primeiro couber, a mensagem vai sem sufixo.
+- Resposta de OUTRA publicação: o shortcode que a resposta declara tem de ser EXATAMENTE o pedido (maiúsculas e
+  minúsculas contam). Se não for, nada é gravado (nenhum job, nenhuma mídia), o link vira `failed` com
+  `error_code: "contract_changed"` (detalhe `post_mismatch`; `error_message` "O Instagram respondeu com outra
+  publicação, diferente da pedida. Nada foi importado deste link.") e o lote segue para o próximo link. Vale igual
+  na renovação de link de download (todos os itens da resposta são conferidos; inclusive na renovação interna
+  do provider `gallery-dl`): o job falha com `contract_changed` e nenhum job recebe URL de outra publicação. Resposta sem shortcode nenhum continua como antes: não gera mídia e o link vira `failed` com
+  `contract_changed` (detalhe `post_shape_unknown`).
+- Limitações conhecidas da recusa em espera: (i) se o aplicativo é encerrado DURANTE a consulta de um link
+  (requisição enviada, resposta ainda não recebida), o resultado é desconhecido e o link continua `pending`: ele é
+  consultado de novo no próximo início (o índice único dos jobs descarta mídias repetidas); o mesmo vale para uma
+  renovação interrompida no meio. (ii) Se o processo morre entre a resposta recusada e a gravação da espera (um
+  único UPDATE logo depois da resposta), a recusa não fica registrada e pode haver 1 consulta extra no próximo
+  início. (iii) Cancelar o job (ou o trecho) exatamente durante a consulta recusada: o job fica `cancelled`, mas a
+  espera é armada do mesmo jeito; não há consulta extra. (iv) Estratégia não padrão `gallery-dl`: a renovação do
+  link de download vencido acontece DENTRO do download desse provider e não passa pela espera do lote, então nessa
+  estratégia cada job com link vencido ainda pode fazer uma consulta mesmo com a espera armada (a resolução dos
+  links pelo runner respeita a espera em qualquer estratégia). A checagem de shortcode vale também ali.
 - Link que repete erro do ambiente: na 1a vez o lote fica `needs_attention` com o link `pending`; se o MESMO link
   levar o lote a `needs_attention` pela 2a vez (depois de **Retomar** ou da nova tentativa automática), o link vira
   `failed` com esse erro e o lote segue para os próximos. Publicação com formato desconhecido (`contract_changed`
@@ -967,7 +1038,7 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
 - Disjuntor `links_failing`: 3 links SEGUIDOS falhos (nenhum resolvido entre eles) com links ainda pendentes param o
   lote em `listing_state: "needs_attention"` com `error_code: "links_failing"` e `error_message` "3 links seguidos
   não puderam ser importados. Confira os links; se eles abrem no navegador, o Media Tool pode precisar de
-  atualização. Retomar continua pelos próximos links.". **Retomar** (`resume-listing`) continua pelos links
+  atualização. "Retomar importação" continua pelos próximos links.". **Retomar** (`resume-listing`) continua pelos links
   pendentes com o contador zerado (os falhos ficam falhos); a nova tentativa automática de 6 h (máx. 4) vale igual.
   Se os links acabam junto com a 3a falha (ex.: lote de 1 a 3 links, todos falhos), o lote conclui normalmente.
 - `POST /api/batches/{id}/restart-listing` responde 409 `listing_not_resumable` em lote por link (não existe "página

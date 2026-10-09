@@ -17,6 +17,12 @@ from app.db.repositories.common import (
     row_dict,
 )
 
+# Importação por link: aviso do lote concluído com parte dos links falha.
+LINKS_PARTIAL_MESSAGE = "{failed} de {total} links não puderam ser importados."
+# Lote por link cancelado enquanto esperava a ação do dono por uma consulta recusada (só o motivo, sem botões).
+LINKS_HOLD_CANCELLED_MESSAGE = (
+    "O Instagram recusou uma consulta deste lote antes do cancelamento. Isso não indica sessão inválida."
+)
 BATCH_UPDATE_COLUMNS = frozenset({"status", "found", "error_code", "error_message", "finished_at"})
 # Checkpoint interno da listagem (nunca sai pela API nem por log).
 LISTING_COLUMNS = frozenset(
@@ -237,6 +243,60 @@ class BatchRepository:
             "UPDATE batch_links SET attention_count = attention_count + 1 WHERE batch_id = ? AND position = ?"
             " RETURNING attention_count", (batch_id, position))
         return int(row[0]) if row is not None else 0
+
+    # ---- lote por link: recusa em espera (docs/BATCH_ROBUSTNESS.md, seção 0.2) --------------------------------
+    # Estado único e persistente, sem coluna nova: `batches.error_code = 'access_refused'` num lote
+    # `import_mode = 'links'`. Enquanto vale, nem o runner (próximo link) nem a renovação de URL consultam o
+    # Instagram por esse lote. Só os dois caminhos de consulta armam (sob a trava do lote) e só a ação do dono desarma.
+    def links_hold(self, batch_id: int) -> bool:
+        """O lote por link está com a recusa em espera (aguarda a ação do dono). Lote cancelado nunca está: é
+        terminal e nada mais consulta por ele (o `error_code` fica só como registro do motivo)."""
+        return self.db.scalar(
+            "SELECT 1 FROM batches WHERE id = ? AND import_mode = 'links' AND error_code = 'access_refused'"
+            " AND status <> 'cancelled'", (batch_id,)) is not None
+
+    def arm_links_hold(self, batch_id: int, message: str) -> None:
+        """Arma a recusa em espera (quem chama segura a trava de consulta do lote). Só em lote ainda aberto
+        (`listing`/`running`): lote cancelado, falho ou já concluído não é armado (não há mais consulta a
+        segurar, e um lote concluído ficaria com o erro preso)."""
+        self.db.execute(
+            "UPDATE batches SET error_code = 'access_refused', error_message = ?, updated_at = ?"
+            " WHERE id = ? AND import_mode = 'links' AND status IN ('listing', 'running')",
+            (message, utc_now(), batch_id))
+
+    def release_cancelled_links_hold(self, batch_id: int) -> None:
+        """Lote por link cancelado com a recusa em espera: a espera deixa de existir. O `error_code` continua como
+        registro do motivo (como nos outros erros de lote cancelado); a mensagem deixa de apontar botões."""
+        self.db.execute(
+            "UPDATE batches SET error_message = ?, updated_at = ? WHERE id = ? AND import_mode = 'links'"
+            " AND error_code = 'access_refused' AND status = 'cancelled'",
+            (LINKS_HOLD_CANCELLED_MESSAGE, utc_now(), batch_id))
+
+    def _release_finished_links_hold(self, batch_id: int) -> None:
+        """Lote por link que acabou de concluir (todos os jobs terminais) com a recusa em espera: sem job falho
+        que o dono possa repetir nada mais consulta sozinho, então a espera é desarmada e o lote fica com o aviso
+        normal ("X de N links não puderam ser importados." quando há link falho). Com job falho ela permanece
+        ("Tentar falhas novamente" existe e desarma)."""
+        cursor = self.db.execute(
+            "UPDATE batches SET error_code = NULL, error_message = NULL WHERE id = ?"  # só lote por link chega aqui
+            " AND error_code = 'access_refused' AND status = 'completed'"
+            " AND NOT EXISTS (SELECT 1 FROM jobs WHERE batch_id = ? AND status = 'failed')",
+            (batch_id, batch_id))
+        if cursor.rowcount > 0:
+            counts = self.link_counts([batch_id]).get(batch_id, {})
+            if counts.get("failed"):
+                self.db.execute(
+                    "UPDATE batches SET error_message = ? WHERE id = ?",
+                    (LINKS_PARTIAL_MESSAGE.format(failed=counts["failed"], total=counts.get("total", 0)), batch_id))
+
+    def clear_links_hold(self, batch_id: int) -> bool:
+        """Desarma a recusa em espera de um lote que já saiu de `listing` (ação do dono: repetir jobs falhos). Com o
+        lote ainda em `listing` quem desarma é `resume_listing` ("Retomar importação"). True se desarmou."""
+        cursor = self.db.execute(
+            "UPDATE batches SET error_code = NULL, error_message = NULL, updated_at = ?"
+            " WHERE id = ? AND import_mode = 'links' AND error_code = 'access_refused' AND status <> 'listing'",
+            (utc_now(), batch_id))
+        return cursor.rowcount > 0
 
     def link_position(self, batch_id: int, shortcode: str) -> int | None:
         """`position` do link desta publicação no lote (chave do registro de renovação de URL em `listing_pages`)."""
@@ -474,10 +534,15 @@ class BatchRepository:
             f" updated_at = :now, {_FREEZE_SQL}"
             " WHERE id = :id AND status IN ('running', 'cancelled') AND NOT EXISTS ("
             f"   SELECT 1 FROM jobs WHERE batch_id = :id AND status IN {OPEN_JOB_STATUSES_SQL})"
-            " RETURNING status",
+            " RETURNING status, import_mode, error_code",
             {"now": now, "id": batch_id},
         )
-        return row is not None and row["status"] == "completed"  # só `running` vira `completed` aqui
+        done = row is not None and row["status"] == "completed"  # só `running` vira `completed` aqui
+        if done and row["import_mode"] == "links" and row["error_code"] == "access_refused":
+            # Ponto único em que o lote conclui (worker, recovery, fim da listagem). Só lote por link com a recusa em
+            # espera faz a instrução extra: a conclusão dos outros lotes continua com uma instrução só.
+            self._release_finished_links_hold(batch_id)
+        return done
 
     def reopen(self, batch_id: int) -> None:
         """Lote volta a `running` (ex.: retry de jobs) se já estava finalizado com jobs."""

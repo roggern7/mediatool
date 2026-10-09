@@ -5,8 +5,8 @@ Uso: ``.venv\\Scripts\\python.exe backend\\tools\\poc_instagram_post.py --url <l
 A consulta de post (queries.POST_BY_SHORTCODE) NÃO foi verificada no Instagram real: esta POC existe para o dono
 verificá-la, e só deve ser rodada com autorização dele. Tráfego: 1 GET do documento + 1 POST GraphQL, nada mais.
 Usa a sessão salva (LocalInstagramSessionProvider) e o InstagramWebDownloader real, retries 0 e sem re-bootstrap.
-Para no primeiro erro, imprimindo só code/message/stage/detail seguros e os NOMES das chaves da resposta (para
-ajustar doc_id/campo raiz). Conta TODAS as requisições (método, path sem query, status) e confirma 0 requisições ao
+Para no primeiro erro, imprimindo só code/message/stage/detail seguros, o diagnóstico HTTP seguro quando houver
+(status, redirect, content_type, size) e os NOMES das chaves da resposta (para ajustar doc_id/campo raiz). Conta TODAS as requisições (método, path sem query, status) e confirma 0 requisições ao
 CDN. Recusa rodar se o app estiver escutando na porta configurada. Relatório JSON no stdout sem ids, cookies,
 tokens, shortcode ou URLs. O override de doc_id gravado no banco (setting) não é lido; vale o env/.env
 (MEDIA_TOOL_IG_DOC_<NAME>, MEDIA_TOOL_IG_ROOT_<NAME>) ou o valor embutido.
@@ -40,7 +40,7 @@ from app.integrations.instagram.web.errors import InstagramWebError  # noqa: E40
 from app.integrations.instagram.web.graphql import InstagramWebGraphQL  # noqa: E402
 from app.integrations.instagram.web.provider import InstagramWebDownloader  # noqa: E402
 from app.integrations.instagram.web.queries import POST_BY_SHORTCODE, resolve_spec  # noqa: E402
-from app.jobs.errors import safe_message  # noqa: E402
+from app.jobs.errors import safe_diagnostic, safe_message  # noqa: E402
 from app.services.cdn_downloader import ALLOWED_HOST_SUFFIXES, DownloadError, validate_cdn_url  # noqa: E402
 
 INSTAGRAM_HOSTS = ("instagram.com", "www.instagram.com")
@@ -70,6 +70,14 @@ def safe_error(exc: BaseException) -> dict[str, Any]:
         "stage": stage if isinstance(stage, str) and _DETAIL_RE.match(stage) else None,
         "detail": detail if isinstance(detail, str) and _DETAIL_RE.match(detail) else None,
     }
+    # Campos seguros do diagnóstico HTTP (403 ou redirect? de que tipo?), pela MESMA lista de permissão do log
+    # (jobs.errors.safe_diagnostic). O `path` fica de fora: já está em `requests`.
+    for part in safe_diagnostic(exc).split():
+        key, _, value = part.partition("=")
+        if key in ("status", "size") and value.isdigit():
+            error[key] = int(value)
+        elif key in ("redirect", "content_type") and value:
+            error[key] = value
     # Nomes das chaves da resposta que falhou (ex.: `data_keys` mostra o campo raiz que o Instagram devolveu).
     for name in ("top_keys", "data_keys"):
         keys = _keys(diagnostic.get(name))

@@ -58,6 +58,35 @@ RECENT_POST_REFRESH_FAILED_MESSAGE = (
     "A renovação do link desta publicação falhou há pouco; o item não foi tentado de novo para poupar o Instagram."
 )
 NOT_IN_POST_MESSAGE ="A mídia não apareceu mais na publicação ao renovar o link de download."
+# Lote por link: a consulta de renovação devolveu OUTRA publicação (shortcode diferente do pedido).
+POST_MISMATCH_MESSAGE = (
+    "O Instagram respondeu com outra publicação ao renovar o link de download. Nenhum link foi atualizado."
+)
+# Lote por link, recusa em espera (`BatchRepository.links_hold`): depois de um `access_refused` de `resolve_post`
+# (resolução de um link OU renovação de URL) nenhuma consulta do lote é feita até a ação do dono. Os rótulos entre
+# aspas são os botões reais da interface.
+LINKS_REFRESH_REFUSED_CODE = "access_refused"
+# Mensagem do LOTE quando quem recebeu a recusa foi uma renovação: com o lote ainda resolvendo links / já fora disso.
+LINKS_HOLD_LISTING_MESSAGE = (
+    "O Instagram recusou a renovação de um link de download deste lote. Isso não indica sessão inválida. Não haverá "
+    "nova tentativa automática: use \"Retomar importação\" para tentar de novo (uma consulta por vez) ou cancele o "
+    "lote."
+)
+LINKS_HOLD_DONE_MESSAGE = (
+    "O Instagram recusou uma consulta deste lote. Isso não indica sessão inválida. Não haverá nova tentativa "
+    "automática. Se algum item do lote falhar, use \"Tentar falhas novamente\" para tentar de novo (uma consulta "
+    "por vez)."
+)
+# Mensagem do JOB que precisava renovar e não consultou (falha com `access_refused` sem requisição).
+LINKS_REFRESH_BLOCKED_LISTING_MESSAGE = (
+    "O Instagram recusou uma consulta deste lote e o link de download desta mídia precisa ser renovado. Não haverá "
+    "nova tentativa automática: use \"Retomar importação\" no lote; quando a importação dos links terminar, "
+    "\"Tentar falhas novamente\" repete este item."
+)
+LINKS_REFRESH_BLOCKED_MESSAGE = (
+    "O Instagram recusou uma consulta deste lote e o link de download desta mídia precisa ser renovado. Não haverá "
+    "nova tentativa automática: use \"Tentar falhas novamente\" no lote para tentar de novo (uma consulta por vez)."
+)
 # Irmãos de uma renovação que falhou com estes códigos voltam pelo retry controlado (os demais falham na hora).
 RETRYABLE_REFRESH_CODES = frozenset({"network_error", "timeout", "rate_limited", "request_auth_failed"})
 
@@ -80,6 +109,11 @@ class _AwaitPause(Exception):
 class _ReplayedFailure(JobFailure):
     """Irmão de uma renovação recente que falhou: repete o código registrado sem requisição nova. Não aplica pausa
     (só a requisição real que falhou aplica); respeita a vigente."""
+
+
+class _RefreshBlocked(_ReplayedFailure):
+    """Lote por link aguardando a ação do dono depois de um `access_refused`: o job falha sem requisição nenhuma e
+    sem contar no disjuntor do lote (que pausaria e retomaria sozinho)."""
 
 
 def _is_disk_full(exc: BaseException) -> bool:
@@ -121,6 +155,16 @@ def _page_refresh_lock(key: tuple, cancel: threading.Event) -> Iterator[None]:
                 _refresh_locks.pop(key, None)
 
 
+def links_query_lock(ctx: Any, batch_id: int, cancel: threading.Event):
+    """Trava ÚNICA das consultas de publicação (`resolve_post`) de um lote por link: o runner (próximo link) e a
+    renovação de URL a adquirem antes de consultar, conferem a recusa em espera sob ela e, se a consulta for
+    recusada, armam a espera antes de soltá-la. Duas consultas do mesmo lote nunca ficam em voo ao mesmo tempo e a
+    segunda sempre vê a recusa da primeira. Ordem das travas: esta primeiro, depois (dentro de `resolve_post`) o
+    portão do Instagram e a espera do teto de páginas; nada adquire esta trava segurando aquelas. A espera é
+    cancelável (`JobCancelled` quando `cancel` é acionado)."""
+    return _page_refresh_lock((id(ctx), batch_id, "post"), cancel)
+
+
 class JobExecutor:
     def __init__(self, ctx: AppContext, worker: Worker, job: dict[str, Any], cancel: threading.Event):
         self.ctx = ctx
@@ -135,6 +179,8 @@ class JobExecutor:
         self.ref: dict[str, Any] | None = None  # job_remote_refs (URLs/cursor), carregado só no download
         # Pool que reivindicou o job (seção 9, A3): ingest reivindicado como download para em `downloaded`.
         self.phase = "download" if job["status"] == "downloading" else "process"
+        # Lote por link: renovação recusada (`access_refused`) ou bloqueada à espera do dono não conta no disjuntor.
+        self._skip_breaker = False
 
     # ---- ciclo de vida -----------------------------------------------------------------------------------------
     def run(self) -> None:
@@ -288,7 +334,8 @@ class JobExecutor:
             logger.info("Job %s aguarda o fim da pausa do Instagram (%s) sem consumir tentativa", self.job_id,
                         failure.code)
             return
-        self._breaker_failure(failure.code)
+        if not self._skip_breaker:
+            self._breaker_failure(failure.code)
         attempts = int(self.job["attempts"]) + 1
         max_attempts = int(self.job["max_attempts"])
         if failure.retryable and attempts < max_attempts:
@@ -575,19 +622,36 @@ class JobExecutor:
         batch = self.ctx.batches.get(batch_id)
         return batch is not None and batch.get("import_mode") == "links"
 
+    def _batch_listing(self, batch_id: int) -> bool:
+        batch = self.ctx.batches.get(batch_id)
+        return batch is not None and batch["status"] == "listing"
+
     def _download_after_expired_post(self, downloader, used_url: str, temp_dir: Path) -> Path:
         """URL recusada (ou já apagada) num lote por link: pede a publicação de novo (uma vez por publicação) e tenta
-        este download UMA vez de novo."""
+        este download UMA vez de novo.
+
+        `access_refused` (docs/CONTRACTS.md, seção 8.3): com a recusa em espera do lote armada
+        (`BatchRepository.links_hold`; armada por qualquer `access_refused` de `resolve_post`, na resolução de um
+        link ou numa renovação), nenhuma renovação consulta o Instagram até a ação do dono. A trava é a do LOTE
+        (`links_query_lock`), a mesma do runner: a recusa de uma consulta é vista pela seguinte antes de ela sair."""
         job = self.job
         batch_id = job["batch_id"]
         shortcode = job["source_post_id"] or ""
         logger.info("Job %s: link de download expirado; renovação da publicação no lote %s", self.job_id, batch_id)
-        with _page_refresh_lock((id(self.ctx), batch_id, "post", shortcode), self.cancel):
+        with links_query_lock(self.ctx, batch_id, self.cancel):
             self._check_cancel()
             current = self.ctx.jobs.get_remote_ref(self.job_id)
             if current.get("media_url") and current["media_url"] != used_url:
                 logger.info("Job %s: link já renovado por outro job da mesma publicação", self.job_id)
             else:
+                if self.ctx.batches.links_hold(batch_id):
+                    self._skip_breaker = True
+                    logger.warning("Job %s: renovação do link não consultada (lote %s aguarda ação manual depois de "
+                                   "%s)", self.job_id, batch_id, LINKS_REFRESH_REFUSED_CODE)
+                    raise _RefreshBlocked(
+                        LINKS_REFRESH_REFUSED_CODE,
+                        LINKS_REFRESH_BLOCKED_LISTING_MESSAGE if self._batch_listing(batch_id)
+                        else LINKS_REFRESH_BLOCKED_MESSAGE)
                 # Toda tentativa de renovação da publicação fica registrada em `listing_pages`, com a posição do link
                 # no lugar do índice de página (lote por link não tem páginas): mesmas proteções de `_refresh_page`.
                 position = self.ctx.batches.link_position(batch_id, shortcode)
@@ -598,9 +662,11 @@ class JobExecutor:
                 record = self.ctx.jobs.listing_page(batch_id, position) or {}
                 record_at = parse_utc(record.get("last_refresh_at"))
                 recent = record_at is not None and (now - record_at).total_seconds() < REFRESH_MIN_INTERVAL
-                if recent and not record.get("last_refresh_ok") and not instagram_paused(self.worker):
+                if (recent and not record.get("last_refresh_ok") and not instagram_paused(self.worker)
+                        and record.get("last_refresh_code") != LINKS_REFRESH_REFUSED_CODE):
                     # Renovação recente desta publicação falhou: mesmo código, sem nova requisição (os itens irmãos
-                    # do carrossel não repetem a consulta).
+                    # do carrossel não repetem a consulta). `access_refused` não entra aqui: quem segura é a recusa
+                    # em espera do lote (acima); desarmada pelo dono, este job faz a única consulta nova.
                     code = record.get("last_refresh_code") or "content_unavailable"
                     raise _ReplayedFailure(code, RECENT_POST_REFRESH_FAILED_MESSAGE,
                                            retryable=code in RETRYABLE_REFRESH_CODES)
@@ -630,13 +696,30 @@ class JobExecutor:
         job = self.job
         try:
             items = downloader.resolve_post(shortcode, cancel=self.cancel)
+            if any(item.source_post_id != shortcode for item in items):
+                # Resposta de OUTRA publicação (comparação exata): nenhum job recebe URL dela. O provider web já
+                # recusa antes (`post_mismatch`); isto cobre os demais. Conta como renovação falha (abaixo).
+                raise JobFailure("contract_changed", POST_MISMATCH_MESSAGE)
         except BaseException as exc:
+            refused = isinstance(exc, InstagramError) and exc.code == LINKS_REFRESH_REFUSED_CODE
+            if refused:
+                # Recusa: arma a espera do lote AGORA, ainda sob a trava (o runner e as outras renovações a veem
+                # antes de consultar). Vale mesmo com o job cancelado durante a consulta: a recusa aconteceu.
+                self._skip_breaker = True
+                self.ctx.batches.arm_links_hold(
+                    job["batch_id"],
+                    LINKS_HOLD_LISTING_MESSAGE if self._batch_listing(job["batch_id"]) else LINKS_HOLD_DONE_MESSAGE)
+                self.ctx.wake_import_runner()
+                logger.warning("Lote %s: renovação de link recusada (%s); aguardando ação manual, sem nova "
+                               "consulta automática", job["batch_id"], LINKS_REFRESH_REFUSED_CODE)
             if not (is_cancellation(exc) or self.cancel.is_set() or isinstance(exc, InstagramPaused)):
                 # Como em `_refresh_page`: a tentativa fica registrada; 3 falhas seguidas do mesmo código pausam o
-                # lote.
+                # lote (menos a recusa: a pausa do lote retomaria sozinha).
                 code = classify(exc).code
                 streak = self.ctx.jobs.record_refresh(job["batch_id"], position, ok=False, code=code, at=utc_now())
-                if streak >= BREAKER_REFRESH_FAILURES:
+                if refused:
+                    pass
+                elif streak >= BREAKER_REFRESH_FAILURES:
                     self._pause_batch(job["batch_id"], code, f"{BREAKER_REFRESH_FAILURES} renovações seguidas")
             raise
         self.ctx.jobs.record_refresh(job["batch_id"], position, ok=True, code=None, at=utc_now())
