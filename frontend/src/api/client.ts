@@ -6,12 +6,15 @@ import type {
   Health,
   ImportGroupDetail,
   ImportGroupList,
+  BatchLinks,
   ImportGroupRequest,
+  ImportLinksRequest,
   ImportRequest,
   InstagramStatus,
   Job,
   JobsPage,
   JobsQuery,
+  LinksPreview,
   Media,
   MediaQuery,
   Paged,
@@ -191,6 +194,16 @@ export const api = {
       query: { children_limit: opts.childrenLimit, after_position: opts.afterPosition },
     }),
   cancelImportGroup: (id: number) => request<ImportGroupDetail>("POST", `/import-groups/${id}/cancel`),
+
+  /** Pré-validação dos links de publicações: sem efeitos e sem requisição ao Instagram. */
+  previewLinks: (entries: string[], signal?: AbortSignal) =>
+    request<LinksPreview>("POST", "/import-links/preview", { body: { entries }, signal }),
+  /** Importação por link: `links` são as URLs normalizadas do preview. A resposta é o lote criado. */
+  createLinksImport: (req: ImportLinksRequest) =>
+    request<Batch & { duplicates?: number }>("POST", "/import-links", { body: req, timeoutMs: SLOW_TIMEOUT_MS }),
+  /** Links de um lote por link, na ordem em que foram enviados. */
+  listBatchLinks: (id: number, limit = 200, offset = 0) =>
+    request<BatchLinks>("GET", `/batches/${id}/links`, { query: { limit, offset } }),
 
   /** `ungrouped`: só lotes avulsos e antigos (sem filhos de grupo); `groupId`: só os filhos de um grupo. */
   listBatches: (

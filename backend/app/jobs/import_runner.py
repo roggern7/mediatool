@@ -86,6 +86,41 @@ LISTING_STALLED_MESSAGE = (
 )
 
 
+# Importação por link: erros que são DO LINK (o link fica `failed` e o lote segue para o próximo). Qualquer outro
+# erro é do lote/ambiente: o link continua pendente e nenhum outro é pedido no trecho.
+LINK_ERROR_CODES = frozenset({
+    "content_unavailable", "profile_private", "profile_not_found", "unsupported_media", "invalid_input",
+})
+LINKS_INTERNAL_ERROR = "Erro inesperado ao consultar um link. Consulte o log do aplicativo."
+LINK_EMPTY_MESSAGE = "A publicação não trouxe nenhuma mídia que possa ser baixada."
+LINKS_ALL_FAILED = "Nenhum dos {total} links pôde ser importado."
+LINKS_ALL_FAILED_ONE = "O link não pôde ser importado."
+LINKS_PARTIAL = "{failed} de {total} links não puderam ser importados."
+# Erro do lote/ambiente que NUNCA marca o link como falho (sessão, pausa do Instagram, rede): o link segue pendente.
+_LINK_KEEP_PENDING_CODES = frozenset({
+    "session_missing", "session_invalid", "session_expired", "checkpoint_required", "rate_limited", "action_blocked",
+    "request_auth_failed", "network_error", "timeout",
+})
+# O MESMO link levou o lote a `needs_attention` este número de vezes: o link vira `failed` e o lote segue.
+LINK_ATTENTION_LIMIT = 2
+# Disjuntor: links SEGUIDOS falhos (nenhum resolvido entre eles) com links ainda pendentes -> `needs_attention`.
+LINK_FAIL_BREAKER = 3
+LINKS_FAILING_MESSAGE = (
+    "3 links seguidos não puderam ser importados. Confira os links; se eles abrem no navegador, o Media Tool pode "
+    "precisar de atualização. Retomar continua pelos próximos links."
+)
+
+
+def _is_link_error(exc: InstagramError) -> bool:
+    """Erro DO LINK: os códigos de `LINK_ERROR_CODES` e a publicação com formato desconhecido (o provider levanta
+    `contract_changed` com detail `post_shape_unknown` para UMA publicação específica)."""
+    if exc.code in LINK_ERROR_CODES:
+        return True
+    diagnostic = getattr(exc, "diagnostic", None)
+    return (exc.code == "contract_changed" and isinstance(diagnostic, dict)
+            and diagnostic.get("detail") == "post_shape_unknown")
+
+
 class _Chunk:
     """Estado de um trecho de listagem (só em memória)."""
 
@@ -100,6 +135,7 @@ class _Chunk:
         self.from_cursor = False  # o trecho começou de um cursor salvo
         self.retryable = False  # o erro do trecho é retryable
         self.anomaly = False  # o erro do trecho é um fim anômalo da paginação (não é fim do perfil)
+        self.link_position: int | None = None  # lote por link: link que estava sendo pedido quando o trecho parou
 
     @property
     def progressed(self) -> bool:
@@ -325,6 +361,9 @@ class ImportRunner:
         )
 
     def _run_listing(self, batch: dict[str, Any]) -> None:
+        if batch.get("import_mode") == "links":
+            self._run_links(batch)
+            return
         batch_id = batch["id"]
         cancel = threading.Event()
         with self._lock:
@@ -520,6 +559,9 @@ class ImportRunner:
             logger.info("Lote %s: listagem interrompida pelo encerramento; será retomada do checkpoint", batch_id)
             return
         self.ctx.wake_worker()
+        if current.get("import_mode") == "links":
+            self._after_links_chunk(current, chunk, error)
+            return
         if error is not None and error[0] == "unsupported_media" and current["listing_next_page"] is not None:
             # Páginas só com publicações de tipo não suportado no meio do lote: os itens foram pulados (contados pelo
             # provider) e os checkpoints gravados; a listagem segue pelas regras normais de fim, sem erro.
@@ -583,7 +625,9 @@ class ImportRunner:
         # foi listado e espera ação (internal_error, session_*, profile_not_found, access_refused, contract_changed,
         # content_unavailable...). Antes da primeira página (ou depois da última) não há o que retomar e o lote
         # termina como antes.
-        mid_batch = batch["listing_next_page"] is not None and bool(batch["listing_has_next"])
+        # Lote por link: erro do lote/ambiente nunca o conclui (os links pendentes são o ponto de retomada).
+        mid_batch = (batch["listing_next_page"] is not None and bool(batch["listing_has_next"])
+                     or batch.get("import_mode") == "links")
         # Fim anômalo ainda na 1a página (sem checkpoint) mas com itens já listados: também não conclui; a nova
         # tentativa pede a página 1 de novo e o índice único descarta os repetidos. Sem item nenhum, o lote falha
         # com o erro visível (abaixo), nunca como "perfil vazio concluído".
@@ -635,6 +679,165 @@ class ImportRunner:
         batches.refresh_status(batch_id)
         logger.info("Lote %s: listagem concluída com %s itens", batch_id, found)
         self.ctx.wake_worker()
+
+    # ---- importação por link (migration 0014) ------------------------------------------------------------------
+    def _run_links(self, batch: dict[str, Any]) -> None:
+        """Um trecho do lote por link: resolve os links pendentes em ordem, um por vez, até acabar ou até um motivo
+        de parada (pausa, backpressure, erro do lote/ambiente, cancelamento, encerramento)."""
+        batch_id = batch["id"]
+        cancel = threading.Event()
+        with self._lock:
+            self._current = (batch_id, cancel)
+            self._current_thread = threading.get_ident()
+        logger.info("Lote %s: resolvendo links (%s)", batch_id,
+                    "início" if batch["listing_state"] in (None, "pending") else "retomada")
+        if not self.ctx.batches.start_listing(batch_id, clear_error=batch["listing_state"] == "paused"):
+            with self._lock:
+                self._current = None
+                self._current_thread = None
+            logger.info("Lote %s: cancelado ou encerrado antes do início do trecho; nenhum link foi pedido", batch_id)
+            return
+        chunk = _Chunk()
+        error: tuple[str, str] | None = None
+        try:
+            self._consume_links(batch, chunk, cancel)
+        except InstagramPaused:
+            # O portão recusou a requisição (pausa publicada entre links): nada foi enviado; o link segue pendente.
+            chunk.stop = "paused"
+        except InstagramError as exc:
+            if not cancel.is_set():
+                error = (exc.code, safe_message(exc.message))
+                chunk.retryable = bool(exc.retryable)
+        except Exception:  # noqa: BLE001
+            if not cancel.is_set():
+                logger.exception("Lote %s: erro inesperado ao resolver um link", batch_id)
+                error = ("internal_error", LINKS_INTERNAL_ERROR)
+        finally:
+            with self._lock:
+                self._current = None
+                self._current_thread = None
+        self._after_chunk(batch, chunk, error, 0, None)
+
+    def _consume_links(self, batch: dict[str, Any], chunk: _Chunk, cancel: threading.Event) -> None:
+        """Resolve os links pendentes do lote. Erro DO LINK marca só aquele link como falho e segue; qualquer outro
+        erro sobe (o link continua pendente e nenhum outro é pedido neste trecho)."""
+        batch_id = batch["id"]
+        batches = self.ctx.batches
+        downloader = self.ctx.downloader_factory()
+        while True:
+            if cancel.is_set() or self._is_cancelled(batch_id):
+                return
+            link = batches.next_pending_link(batch_id)
+            if link is None:
+                return
+            # Seção 8: nenhuma requisição durante pausa. Backpressure: mesmos tetos da listagem de perfil.
+            if instagram_paused(self.ctx.worker):
+                chunk.stop = "paused"
+                return
+            if (self.ctx.jobs.pending_ingest_count(batch_id) + PAGE_ESTIMATE > MAX_PENDING_INGEST
+                    or batches.pending_ingest_global() + PAGE_ESTIMATE > MAX_PENDING_INGEST_GLOBAL
+                    or self._process_backlog_full(batch)):
+                chunk.stop = "backpressure"
+                return
+            chunk.link_position = link["position"]  # se o trecho parar por erro, foi neste link
+            failure: tuple[str, str] | None = None
+            items: list[RemoteMedia] = []
+            try:
+                items = downloader.resolve_post(link["shortcode"], cancel=cancel)
+            except InstagramError as exc:
+                if cancel.is_set() or not _is_link_error(exc):
+                    raise
+                failure = (exc.code, safe_message(exc.message))
+            if cancel.is_set():
+                return  # cancelado ou app encerrando durante a requisição: o link continua pendente
+            # A requisição do link terminou: erro local depois daqui (ex.: ao gravar os jobs) não é erro do link.
+            chunk.link_position = None
+            if failure is None and not items:
+                failure = ("content_unavailable", LINK_EMPTY_MESSAGE)
+            if failure is not None:
+                if self._fail_link(batch, link["position"], *failure):
+                    chunk.stop = "links_failing"
+                    return
+                continue
+            created = 0
+            with self.ctx.db.transaction():
+                if self._is_cancelled(batch_id):
+                    return
+                # Jobs de todas as mídias (ordem do carrossel) e o link resolvido na MESMA transação: se o app cair
+                # antes, o link é pedido de novo e o índice único dos jobs descarta os repetidos.
+                for item in items:
+                    if self._add_item(batch, item):
+                        created += 1
+                batches.resolve_link(batch_id, link["position"], items_found=len(items),
+                                     profile=items[0].source_profile or None)
+                if batch["listing_retry_level"] or batch["listing_attention_tries"] or batch["link_fail_streak"]:
+                    # Link resolvido: o backoff, as tentativas automáticas de needs_attention e a sequência de
+                    # links falhos recomeçam.
+                    batches.update_listing(batch_id, listing_retry_level=0, listing_attention_tries=0,
+                                           link_fail_streak=0)
+                    batch["listing_retry_level"] = batch["listing_attention_tries"] = batch["link_fail_streak"] = 0
+                batches.sync_found(batch_id)
+            chunk.created += created
+            chunk.pages_ok += 1
+            if self.ctx.worker is not None:
+                self.ctx.worker.note_auth_success()  # publicação entregue: resposta autenticada com sucesso
+            if created:
+                self.ctx.wake_worker()
+
+    def _fail_link(self, batch: dict[str, Any], position: int, code: str, message: str) -> bool:
+        """Marca o link como falho e conta a sequência de links falhos. True se o disjuntor disparou: é a
+        `LINK_FAIL_BREAKER`-ésima falha seguida e ainda há link pendente (sem pendentes o lote conclui normal)."""
+        batches = self.ctx.batches
+        batches.fail_link(batch["id"], position, code=code, message=message)
+        streak = int(batch.get("link_fail_streak") or 0) + 1
+        tripped = streak >= LINK_FAIL_BREAKER and batches.next_pending_link(batch["id"]) is not None
+        batch["link_fail_streak"] = 0 if tripped else streak   # disparou: a retomada começa do zero
+        batches.update_listing(batch["id"], link_fail_streak=batch["link_fail_streak"])
+        return tripped
+
+    def _after_links_chunk(self, batch: dict[str, Any], chunk: _Chunk, error: tuple[str, str] | None) -> None:
+        """Fim de um trecho do lote por link (já conferidos cancelamento e encerramento do app)."""
+        batch_id = batch["id"]
+        if error is not None:
+            code, message = error
+            position = chunk.link_position
+            stuck = (position is not None and not chunk.retryable and code not in _LINK_KEEP_PENDING_CODES
+                     and self.ctx.batches.bump_link_attention(batch_id, position) >= LINK_ATTENTION_LIMIT)
+            if not stuck:
+                # Pausa do Instagram -> `paused`; rede/retryable -> backoff; o resto -> `needs_attention`.
+                self._handle_listing_error(batch, error, chunk)
+                return
+            # O MESMO link levou o lote a `needs_attention` de novo: ele fica `failed` com esse erro e o lote segue
+            # (um link que sempre falha não trava os seguintes).
+            logger.warning("Lote %s: link %s marcado como falho depois de repetir o erro %s", batch_id, position, code)
+            if self._fail_link(batch, position, code, message):
+                chunk.stop = "links_failing"
+            else:
+                self.ctx.batches.update_listing(batch_id, error_code=None, error_message=None)
+        if chunk.stop == "links_failing":
+            # Disjuntor: needs_attention (nova tentativa automática de 6 h, máx. 4; "Retomar" segue pelos pendentes).
+            self._handle_listing_error(batch, ("links_failing", LINKS_FAILING_MESSAGE), chunk)
+            return
+        if chunk.stop == "backpressure":
+            self.ctx.batches.update_listing(batch_id, listing_state="waiting_backpressure")
+            logger.info("Lote %s: links aguardando downloads (backpressure)", batch_id)
+            return
+        if chunk.stop == "paused":
+            self.ctx.batches.update_listing(batch_id, listing_state="paused")
+            logger.info("Lote %s: links pausados (Instagram pausado); os pendentes serão retomados", batch_id)
+            return
+        counts = self.ctx.batches.link_counts([batch_id]).get(batch_id, {})
+        if counts.get("pending"):
+            self.ctx.batches.update_listing(batch_id, listing_state="pending")  # novo trecho dos links pendentes
+            return
+        total, failed = counts.get("total", 0), counts.get("failed", 0)
+        if self.ctx.jobs.count_for_batch(batch_id) == 0:
+            # Nenhum job criado: todos os links falharam; o lote falha com erro visível.
+            message = LINKS_ALL_FAILED_ONE if total == 1 else LINKS_ALL_FAILED.format(total=total)
+            self._finish_listing(batch_id, ("links_failed", message), None)
+            return
+        message = LINKS_PARTIAL.format(failed=failed, total=total) if failed else None
+        self._finish_listing(batch_id, None, message)
 
     def _is_cancelled(self, batch_id: int) -> bool:
         current = self.ctx.batches.get(batch_id)

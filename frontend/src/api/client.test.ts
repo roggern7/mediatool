@@ -137,6 +137,52 @@ describe("cliente: keyset, resumo do lote e processar por filtro", () => {
     expect(cancel.body).toBeUndefined();
   });
 
+  it("importação por link: preview, criação e links do lote", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ items: [], total: 0 })));
+    await api.previewLinks(["https://www.instagram.com/p/AAA/?igsh=1", "x"]);
+    await api.createLinksImport({ links: ["https://www.instagram.com/p/AAA/"], preset_id: null, process: false });
+    await api.listBatchLinks(9);
+    await api.listBatchLinks(9, 200, 400);
+    const calls = fetchMock.mock.calls as [string, RequestInit][];
+    expect(calls.map((c) => c[0])).toEqual([
+      "/api/import-links/preview",
+      "/api/import-links",
+      "/api/batches/9/links?limit=200&offset=0",
+      "/api/batches/9/links?limit=200&offset=400",
+    ]);
+    expect(calls[0]?.[1].method).toBe("POST");
+    expect((calls[0]?.[1].headers as Record<string, string>)["X-Media-Tool-Client"]).toBe("panel");
+    expect(JSON.parse(String(calls[0]?.[1].body))).toEqual({
+      entries: ["https://www.instagram.com/p/AAA/?igsh=1", "x"],
+    });
+    expect(calls[1]?.[1].method).toBe("POST");
+    expect(JSON.parse(String(calls[1]?.[1].body))).toEqual({
+      links: ["https://www.instagram.com/p/AAA/"],
+      preset_id: null,
+      process: false,
+    });
+    expect(calls[2]?.[1].method).toBe("GET");
+  });
+
+  it("invalid_links chega com a mensagem em pt-BR e o corpo em ApiError.payload", async () => {
+    const body = {
+      detail: "invalid",
+      code: "invalid_links",
+      invalid: [{ entry: "x", reason: "Link inválido." }],
+      valid: [],
+      duplicates: 0,
+    };
+    fetchMock.mockResolvedValue(jsonResponse(body, 422));
+    const err = await api.createLinksImport({ links: ["x"], preset_id: null, process: false }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("invalid_links");
+    expect((err as ApiError).message).toContain("links inválidos");
+    expect((err as ApiError).payload).toEqual(body);
+  });
+
   it("listBatches: ungrouped e group_id só quando pedidos", async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ items: [], total: 0 })));
     await api.listBatches(8, 0, "instagram_import");

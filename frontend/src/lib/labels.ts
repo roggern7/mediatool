@@ -1,4 +1,5 @@
 import type { BatchStatus, ContentType, JobStage, JobStatus } from "../api/types";
+import { formatCount } from "./format";
 
 export const JOB_STATUS_LABEL: Record<JobStatus, string> = {
   pending: "Pendente",
@@ -83,6 +84,19 @@ interface BatchLike {
   found?: number;
   group_id?: number | null;
   group_state?: string | null;
+  import_mode?: string | null;
+  links?: { total: number } | null;
+}
+
+/** Lote de importação por link (sem perfil de origem; quantidade e tipo de mídia não se aplicam). */
+export function isLinksBatch(b: { import_mode?: string | null }): boolean {
+  return b.import_mode === "links";
+}
+
+/** Origem do lote nas listas: "@perfil" ou, no lote por link, "Links (3)" ("Importação por link" sem a contagem). */
+export function batchOriginLabel(b: Pick<BatchLike, "source_profile" | "import_mode" | "links">): string {
+  if (!isLinksBatch(b)) return `@${b.source_profile ?? "?"}`;
+  return b.links ? `Links (${formatCount(b.links.total)})` : "Importação por link";
 }
 
 export const QUEUED_LABEL = "Aguardando na fila";
@@ -115,6 +129,8 @@ export function batchLabel(b: BatchLike): string {
   if (isQueuedInGroup(b)) return QUEUED_LABEL;
   // Espera pelo teto de páginas por hora: o lote continua ativo (mesmo tom da coleta, não é erro nem pausa).
   if (ACTIVE_BATCH.has(b.status) && b.listing_state === "waiting_rate_limit") return RATE_LIMIT_WAIT_LABEL;
+  // Lote por link em "listing" está resolvendo os links, um por vez.
+  if (b.status === "listing" && isLinksBatch(b)) return "Resolvendo links";
   return BATCH_STATUS_LABEL[b.status];
 }
 
@@ -128,6 +144,7 @@ export function batchToneOf(b: BatchLike): Tone {
 export function batchTitle(b: BatchLike): string {
   const active = ACTIVE_BATCH.has(b.status);
   if (b.source !== "instagram_import") return active ? "Processando lote" : "Processamento em lote";
+  if (isLinksBatch(b)) return active ? "Importando por link" : "Importação por link";
   const who = `@${b.source_profile ?? "?"}`;
   return active ? `Importando ${who}` : `Importação de ${who}`;
 }

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from app.core.errors import AppError, not_found
 from app.db.connection import utc_now
 from app.integrations.instagram.composite import web_only
-from app.integrations.instagram.validation import parse_profile_input
+from app.integrations.instagram.validation import parse_post_link, parse_profile_input
 from app.services.context import AppContext
 from app.services.instagram_pause import ensure_not_paused
 from app.services.settings_service import instagram_provider
@@ -201,6 +201,83 @@ def create_import_group(
     return group_id, skipped, duplicates
 
 
+# Importação por link (docs/CONTRACTS.md, seção 8.3). Teto de sanidade de links por lote (cada link é uma requisição
+# ao Instagram) e separadores de uma lista colada: UM LINK POR LINHA; vírgula, ponto e vírgula e espaço em branco
+# também separam (link não tem espaço).
+MAX_BATCH_LINKS = 500
+_LINK_SPLIT_RE = re.compile(r"[\s,;]+")
+
+
+def parse_link_entries(entries: list[str]) -> tuple[list[dict[str, str]], list[dict[str, str]], int]:
+    """Lista de links de publicações -> (válidos `{shortcode, url}` na ordem e sem repetição; inválidos
+    `{entry, reason}`; quantas repetições foram removidas). Sem efeitos e sem nenhuma requisição ao Instagram. O
+    shortcode identifica a publicação: `/p/X` e `/reel/X` são o mesmo link (fica o primeiro)."""
+    valid: list[dict[str, str]] = []
+    invalid: list[dict[str, str]] = []
+    seen: set[str] = set()
+    seen_invalid: set[str] = set()
+    duplicates = 0
+    count = 0
+    for raw in entries:
+        for token in _LINK_SPLIT_RE.split(raw):
+            if not token:
+                continue
+            count += 1
+            if count > MAX_BATCH_LINKS:
+                raise AppError(422, "too_many_links",
+                               f"A lista tem mais de {MAX_BATCH_LINKS} links; divida em mais de uma importação.")
+            try:
+                shortcode, url = parse_post_link(token)
+            except ValueError as exc:
+                if token in seen_invalid:
+                    duplicates += 1
+                else:
+                    seen_invalid.add(token)
+                    invalid.append({"entry": token[:_MAX_ENTRY_ECHO], "reason": str(exc)})
+                continue
+            if shortcode in seen:
+                duplicates += 1
+            else:
+                seen.add(shortcode)
+                valid.append({"shortcode": shortcode, "url": url})
+    return valid, invalid, duplicates
+
+
+def create_import_links(
+    ctx: AppContext, *, links: list[str], preset_id: int | None, process: bool,
+) -> tuple[int, int]:
+    """Um lote de importação por link (`import_mode = 'links'`) com todos os links da lista, na ordem colada.
+    Retorna (id do lote, repetições removidas). Nenhuma requisição ao Instagram aqui: o import runner resolve um
+    link por vez."""
+    valid, invalid, duplicates = parse_link_entries(links)
+    if invalid:
+        raise AppError(422, "invalid_links",
+                       f"{len(invalid)} entrada(s) da lista não são links de publicação válidos; corrija ou remova "
+                       "antes de iniciar.",
+                       extra={"invalid": invalid, "valid": valid, "duplicates": duplicates})
+    if not valid:
+        raise AppError(422, "no_links", "Informe ao menos um link.")
+    if not ctx.session_provider.status().configured:
+        raise AppError(409, "session_missing", SESSION_MISSING_MESSAGE)
+    ensure_not_paused(ctx)
+    preset = resolve_preset(ctx, preset_id) if (process or preset_id is not None) else None
+    with ctx.db.transaction():
+        batch_id = ctx.batches.create(
+            source="instagram_import",
+            status="listing",
+            content_type="all",
+            preset_id=preset["id"] if preset else None,
+            preset_name=preset["name"] if preset else None,
+            params=preset["params"] if (preset and process) else None,
+            process=process,
+            import_mode="links",
+        )
+        ctx.batches.add_links(batch_id, [(link["shortcode"], link["url"]) for link in valid])
+    logger.info("Lote %s criado: importação por link (%s links)", batch_id, len(valid))
+    ctx.wake_import_runner()
+    return batch_id, duplicates
+
+
 def cancel_group(ctx: AppContext, group_id: int) -> None:
     """Cancela todos os filhos ainda abertos do grupo (os encerrados ficam como estão). A parte de banco é UMA
     transação: todos os filhos abertos (a fila inteira) ficam cancelados de uma vez, então nenhum filho da fila
@@ -286,6 +363,11 @@ def restart_listing(ctx: AppContext, batch_id: int, *, confirm: bool) -> None:
     batch = ctx.batches.get(batch_id)
     if batch is None:
         raise not_found("Lote", "batch_not_found")
+    if batch.get("import_mode") == "links":
+        # Lote por link não tem "página 1": os links pendentes continuam de onde pararam (resume-listing).
+        raise AppError(409, "listing_not_resumable",
+                       "Importação por link não recomeça do início: use \"Retomar\" para continuar dos links que "
+                       "ainda faltam.")
     if not confirm:
         raise AppError(409, "restart_confirmation_required",
                        RESTART_LISTING_WARNING.format(pages=int(batch["listing_pages"] or 0)))

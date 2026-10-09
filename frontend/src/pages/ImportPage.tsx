@@ -11,7 +11,9 @@ import {
   batchLabel,
   batchTitle,
   batchToneOf,
+  batchOriginLabel,
   isDownloadOnly,
+  isLinksBatch,
   isQueuedInGroup,
 } from "../lib/labels";
 import {
@@ -50,7 +52,9 @@ import { describeSessionTest } from "../lib/sessionTest";
 import { isPaused, useNow } from "../lib/pause";
 import { PauseBanner } from "../components/PauseBanner";
 import { BatchNotice } from "../components/BatchNotice";
+import { BatchLinksPanel } from "../components/BatchLinksPanel";
 import { ImportGroupPanel } from "../components/ImportGroupPanel";
+import { ImportLinksForm } from "../components/ImportLinksForm";
 import { ImportExportBar } from "../components/ExportPanel";
 import { batchExportOffer, libraryPathForProfile } from "../lib/exportFolder";
 import { listingDropped, listingDroppedSuffix, needsAttention } from "../lib/batchState";
@@ -69,6 +73,12 @@ const RECENT_ROWS = 8;
 
 type Recent = RecentEntry<ImportGroup, Batch>;
 type Selection = { kind: "batch" | "group"; id: number };
+type ImportMode = "profile" | "links";
+
+const IMPORT_MODES: { id: ImportMode; label: string }[] = [
+  { id: "profile", label: "Por perfil" },
+  { id: "links", label: "Por link" },
+];
 
 function defaultPresetId(presets: Preset[] | undefined, configured: number | null | undefined): number | null {
   if (!presets || presets.length === 0) return null;
@@ -92,6 +102,9 @@ export function ImportPage() {
   const settings = useQuery("settings", () => api.getSettings());
   const presets = useQuery("presets", () => api.listPresets());
 
+  // Só estado da tela: toda visita começa em "Por perfil"; os dois rascunhos ficam ao trocar de modo.
+  const [mode, setMode] = useState<ImportMode>("profile");
+  const [linksText, setLinksText] = useState("");
   const [profileText, setProfileText] = useState("");
   const [content, setContent] = useState<ContentType>("all");
   const [limitMode, setLimitMode] = useState<LimitMode>("last");
@@ -199,6 +212,14 @@ export function ImportPage() {
     if (!shownLive) setAuto(null);
   }
 
+  function revealCreated() {
+    recent.reload();
+    window.requestAnimationFrame(() => {
+      panelRef.current?.focus({ preventScroll: true });
+      panelRef.current?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
   async function submit() {
     const plan = planFromPreview(preview, {
       content,
@@ -227,11 +248,7 @@ export function ImportPage() {
       }
       // Lista enviada: o campo é limpo (tipo, quantidade e processamento ficam) e o painel criado recebe o foco.
       setProfileText("");
-      recent.reload();
-      window.requestAnimationFrame(() => {
-        panelRef.current?.focus({ preventScroll: true });
-        panelRef.current?.scrollIntoView({ block: "nearest" });
-      });
+      revealCreated();
     } catch (err) {
       const failure = interpretStartError(err instanceof ApiError ? err : null);
       if (failure.notice) setStartNotice({ groupId: null, text: failure.notice });
@@ -262,6 +279,48 @@ export function ImportPage() {
   }
 
   const lookupShown = lookup && lookup.username === singleProfile ? lookup.info : null;
+
+  // Vale para os dois modos (por perfil e por link).
+  const processingBlock = (
+    <div style={{ marginTop: 16 }}>
+      <div className="field-label" style={{ marginBottom: 6 }}>
+        Processamento
+      </div>
+      <Switch checked={processAfter} onChange={setProcessAfter} label="Processar após baixar (opcional)" />
+      {processAfter ? (
+        <div style={{ marginTop: 10, maxWidth: 280 }}>
+          <Field
+            label="Preset do processamento"
+            htmlFor="imp-preset"
+            error={
+              presets.error ??
+              (presets.data && presets.data.length === 0 ? "Nenhum preset disponível." : null)
+            }
+          >
+            <select
+              id="imp-preset"
+              className="select"
+              value={presetId ?? ""}
+              disabled={!presets.data || presets.data.length === 0}
+              onChange={(e) => setPresetChoice(Number(e.target.value))}
+            >
+              {presets.data === undefined ? <option value="">Carregando</option> : null}
+              {presets.data?.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+      ) : null}
+      <div className="muted small" style={{ marginTop: 8 }}>
+        {processAfter
+          ? "Os originais são baixados e, em seguida, processados com o preset escolhido. Os originais ficam guardados."
+          : "Somente os arquivos originais serão baixados, sem nenhum processamento. Se quiser, processe depois pela Biblioteca."}
+      </div>
+    </div>
+  );
 
   return (
     <div className="page">
@@ -302,238 +361,239 @@ export function ImportPage() {
 
       {igStatus && paused ? <PauseBanner status={igStatus} now={now} onReleased={settings.reload} /> : null}
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (canSubmit) void submit();
-        }}
-      >
-        <div className="import-form">
-          <div className="span-all">
-            <Field
-              label="Perfis"
-              htmlFor="imp-profiles"
-              hint="Um perfil por linha: usuario, @usuario ou a URL do perfil. Linhas vazias e repetidas são ignoradas."
-            >
-              <textarea
-                id="imp-profiles"
-                className="input textarea mono"
-                rows={5}
-                value={profileText}
-                onChange={(e) => setProfileText(e.target.value)}
-                placeholder={"usuario\n@usuario\nhttps://www.instagram.com/usuario/"}
-                autoComplete="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                aria-describedby="imp-profiles-status"
-              />
-            </Field>
-          </div>
-          <Field label="Tipo de mídia" htmlFor="imp-content">
-            <select
-              id="imp-content"
-              className="select"
-              value={content}
-              onChange={(e) => setContent(e.target.value as ContentType)}
-            >
-              {CONTENT_CHOICES.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field
-            label="Quantidade por perfil"
-            htmlFor="imp-limit-mode"
-            error={limitChoice.ok ? null : limitChoice.error}
+      <div className="tabs" role="tablist" aria-label="Modo de importação">
+        {IMPORT_MODES.map((m) => (
+          <button
+            key={m.id}
+            type="button"
+            role="tab"
+            id={`imp-mode-${m.id}`}
+            aria-selected={mode === m.id}
+            aria-controls="imp-mode-panel"
+            className={`tab${mode === m.id ? " on" : ""}`}
+            onClick={() => setMode(m.id)}
           >
-            <div className="row" style={{ flexWrap: "wrap" }}>
-              <select
-                id="imp-limit-mode"
-                className="select"
-                value={limitMode}
-                onChange={(e) => setLimitMode(e.target.value as LimitMode)}
-              >
-                <option value="last">Últimos N</option>
-                <option value="all">Todos</option>
-              </select>
-              {limitMode === "last" ? (
-                <>
-                  <input
-                    id="imp-limit"
-                    className={`input${limitChoice.ok ? "" : " invalid"}`}
-                    style={{ width: 96 }}
-                    inputMode="numeric"
-                    aria-label="Quantidade de mídias por perfil"
-                    aria-invalid={!limitChoice.ok}
-                    value={limitText}
-                    onChange={(e) => setLimitText(e.target.value)}
-                    autoComplete="off"
-                  />
-                  <div className="seg" role="group" aria-label="Atalhos de quantidade">
-                    {LIMIT_SHORTCUTS.map((n) => (
-                      <button
-                        key={n}
-                        type="button"
-                        className={limitChoice.ok && limitChoice.limit === n ? "on" : ""}
-                        aria-pressed={limitChoice.ok && limitChoice.limit === n}
-                        onClick={() => setLimitText(String(n))}
-                      >
-                        {formatCount(n)}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : null}
-            </div>
-          </Field>
-        </div>
+            {m.label}
+          </button>
+        ))}
+      </div>
 
-        <div style={{ marginTop: 16 }}>
-          <div className="field-label" style={{ marginBottom: 6 }}>
-            Processamento
-          </div>
-          <Switch checked={processAfter} onChange={setProcessAfter} label="Processar após baixar (opcional)" />
-          {processAfter ? (
-            <div style={{ marginTop: 10, maxWidth: 280 }}>
-              <Field
-                label="Preset do processamento"
-                htmlFor="imp-preset"
-                error={
-                  presets.error ??
-                  (presets.data && presets.data.length === 0 ? "Nenhum preset disponível." : null)
-                }
-              >
-                <select
-                  id="imp-preset"
-                  className="select"
-                  value={presetId ?? ""}
-                  disabled={!presets.data || presets.data.length === 0}
-                  onChange={(e) => setPresetChoice(Number(e.target.value))}
+      <div id="imp-mode-panel" role="tabpanel" aria-labelledby={`imp-mode-${mode}`}>
+        {mode === "profile" ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (canSubmit) void submit();
+            }}
+          >
+            <div className="import-form">
+              <div className="span-all">
+                <Field
+                  label="Perfis"
+                  htmlFor="imp-profiles"
+                  hint="Um perfil por linha: usuario, @usuario ou a URL do perfil. Linhas vazias e repetidas são ignoradas."
                 >
-                  {presets.data === undefined ? <option value="">Carregando</option> : null}
-                  {presets.data?.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
+                  <textarea
+                    id="imp-profiles"
+                    className="input textarea mono"
+                    rows={5}
+                    value={profileText}
+                    onChange={(e) => setProfileText(e.target.value)}
+                    placeholder={"usuario\n@usuario\nhttps://www.instagram.com/usuario/"}
+                    autoComplete="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    aria-describedby="imp-profiles-status"
+                  />
+                </Field>
+              </div>
+              <Field label="Tipo de mídia" htmlFor="imp-content">
+                <select
+                  id="imp-content"
+                  className="select"
+                  value={content}
+                  onChange={(e) => setContent(e.target.value as ContentType)}
+                >
+                  {CONTENT_CHOICES.map((c) => (
+                    <option key={c.value} value={c.value}>
+                      {c.label}
                     </option>
                   ))}
                 </select>
               </Field>
-            </div>
-          ) : null}
-          <div className="muted small" style={{ marginTop: 8 }}>
-            {processAfter
-              ? "Os originais são baixados e, em seguida, processados com o preset escolhido. Os originais ficam guardados."
-              : "Somente os arquivos originais serão baixados, sem nenhum processamento. Se quiser, processe depois pela Biblioteca."}
-          </div>
-        </div>
-
-        <div id="imp-profiles-status" style={{ marginTop: 16 }}>
-          {!hasText ? null : preview ? (
-            <div className="small" role="status">
-              {entriesSummary({
-                valid: preview.valid.length,
-                duplicates: preview.duplicates,
-                invalid: preview.invalid.length,
-              })}
-            </div>
-          ) : previewError ? (
-            // Sem conferência não há contagem válida para mostrar.
-            <ErrorLine message={previewError} onRetry={previewQuery.reload} />
-          ) : !checking ? (
-            <div className="muted small" role="status">
-              Nenhum perfil na lista.
-            </div>
-          ) : (
-            <div className="muted small" role="status">
-              Conferindo a lista. Estimativa provisória: cerca de {profilesCountText(draft.estimate)}; o número final
-              aparece quando a conferência terminar.
-            </div>
-          )}
-          {preview && preview.invalid.length > 0 ? (
-            <div className="alert warn" role="alert" style={{ marginTop: 8, flexDirection: "column" }}>
-              <strong id="imp-invalid-title">
-                {invalidCountText(preview.invalid.length)}:{" "}
-                {preview.valid.length > 0
-                  ? "ficam de fora; a importação começa só com os perfis válidos."
-                  : "nenhum perfil válido na lista."}
-              </strong>
-              <ul className="invalid-list" aria-labelledby="imp-invalid-title">
-                {preview.invalid.slice(0, INVALID_SHOWN_MAX).map((item, i) => (
-                  <li key={`${i}:${item.entry}`}>
-                    <span className="mono">{item.entry}</span>: {item.reason}
-                  </li>
-                ))}
-                {preview.invalid.length > INVALID_SHOWN_MAX ? (
-                  <li>e mais {formatCount(preview.invalid.length - INVALID_SHOWN_MAX)}</li>
-                ) : null}
-              </ul>
-            </div>
-          ) : null}
-          {summary?.kind === "problem" ? (
-            <div className="field-error" role="alert" style={{ marginTop: 8 }}>
-              {summary.text}
-            </div>
-          ) : null}
-          {summary?.kind === "summary" ? (
-            <>
-              <div style={{ marginTop: 8 }}>
-                <strong>{summary.text}</strong>
-              </div>
-              {summary.hints.map((hint) => (
-                <div key={hint} className="muted small" style={{ marginTop: 4 }}>
-                  {hint}
+              <Field
+                label="Quantidade por perfil"
+                htmlFor="imp-limit-mode"
+                error={limitChoice.ok ? null : limitChoice.error}
+              >
+                <div className="row" style={{ flexWrap: "wrap" }}>
+                  <select
+                    id="imp-limit-mode"
+                    className="select"
+                    value={limitMode}
+                    onChange={(e) => setLimitMode(e.target.value as LimitMode)}
+                  >
+                    <option value="last">Últimos N</option>
+                    <option value="all">Todos</option>
+                  </select>
+                  {limitMode === "last" ? (
+                    <>
+                      <input
+                        id="imp-limit"
+                        className={`input${limitChoice.ok ? "" : " invalid"}`}
+                        style={{ width: 96 }}
+                        inputMode="numeric"
+                        aria-label="Quantidade de mídias por perfil"
+                        aria-invalid={!limitChoice.ok}
+                        value={limitText}
+                        onChange={(e) => setLimitText(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <div className="seg" role="group" aria-label="Atalhos de quantidade">
+                        {LIMIT_SHORTCUTS.map((n) => (
+                          <button
+                            key={n}
+                            type="button"
+                            className={limitChoice.ok && limitChoice.limit === n ? "on" : ""}
+                            aria-pressed={limitChoice.ok && limitChoice.limit === n}
+                            onClick={() => setLimitText(String(n))}
+                          >
+                            {formatCount(n)}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
                 </div>
-              ))}
-            </>
-          ) : null}
-          {providerProblem ? (
-            <div id="imp-provider-note" className="alert warn" role="status" style={{ marginTop: 8 }}>
-              <span className="grow">{providerProblem}</span>
-              <button type="button" className="btn btn-sm" onClick={() => navigate(ROUTES.settings)}>
-                Abrir Configurações
+              </Field>
+            </div>
+
+            {processingBlock}
+
+            <div id="imp-profiles-status" style={{ marginTop: 16 }}>
+              {!hasText ? null : preview ? (
+                <div className="small" role="status">
+                  {entriesSummary({
+                    valid: preview.valid.length,
+                    duplicates: preview.duplicates,
+                    invalid: preview.invalid.length,
+                  })}
+                </div>
+              ) : previewError ? (
+                // Sem conferência não há contagem válida para mostrar.
+                <ErrorLine message={previewError} onRetry={previewQuery.reload} />
+              ) : !checking ? (
+                <div className="muted small" role="status">
+                  Nenhum perfil na lista.
+                </div>
+              ) : (
+                <div className="muted small" role="status">
+                  Conferindo a lista. Estimativa provisória: cerca de {profilesCountText(draft.estimate)}; o número final
+                  aparece quando a conferência terminar.
+                </div>
+              )}
+              {preview && preview.invalid.length > 0 ? (
+                <div className="alert warn" role="alert" style={{ marginTop: 8, flexDirection: "column" }}>
+                  <strong id="imp-invalid-title">
+                    {invalidCountText(preview.invalid.length)}:{" "}
+                    {preview.valid.length > 0
+                      ? "ficam de fora; a importação começa só com os perfis válidos."
+                      : "nenhum perfil válido na lista."}
+                  </strong>
+                  <ul className="invalid-list" aria-labelledby="imp-invalid-title">
+                    {preview.invalid.slice(0, INVALID_SHOWN_MAX).map((item, i) => (
+                      <li key={`${i}:${item.entry}`}>
+                        <span className="mono">{item.entry}</span>: {item.reason}
+                      </li>
+                    ))}
+                    {preview.invalid.length > INVALID_SHOWN_MAX ? (
+                      <li>e mais {formatCount(preview.invalid.length - INVALID_SHOWN_MAX)}</li>
+                    ) : null}
+                  </ul>
+                </div>
+              ) : null}
+              {summary?.kind === "problem" ? (
+                <div className="field-error" role="alert" style={{ marginTop: 8 }}>
+                  {summary.text}
+                </div>
+              ) : null}
+              {summary?.kind === "summary" ? (
+                <>
+                  <div style={{ marginTop: 8 }}>
+                    <strong>{summary.text}</strong>
+                  </div>
+                  {summary.hints.map((hint) => (
+                    <div key={hint} className="muted small" style={{ marginTop: 4 }}>
+                      {hint}
+                    </div>
+                  ))}
+                </>
+              ) : null}
+              {providerProblem ? (
+                <div id="imp-provider-note" className="alert warn" role="status" style={{ marginTop: 8 }}>
+                  <span className="grow">{providerProblem}</span>
+                  <button type="button" className="btn btn-sm" onClick={() => navigate(ROUTES.settings)}>
+                    Abrir Configurações
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="row" style={{ marginTop: 16, flexWrap: "wrap" }}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={!canSubmit}
+                title={providerProblem ?? undefined}
+                aria-describedby={providerProblem ? "imp-provider-note" : undefined}
+              >
+                {submitting ? <Spinner /> : null}
+                {startLabel({ process: processAfter, invalid: invalidCount })}
+              </button>
+              <span className="grow" />
+              <button
+                type="button"
+                className="btn btn-ghost"
+                title={singleProfile === null ? "Disponível com um único perfil na lista" : undefined}
+                disabled={singleProfile === null || !sessionOk || lookupBusy || paused}
+                onClick={() => void consult()}
+              >
+                {lookupBusy ? <Spinner /> : <Search size={14} strokeWidth={1.75} aria-hidden="true" />}
+                Consultar perfil
               </button>
             </div>
-          ) : null}
-        </div>
+          </form>
+        ) : (
+          <ImportLinksForm
+            text={linksText}
+            onTextChange={setLinksText}
+            sessionOk={sessionOk}
+            paused={paused}
+            process={processAfter}
+            presetId={presetId}
+            processing={processingBlock}
+            onCreated={(batch) => {
+              // Lista enviada: o campo é limpo e o lote criado abre no acompanhamento, como no modo por perfil.
+              setSelected({ kind: "batch", id: batch.id });
+              setLinksText("");
+              revealCreated();
+            }}
+            onFailed={settings.reload}
+          />
+        )}
+      </div>
 
-        <div className="row" style={{ marginTop: 16, flexWrap: "wrap" }}>
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={!canSubmit}
-            title={providerProblem ?? undefined}
-            aria-describedby={providerProblem ? "imp-provider-note" : undefined}
-          >
-            {submitting ? <Spinner /> : null}
-            {startLabel({ process: processAfter, invalid: invalidCount })}
-          </button>
-          <span className="grow" />
-          <button
-            type="button"
-            className="btn btn-ghost"
-            title={singleProfile === null ? "Disponível com um único perfil na lista" : undefined}
-            disabled={singleProfile === null || !sessionOk || lookupBusy || paused}
-            onClick={() => void consult()}
-          >
-            {lookupBusy ? <Spinner /> : <Search size={14} strokeWidth={1.75} aria-hidden="true" />}
-            Consultar perfil
-          </button>
-        </div>
-      </form>
-
-      {startNotice && startNotice.groupId === null ? (
+      {mode === "profile" && startNotice && startNotice.groupId === null ? (
         <div className="alert warn" role="status" style={{ marginTop: 12 }}>
           <span className="grow">{startNotice.text}</span>
         </div>
       ) : null}
-      {lookupError ? (
+      {mode === "profile" && lookupError ? (
         <div style={{ marginTop: 12 }}>
           <ErrorLine message={lookupError} />
         </div>
       ) : null}
-      {lookupShown ? <ProfilePreview info={lookupShown} /> : null}
+      {mode === "profile" && lookupShown ? <ProfilePreview info={lookupShown} /> : null}
 
       <div ref={panelRef} tabIndex={-1} role="region" aria-label="Acompanhamento da importação">
         {shown?.kind === "group" ? (
@@ -710,6 +770,7 @@ function BatchPanel({
           onChanged();
         }}
       />
+      {isLinksBatch(batch) && batch.links ? <BatchLinksPanel batchId={batch.id} links={batch.links} /> : null}
       <div className="row" style={{ marginTop: 12 }}>
         {ACTIVE_BATCH.has(batch.status) ? (
           <button type="button" className="btn btn-sm" disabled={busy !== null} onClick={() => void act("cancel")}>
@@ -757,6 +818,7 @@ function BatchSummary({ batch }: { batch: Batch }) {
   const succeeded = done - errors - cancelled;
   const showBar = p.found > 0 && listingDone;
   const downloadOnly = isDownloadOnly(batch);
+  const byLinks = isLinksBatch(batch);
   const profileEnd = batch.error_code ? null : profileEndText(batch);
   const counters: [string, number][] = [
     ["Encontrados", p.found],
@@ -777,8 +839,13 @@ function BatchSummary({ batch }: { batch: Batch }) {
         </div>
         <span className="muted small">
           {[
-            batch.content_type ? CONTENT_LABEL[batch.content_type] : null,
-            batch.requested_limit ? `Últimos ${formatCount(batch.requested_limit)}` : "Todos",
+            // Lote por link: tipo de mídia e quantidade não se aplicam.
+            ...(byLinks
+              ? ["Por link"]
+              : [
+                  batch.content_type ? CONTENT_LABEL[batch.content_type] : null,
+                  batch.requested_limit ? `Últimos ${formatCount(batch.requested_limit)}` : "Todos",
+                ]),
             batch.process && batch.preset_name ? batch.preset_name : "Somente originais",
           ]
             .filter(Boolean)
@@ -809,7 +876,9 @@ function BatchSummary({ batch }: { batch: Batch }) {
           Aguardando na fila: a listagem deste perfil começa quando chegar a vez dele na importação.
         </div>
       ) : batch.status === "listing" ? (
-        <div className="muted small">Coletando a lista de mídias do perfil.</div>
+        <div className="muted small">
+          {byLinks ? "Resolvendo os links, um de cada vez." : "Coletando a lista de mídias do perfil."}
+        </div>
       ) : null}
       {profileEnd ? (
         // Fim real do perfil antes da quantidade pedida: informação, não erro.
@@ -881,10 +950,16 @@ function RecentTable({
                       onSelect(selection);
                     }}
                   >
-                    {isGroup ? groupTitle(entry.group) : `@${entry.batch.source_profile ?? "?"}`}
+                    {isGroup ? groupTitle(entry.group) : batchOriginLabel(entry.batch)}
                   </button>
                 </td>
-                <td className="muted">{item.content_type ? CONTENT_LABEL[item.content_type] : "-"}</td>
+                <td className="muted">
+                  {!isGroup && isLinksBatch(entry.batch)
+                    ? "-"
+                    : item.content_type
+                      ? CONTENT_LABEL[item.content_type]
+                      : "-"}
+                </td>
                 <td>
                   {isGroup && tone ? (
                     <Pill tone={tone.tone}>{tone.label}</Pill>
@@ -970,7 +1045,7 @@ function AllGroups({ selected, onSelect }: { selected: Selection | null; onSelec
   );
 }
 
-/** Lotes avulsos e antigos (um perfil), como sempre; os filhos de grupo ficam dentro do grupo. */
+/** Lotes avulsos e antigos (um perfil ou por link); os filhos de grupo ficam dentro do grupo. */
 function AllBatches({ selected, onSelect }: { selected: Selection | null; onSelect: (s: Selection) => void }) {
   const [offset, setOffset] = useState(0);
   const [pollMs, setPollMs] = useState<number>(POLL_STEPS_MS[0]);
@@ -989,11 +1064,11 @@ function AllBatches({ selected, onSelect }: { selected: Selection | null; onSele
     return list.error ? <ErrorLine message={list.error} onRetry={list.reload} /> : <SkeletonRows rows={3} />;
   }
   const { items, total } = list.data;
-  if (items.length === 0) return <Empty title="Nenhuma importação de um perfil" />;
+  if (items.length === 0) return <Empty title="Nenhuma importação de um perfil ou por link" />;
   return (
     <>
       <h3 className="muted small" style={{ marginBottom: 6 }}>
-        Um perfil · {formatCount(total)}
+        Um perfil ou por link · {formatCount(total)}
       </h3>
       {list.error ? <ErrorLine message={list.error} onRetry={list.reload} /> : null}
       <RecentTable

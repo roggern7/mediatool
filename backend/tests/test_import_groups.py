@@ -577,7 +577,8 @@ def test_migration_0012_over_schema_0011_with_data_keeps_old_batches(tmp_path, h
         db.execute("UPDATE batches SET status = 'completed', listing_state = 'done', found = 7,"
                    " listing_dropped_unexpected = 2 WHERE id = ?", (batch_id,))
         before = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
-        assert apply_migrations(db) == [12, 13]   # 0013 (exportações) só cria tabelas novas
+        # 0013 (exportações) e 0014 (links) só criam tabelas/colunas
+        assert apply_migrations(db) == [12, 13, 14]
         after = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
         assert {k: after[k] for k in before} == before, "nenhum dado antigo reescrito"
         assert (after["group_id"], after["group_position"], after["listing_end"]) == (None, None, None)

@@ -245,6 +245,13 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
   (migration 0012): importação de vários perfis; só guarda o pedido, o estado é derivado dos filhos. `batches` ganha
   `group_id` (FK, NULL em lotes avulsos/antigos), `group_position` (1-based) e `listing_end`
   (`profile_end`|`limit`|NULL).
+- Importação por link (migration 0014; seção 8.3): `batches` ganha `import_mode` (NULL = por perfil; `'links'` = por
+  link, com `source='instagram_import'`, `source_profile` NULL, `content_type='all'`, `requested_limit` NULL) e
+  `batch_links(batch_id FK CASCADE, position /*1-based, ordem colada*/, shortcode, url /*normalizada*/,
+  status /*pending|resolved|failed*/, error_code, error_message, items_found, profile, resolved_at,
+  attention_count /*vezes em que o link deixou o lote em needs_attention*/, PK (batch_id, position),
+  UNIQUE (batch_id, shortcode))`; `batches.link_fail_streak` (links seguidos falhos; disjuntor de 3). A renovação
+  de link de download de uma publicação é registrada em `listing_pages` com `page_index = position` do link.
 - `exports(id, kind /*batch|group|library*/, batch_id FK SET NULL, group_id FK SET NULL, selection json /*só library*/,
   dest_path, dest_created /*1 = pasta padrão criada pelo servidor para esta exportação*/,
   mode /*folder|zip*/, zip_path, zip_name, zip_token, zip_bytes, zip_expires_at, zip_downloaded_at,
@@ -285,6 +292,9 @@ esperam (não iniciam a listagem até a pausa acabar ou ser liberada). Processam
 Batch `status`: `listing` (runner coletando via adapter; uma importação por vez) -> `running` (jobs criados) ->
 `completed` quando todos os jobs são terminais (mesmo com falhas parciais) | `failed` (listagem falhou sem itens)
 | `cancelled`. Progresso do batch: `{found, downloaded, processed, skipped, failed, pending, active}`.
+Lote por link (`import_mode = 'links'`, seção 8.3): fica em `listing` enquanto há link `pending` (um link consultado
+por vez, na mesma fila de listagem); link `pending -> resolved | failed`. Sem link pendente segue para `running` ->
+`completed`; se nenhum link gerou job, `failed` com `error_code = links_failed`.
 Recovery no startup: jobs `downloading` -> `pending`; `processing` -> `downloaded`; `attempts+1`, `error_code=interrupted`
 registrado; esgotado -> `failed`. Batches `listing` reiniciam a listagem (jobs já criados não duplicam). Temporários de
 jobs não ativos em `storage\temp` removidos (somente dentro de temp). Nunca marcar `completed` sem arquivo verificado.
@@ -309,8 +319,11 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET | /api/import-groups | `limit`<=200, `before_id` | `{items: ImportGroup[], total, next_before_id}` |
 | GET | /api/import-groups/{id} | `children_limit`<=500 (100), `after_position` | `ImportGroupDetail`; 404 `group_not_found` |
 | POST | /api/import-groups/{id}/cancel | query `children_limit` | `ImportGroupDetail`; 409 `group_finished`; 404 `group_not_found` |
+| POST | /api/import-links/preview | `{entries?: string[], text?: string}` | `LinksPreview` `{valid: [{shortcode, url}], invalid: [{entry, reason}], duplicates}` (sem efeitos, sem Instagram); 422 `too_many_links` (seção 8.3) |
+| POST | /api/import-links | `{links: string[], preset_id?\|null, process?: bool}` | `Batch` 202 (com `duplicates`); 422 `invalid_links`\|`no_links`\|`too_many_links`; 409 `session_missing`\|`instagram_paused`; 404 `preset_not_found` (seção 8.3) |
 | GET | /api/batches | `limit, offset, source?=instagram_import\|library, group_id?, ungrouped?=true` | `{items: Batch[], total}` (padrão: todos os lotes, inclusive filhos de grupo) |
 | GET | /api/batches/{id} | | `Batch` + `jobs: Job[]` |
+| GET | /api/batches/{id}/links | `limit`<=500 (200), `offset` | `{items: BatchLink[], total}`; 404 `batch_not_found` (seção 8.3) |
 | POST | /api/batches/{id}/cancel | | `Batch` |
 | POST | /api/batches/{id}/retry-failed | | `Batch` |
 | GET | /api/media | `view=all\|originals\|processed`, `media_type`, `profile`, `q`, `limit`<=200, `offset` | `{items: Media[], total}` |
@@ -366,6 +379,8 @@ Batch = { id, source, source_profile|null, content_type|null, requested_limit|nu
   rate_limit_resume_at: string|null /*ISO UTC*/, rate_limit_pages_used: number|null, rate_limit_pages_max: number|null,
   listing_dropped: { unexpected_total: number, reasons: {<motivo>: n}, pending: number },
   listing_end: "profile_end"|"limit"|null,   // por que a listagem terminou (seção 8.1); null enquanto lista/erro/antigo
+  import_mode: "profile"|"links"|null,   // "links" = importação por link (seção 8.3); null em lotes de Biblioteca
+  links: { total: number, pending: number, resolved: number, failed: number }|null,   // só em lote por link
   group_id: number|null, group_position: number|null /*1-based*/,
   group_state: "waiting"|"active"|"attention"|"completed"|"failed"|"cancelled"|null /*só em filhos de grupo*/,
   last_export: LastExport|null /*última exportação para pasta concluída do lote; seção 8.2*/ }
@@ -845,6 +860,114 @@ POST /api/exports  { "source": { "kind": "group", "id": 7 }, "destination": { "z
 
 Só no registro da exportação (`Export.error_code`, com `status: "failed"`): `export_disk_full`,
 `export_write_failed`, `export_folder_missing`, `interrupted`, `internal_error` e os `export_dest_*` da revalidação.
+
+### 8.3 Importação por link
+
+Contrato para o frontend. Regras de execução: `docs/BATCH_ROBUSTNESS.md`, seção 0.2.
+
+**Ressalva**: a consulta de publicação isolada ainda NÃO foi verificada no Instagram real; a validação depende de uma
+prova com 1 link autorizada pelo dono (`scripts\poc-instagram-post.ps1`). Tudo aqui foi testado só offline, com
+respostas falsas. Por isso existem as proteções abaixo (disjuntor `links_failing` e link que repete erro).
+
+O usuário cola um ou vários links de publicações (um por linha) e o app baixa TODAS as mídias de cada publicação
+(foto, Reel, vídeo, carrossel inteiro). Vários links formam UM lote comum (`Batch` com `import_mode: "links"`,
+`source: "instagram_import"`, `source_profile: null`, `content_type: "all"`, `requested_limit: null`): ele aparece em
+`GET /api/batches` (inclusive com `?ungrouped=true`), tem jobs em `GET /api/jobs?batch_id=`, aceita `cancel`,
+`retry-failed`, `resume-listing` e exportação (`POST /api/exports` com `source: {kind: "batch", id}`, pasta ou ZIP),
+igual a um lote de um perfil. Erro em um link não interrompe os outros.
+
+**Links aceitos**: `/p/<código>/`, `/reel/<código>/` e `/reels/<código>/`, também com o usuário na frente
+(`/<usuario>/p/<código>/`), com `http`/`https` ou sem esquema (`instagram.com/...`, `www.instagram.com/...`), com ou
+sem `www`, barra final, query string e fragmento (descartados). O shortcode identifica a publicação: o mesmo código
+em `/p/` e `/reel/` é o mesmo link (fica o primeiro). URL normalizada: `https://www.instagram.com/p/<código>/` ou
+`https://www.instagram.com/reel/<código>/`. Lista colada: um link por linha; vírgula, ponto e vírgula e espaço em
+branco também separam; linhas vazias são ignoradas. Teto de sanidade: 500 links por lote (`too_many_links`).
+
+**Fluxo recomendado**: (1) `POST /api/import-links/preview` com o texto colado; mostrar `invalid` e `duplicates`;
+(2) `POST /api/import-links` com `links: preview.valid.map(v => v.url)`; (3) acompanhar por `GET /api/batches/{id}` e
+`GET /api/batches/{id}/links`.
+
+`POST /api/import-links/preview` (sem efeitos; nenhuma requisição ao Instagram). Corpo
+`{ "entries"?: string[], "text"?: string }` (os dois podem vir juntos):
+```json
+{ "text": "https://www.instagram.com/p/ABCDE12345/\ninstagram.com/reel/FGHIJ67890/?igsh=x\nhttps://www.instagram.com/reel/ABCDE12345/\nnao-e-link" }
+```
+```json
+{ "valid": [ { "shortcode": "ABCDE12345", "url": "https://www.instagram.com/p/ABCDE12345/" },
+             { "shortcode": "FGHIJ67890", "url": "https://www.instagram.com/reel/FGHIJ67890/" } ],
+  "invalid": [ { "entry": "nao-e-link", "reason": "informe o link completo da publicação" } ],
+  "duplicates": 1 }
+```
+`entry` vem cortado em 200 caracteres. Entrada inválida repetida conta em `duplicates` (aparece uma vez em
+`invalid`). 422 `too_many_links` acima de 500 entradas.
+
+`POST /api/import-links` -> 202. Corpo `{ "links": string[] (1 ou mais), "preset_id"?: number|null,
+"process"?: boolean }` (`process` padrão `false` = download-only; `process: true` sem `preset_id` usa o preset
+padrão). Cada item de `links` pode ser um link ou um texto com vários (mesmos separadores da prévia). Resposta: o
+`Batch` criado mais `duplicates` (repetições removidas; só nesta resposta):
+```json
+{ "id": 41, "source": "instagram_import", "import_mode": "links", "source_profile": null, "content_type": "all",
+  "requested_limit": null, "status": "listing", "listing_state": null, "found": 0,
+  "links": { "total": 2, "pending": 2, "resolved": 0, "failed": 0 }, "duplicates": 1,
+  "progress": { "found": 0, "downloaded": 0, "processed": 0, "skipped": 0, "failed": 0, "pending": 0, "active": 0 } }
+```
+Erros (nesta ordem de conferência): 422 `invalid_links` `{detail, code, invalid: [{entry, reason}], valid:
+[{shortcode, url}], duplicates}` (nada é criado; reenviar só as válidas); 422 `no_links` (lista só com vazios); 422
+`too_many_links`; 409 `session_missing`; 409 `instagram_paused`; 404 `preset_not_found`. Não há restrição de método
+de importação (web ou gallery-dl) nem `profile_already_importing`.
+
+`GET /api/batches/{id}/links?limit=200&offset=0` (`limit` 1..500) -> links do lote na ordem colada:
+```json
+{ "items": [
+    { "position": 1, "url": "https://www.instagram.com/p/ABCDE12345/", "shortcode": "ABCDE12345",
+      "status": "resolved", "error_code": null, "error_message": null, "items_found": 4, "profile": "dono_da_publicacao" },
+    { "position": 2, "url": "https://www.instagram.com/reel/FGHIJ67890/", "shortcode": "FGHIJ67890",
+      "status": "failed", "error_code": "content_unavailable", "error_message": "Conteúdo indisponível.",
+      "items_found": null, "profile": null } ],
+  "total": 2 }
+```
+```ts
+BatchLink = { position /*1-based*/, url, shortcode, status: "pending"|"resolved"|"failed"|"cancelled",
+  error_code: string|null, error_message: string|null, items_found: number|null /*mídias da publicação*/,
+  profile: string|null /*dono, minúsculas*/ }
+```
+- `pending`: ainda não consultado no Instagram. `resolved`: os jobs das mídias foram criados (o download segue pelos
+  jobs do lote). `failed`: erro só deste link (`content_unavailable`, `profile_private`, `profile_not_found`,
+  `unsupported_media`, `invalid_input`); não é tentado de novo. `cancelled`: link que ainda estava pendente quando o
+  lote foi cancelado (derivado na apresentação; em `Batch.links` ele continua contado em `pending`).
+- 404 `batch_not_found`. Lote que não é por link: `{ "items": [], "total": 0 }`.
+
+**Campos do `Batch`** (em todas as respostas com `Batch`): `import_mode` (`"links"`, `"profile"` para os demais lotes
+de importação, `null` para lotes de Biblioteca) e `links: {total, pending, resolved, failed}` (só em lote por link;
+`null` nos demais). `listing_end` fica `null` em lote por link.
+
+**Estados do lote por link** (mesmos campos do lote por perfil):
+- `status: "listing"` enquanto há link pendente; `listing_state` segue a listagem: `running` (consultando),
+  `waiting_backpressure` (aguardando downloads), `waiting_rate_limit` (teto de páginas por hora; `rate_limit_*`),
+  `paused` (pausa do Instagram ou falha de rede com nova tentativa automática; o motivo vem em
+  `error_code`/`error_message`) e `needs_attention` (erro do ambiente: sessão, verificação, `access_refused`,
+  `contract_changed`, `internal_error`; nova tentativa automática a cada 6 h, no máximo 4, e botão **Retomar** =
+  `POST /api/batches/{id}/resume-listing`). Nesses estados o link da vez continua `pending` e nenhum outro é pedido.
+- Link que repete erro do ambiente: na 1a vez o lote fica `needs_attention` com o link `pending`; se o MESMO link
+  levar o lote a `needs_attention` pela 2a vez (depois de **Retomar** ou da nova tentativa automática), o link vira
+  `failed` com esse erro e o lote segue para os próximos. Publicação com formato desconhecido (`contract_changed`
+  com detalhe `post_shape_unknown`) vira `failed` já na 1a vez. Erros de sessão (`session_missing`,
+  `session_invalid`, `session_expired`, `checkpoint_required`), pausas do Instagram e falhas de rede NUNCA marcam o
+  link como falho.
+- Disjuntor `links_failing`: 3 links SEGUIDOS falhos (nenhum resolvido entre eles) com links ainda pendentes param o
+  lote em `listing_state: "needs_attention"` com `error_code: "links_failing"` e `error_message` "3 links seguidos
+  não puderam ser importados. Confira os links; se eles abrem no navegador, o Media Tool pode precisar de
+  atualização. Retomar continua pelos próximos links.". **Retomar** (`resume-listing`) continua pelos links
+  pendentes com o contador zerado (os falhos ficam falhos); a nova tentativa automática de 6 h (máx. 4) vale igual.
+  Se os links acabam junto com a 3a falha (ex.: lote de 1 a 3 links, todos falhos), o lote conclui normalmente.
+- `POST /api/batches/{id}/restart-listing` responde 409 `listing_not_resumable` em lote por link (não existe "página
+  1"; use `resume-listing`).
+- Sem link pendente: `status: "running"` até os jobs terminarem e então `completed`. Com parte dos links falha:
+  `error_code: null` e `error_message: "X de N links não puderam ser importados."` (o lote conclui normal). Se
+  nenhum link gerou mídia: `status: "failed"`, `error_code: "links_failed"`, `error_message` "Nenhum dos N links pôde
+  ser importado." (ou "O link não pôde ser importado.").
+- Mídia que já está na Biblioteca não é baixada de novo: o job nasce `completed`/`skipped`
+  (`is_duplicate`, `duplicate_reason: "source_id"`) e entra na exportação do lote.
 
 ## 9. Processor (`media_processor`)
 

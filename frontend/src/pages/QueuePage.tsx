@@ -15,12 +15,14 @@ import {
   batchTitle,
   batchToneOf,
   isDownloadOnly,
+  isLinksBatch,
   isQueuedInGroup,
   jobKindLabel,
   jobTone,
   showDuplicate,
 } from "../lib/labels";
 import { batchIdFromSearch } from "../lib/batchRoute";
+import { linksSummaryText } from "../lib/importLinks";
 import {
   FIRST_PAGE,
   type PageCursor,
@@ -379,6 +381,7 @@ function BatchHeader({
       </div>
       {batch ? (
         <div className="muted small" style={{ marginTop: 6 }}>
+          {isLinksBatch(batch) && batch.links ? `${linksSummaryText(batch.links)} · ` : ""}
           {isDownloadOnly(batch) ? "Somente originais · " : ""}
           {BATCH_COUNTS.map(
             ({ label, statuses }) =>

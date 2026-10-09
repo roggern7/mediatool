@@ -12,12 +12,17 @@ from app.integrations.instagram.downloader import InstagramError
 from app.integrations.instagram.validation import parse_profile_input
 from app.jobs.errors import safe_message
 from app.schemas.batches import (
+    BatchLinkList,
     BatchList,
     BatchOut,
     ImportGroupDetail,
     ImportGroupList,
     ImportGroupRequest,
+    ImportLinksOut,
+    ImportLinksRequest,
     ImportRequest,
+    LinksPreview,
+    LinksPreviewRequest,
     ProfilesPreview,
     ProfilesPreviewRequest,
     RestartListingRequest,
@@ -27,7 +32,7 @@ from app.services import import_service
 from app.services.deadline import CallInProgress, DeadlineExceeded, run_with_deadline
 from app.services.instagram_gate import InstagramPaused
 from app.services.instagram_pause import ensure_not_paused, raise_paused
-from app.services.presenters import batch_single, batches_out, group_detail, groups_out
+from app.services.presenters import batch_links_out, batch_single, batches_out, group_detail, groups_out
 
 logger = logging.getLogger("media_tool.imports")
 
@@ -152,6 +157,39 @@ def cancel_import_group(
     """Cancela os filhos ainda abertos; os encerrados ficam. Um filho sozinho: POST /api/batches/{id}/cancel."""
     import_service.cancel_group(ctx, group_id)
     return group_detail(ctx, ctx.batches.get_group(group_id), children_limit=children_limit)
+
+
+@router.post("/import-links/preview", response_model=LinksPreview)
+def preview_import_links(body: LinksPreviewRequest) -> dict[str, Any]:
+    """Pré-validação da lista de links, sem efeitos e sem nenhuma requisição ao Instagram."""
+    entries = list(body.entries or [])
+    if body.text:
+        entries.append(body.text)
+    valid, invalid, duplicates = import_service.parse_link_entries(entries)
+    return {"valid": valid, "invalid": invalid, "duplicates": duplicates}
+
+
+@router.post("/import-links", response_model=ImportLinksOut, status_code=202)
+def create_import_links(ctx: Ctx, body: ImportLinksRequest) -> dict[str, Any]:
+    """Um lote com todos os links (um job por mídia de cada publicação); o import runner resolve um link por vez."""
+    batch_id, duplicates = import_service.create_import_links(
+        ctx, links=body.links, preset_id=body.preset_id, process=body.process)
+    return {**batch_single(ctx, batch_id), "duplicates": duplicates}
+
+
+@router.get("/batches/{batch_id}/links", response_model=BatchLinkList)
+def list_batch_links(
+    ctx: Ctx,
+    batch_id: IdPath,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    offset: Annotated[int, Query(ge=0, le=10_000_000)] = 0,
+) -> dict[str, Any]:
+    """Links de um lote por link, na ordem colada. Lote que não é por link: lista vazia."""
+    batch = ctx.batches.get(batch_id)
+    if batch is None:
+        raise not_found("Lote", "batch_not_found")
+    links, total = ctx.batches.list_links(batch_id, limit=limit, offset=offset)
+    return {"items": batch_links_out(batch, links), "total": total}
 
 
 @router.get("/batches", response_model=BatchList)

@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from app.integrations.instagram.web.normalize import NormalizeStats, filter_by_content, normalize_node
+from app.integrations.instagram.web.normalize import (
+    NormalizeStats,
+    filter_by_content,
+    legacy_to_v1,
+    normalize_node,
+    normalize_post,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "instagram_web" / "graphql"
 ROOT = "xdt_api__v1__feed__user_timeline_graphql_connection"
@@ -147,3 +153,128 @@ def test_filter_by_content(all_items):
 def test_filter_unknown_content_raises(all_items):
     with pytest.raises(ValueError):
         filter_by_content(all_items, "stories")  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- post isolado (normalize_post)
+
+POST_ROOT = "xdt_shortcode_media"
+
+
+def post_root(name: str):
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))["data"][POST_ROOT]
+
+
+def test_post_legacy_image_picks_largest_and_owner_lowercase():
+    stats = NormalizeStats()
+    [item] = normalize_post(post_root("post_image.json"), stats=stats)
+    assert item.media_type == "image" and item.is_reel is False and item.in_carousel is False
+    assert "pimg1_1080x1350.jpg" in item.media_url and (item.width, item.height) == (1080, 1350)
+    assert item.source_post_id == "FAKEPOSTIMG1" and item.source_media_index == 0
+    assert item.post_id == "3200000000000000001" and item.media_id == "3200000000000000001"
+    assert item.source_url == "https://www.instagram.com/p/FAKEPOSTIMG1/"
+    assert item.source_profile == "dono_fake" and item.listing_ref is None
+    assert item.taken_at == "2023-11-14T22:13:20Z" and item.extension == "jpg"
+    assert (stats.nodes, stats.items, stats.skipped_no_url, stats.skipped_unsupported) == (1, 1, 0, 0)
+    assert stats.reasons == {}
+
+
+def test_post_legacy_reel_and_plain_video():
+    root = post_root("post_video_reel.json")
+    [reel] = normalize_post(root)
+    assert reel.media_type == "video" and reel.is_reel is True and reel.duration == 12.5
+    assert reel.source_url == "https://www.instagram.com/reel/FAKEPOSTREEL/"
+    assert "preel1_1080x1920.mp4" in reel.media_url and "preel1_1080x1920.jpg" in reel.thumbnail_url
+    assert (reel.width, reel.height) == (1080, 1920) and reel.extension == "mp4"
+    # vídeo avulso (não Reel): mesmo nó com product_type "feed"
+    [video] = normalize_post({**root, "product_type": "feed"})
+    assert video.media_type == "video" and video.is_reel is False
+    assert video.source_url == "https://www.instagram.com/p/FAKEPOSTREEL/"
+
+
+def test_post_legacy_carousel_returns_every_item_in_order():
+    items = normalize_post(post_root("post_carousel_mixed.json"))
+    assert [(i.source_media_index, i.media_type) for i in items] == [
+        (0, "image"), (1, "video"), (2, "image"), (3, "video")]
+    assert [i.media_id for i in items] == [f"320000000000000003{n}" for n in (1, 2, 3, 4)]
+    assert all(i.source_post_id == "FAKEPOSTCAR1" and i.in_carousel and not i.is_reel for i in items)
+    assert all(i.source_profile == "dono_fake" and i.post_id == "3200000000000000003" for i in items)
+    assert "pcar1b_1080x1920.mp4" in items[1].media_url and items[1].duration == 12.5
+
+
+@pytest.mark.parametrize("typename", ["GraphImage", "XDTGraphImage", None])
+def test_post_legacy_typename_with_or_without_prefix_or_inferred(typename):
+    root = post_root("post_image.json")
+    if typename is None:
+        del root["__typename"]
+    else:
+        root["__typename"] = typename
+    assert [i.media_type for i in normalize_post(root)] == ["image"]
+
+
+def test_post_legacy_carousel_inferred_without_typename_and_invalid_child_keeps_indexes():
+    root = post_root("post_carousel_mixed.json")
+    del root["__typename"]
+    root["edge_sidecar_to_children"]["edges"][1] = {"node": None}
+    stats = NormalizeStats()
+    items = normalize_post(root, stats=stats)
+    assert [i.source_media_index for i in items] == [0, 2, 3]
+    assert stats.reasons == {"carousel_child_invalid": 1}
+
+
+def test_post_legacy_falls_back_to_display_url_and_counts_missing_urls():
+    root = post_root("post_image.json")
+    del root["display_resources"]
+    [item] = normalize_post(root)
+    assert "pimg1_1080x1350.jpg" in item.media_url and (item.width, item.height) == (1080, 1350)
+    del root["display_url"]
+    stats = NormalizeStats()
+    assert normalize_post(root, stats=stats) == [] and stats.reasons == {"image_no_url": 1}
+    video = post_root("post_video_reel.json")
+    video["video_url"] = None
+    stats = NormalizeStats()
+    assert normalize_post(video, stats=stats) == [] and stats.reasons == {"video_no_url": 1}
+    assert stats.skipped_no_url == 1 and stats.skipped_unsupported == 0
+
+
+def test_post_legacy_unknown_typename_is_unsupported():
+    root = post_root("post_image.json")
+    root["__typename"] = "XDTGraphFakeNewKind"
+    stats = NormalizeStats()
+    assert normalize_post(root, stats=stats) == []
+    assert stats.skipped_unsupported == 1 and stats.reasons == {"unsupported_type": 1}
+
+
+def test_post_v1_items_and_direct_v1_node():
+    root = post_root("post_v1_items.json")
+    items = normalize_post(root)
+    assert [(i.source_media_index, i.media_type, i.in_carousel) for i in items] == [(0, "image", True),
+                                                                                  (1, "video", True)]
+    assert all(i.source_post_id == "FAKEPOSTV1A1" and i.source_profile == "dono_fake" for i in items)
+    assert "pv1a_1080x1350.jpg" in items[0].media_url and items[1].duration == 7.0
+    assert normalize_post(root["items"][0]) == items   # nó v1 direto (media_type numérico)
+
+
+def test_post_v1_empty_items_and_object_without_code():
+    stats = NormalizeStats()
+    assert normalize_post({"items": []}, stats=stats) == [] and stats.nodes == 0
+    stats = NormalizeStats()
+    assert normalize_post({"fake_unknown_shape": True}, stats=stats) == []
+    assert stats.skipped_invalid_node == 1 and stats.reasons == {"node_no_code": 1}
+
+
+@pytest.mark.parametrize("owner", [None, {}, {"username": None}, {"username": ""}, {"username": "nome invalido!"},
+                                   {"username": "x" * 31}, "texto"])
+def test_post_owner_absent_or_invalid_is_empty(owner):
+    root = post_root("post_image.json")
+    root["owner"] = owner
+    assert normalize_post(root)[0].source_profile == ""
+
+
+def test_legacy_to_v1_is_pure():
+    root = post_root("post_carousel_mixed.json")
+    before = copy.deepcopy(root)
+    v1 = legacy_to_v1(root)
+    assert root == before
+    assert v1["code"] == "FAKEPOSTCAR1" and v1["media_type"] == 8 and v1["carousel_media_count"] == 4
+    assert [c["media_type"] for c in v1["carousel_media"]] == [1, 2, 1, 2]
+    assert v1["carousel_media"][1]["video_versions"][0]["url"].startswith("https://video-fake.fbcdn.net/")

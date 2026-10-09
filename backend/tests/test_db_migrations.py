@@ -80,6 +80,33 @@ def test_unique_indexes_enforced(db):
         db.execute(insert, ("DEF", "a" * 64, now, now))
 
 
+def test_import_links_schema_and_constraints(db):
+    """Migration 0014: `batches.import_mode` (NULL ou 'links') e `batch_links` (um shortcode por lote)."""
+    apply_migrations(db)
+    assert schema_version(db) >= 14
+    columns = {row["name"] for row in db.fetchall("PRAGMA table_info(batches)")}
+    assert "import_mode" in columns
+    assert {row["name"] for row in db.fetchall("PRAGMA table_info(batch_links)")} == {
+        "batch_id", "position", "shortcode", "url", "status", "error_code", "error_message", "items_found", "profile",
+        "resolved_at", "attention_count"}
+    assert "link_fail_streak" in columns
+    now = "2026-01-01T00:00:00.000Z"
+    db.execute("INSERT INTO batches (id, source, process, status, found, created_at, updated_at, import_mode)"
+               " VALUES (1, 'instagram_import', 0, 'listing', 0, ?, ?, 'links')", (now, now))
+    insert = "INSERT INTO batch_links (batch_id, position, shortcode, url) VALUES (1, ?, ?, 'u')"
+    db.execute(insert, (1, "ABCDE1"))
+    assert db.scalar("SELECT status FROM batch_links WHERE batch_id = 1 AND position = 1") == "pending"
+    for position, shortcode in ((1, "OUTRO1"), (2, "ABCDE1")):   # posição e shortcode únicos no lote
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(insert, (position, shortcode))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE batch_links SET status = 'cancelled' WHERE batch_id = 1")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE batches SET import_mode = 'outro' WHERE id = 1")
+    db.execute("DELETE FROM batches WHERE id = 1")
+    assert db.scalar("SELECT COUNT(*) FROM batch_links") == 0, "ON DELETE CASCADE"
+
+
 def test_split_statements_handles_strings_with_semicolons():
     sql = "-- comentário\nCREATE TABLE t (v TEXT);\nINSERT INTO t VALUES ('a;b');\n"
     assert split_statements(sql) == ["CREATE TABLE t (v TEXT);", "INSERT INTO t VALUES ('a;b');"]

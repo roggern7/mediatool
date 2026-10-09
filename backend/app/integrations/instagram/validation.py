@@ -104,3 +104,42 @@ def validate_shortcode(code: str) -> str:
     if not _SHORTCODE_RE.match(code):
         raise ValueError("shortcode inválido")
     return code
+
+
+# Caminhos de publicação aceitos numa URL: `/p/<código>/`, `/reel/<código>/` e `/reels/<código>/`.
+_POST_PATH_KINDS = {"p": "p", "reel": "reel", "reels": "reel"}
+NOT_A_POST_MESSAGE = "a URL não aponta para uma publicação"
+
+
+def parse_post_link(value: str) -> tuple[str, str]:
+    """Link de uma publicação -> (shortcode, URL normalizada). ValueError (mensagem em pt-BR) se inválido.
+
+    Aceita `/p/<código>/`, `/reel/<código>/` e `/reels/<código>/`, também com o usuário na frente
+    (`/<usuario>/p/<código>/`), com `http`/`https` ou sem esquema, com ou sem `www`, barra final, query string e
+    fragmento (descartados). URL normalizada: `https://www.instagram.com/p/<código>/` ou `.../reel/<código>/`
+    (`/reels/` vira `/reel/`). O shortcode identifica a publicação: o mesmo código em `/p/` e `/reel/` é o mesmo
+    link."""
+    value = _check_text(value, "link")
+    lowered = value.lower()
+    if lowered.startswith("http://"):
+        value = "https://" + value[7:]
+    elif lowered.startswith(("instagram.com/", "www.instagram.com/")):
+        value = "https://" + value
+    if "://" not in value:
+        raise ValueError("informe o link completo da publicação")
+    url = validate_instagram_url(value)
+    segments = [seg for seg in urlsplit(url).path.split("/") if seg]
+    if len(segments) == 3:
+        # Link com o usuário na frente: `/<usuario>/p/<código>/`.
+        try:
+            _check_username(segments[0])
+        except ValueError:
+            raise ValueError(NOT_A_POST_MESSAGE) from None
+        segments = segments[1:]
+    if len(segments) != 2 or segments[0].lower() not in _POST_PATH_KINDS:
+        raise ValueError(NOT_A_POST_MESSAGE)
+    try:
+        code = validate_shortcode(segments[1])
+    except ValueError:
+        raise ValueError("código da publicação inválido") from None
+    return code, f"https://www.instagram.com/{_POST_PATH_KINDS[segments[0].lower()]}/{code}/"

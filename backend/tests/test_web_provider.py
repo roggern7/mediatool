@@ -398,11 +398,9 @@ def test_non_expired_cdn_errors_do_not_refresh(tmp_path):
     assert info.value.code == "download_failed" and info.value.retryable and bootstrap.calls == 0
 
 
-def test_resolve_post_is_explicitly_unavailable():
+def test_resolve_post_rejects_invalid_shortcode():
+    # A resolução de post isolado em si é coberta em test_web_provider_post.py.
     dl, _, bootstrap, graphql = build([[image_node("IMG1")]])
-    with pytest.raises(InstagramError) as info:
-        dl.resolve_post("IMG1abc")
-    assert info.value.code == "content_unavailable" and bootstrap.calls == 0 and graphql.requests == []
     with pytest.raises(InstagramError) as info:
         dl.resolve_post("../x")
     assert info.value.code == "invalid_input"

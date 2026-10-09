@@ -20,6 +20,12 @@ const MESSAGES: Record<string, string> = {
   invalid_profiles: "Há entradas inválidas na lista de perfis. Corrija ou remova as entradas indicadas e tente de novo.",
   no_profiles: "Informe ao menos um perfil.",
   too_many_profiles: "Perfis demais de uma vez. O máximo é 10.000 por importação.",
+  invalid_links: "Há links inválidos na lista. Corrija ou remova os links indicados e tente de novo.",
+  no_links: "Informe ao menos um link.",
+  too_many_links: "Links demais de uma vez. O máximo é 500 por importação.",
+  links_failing:
+    "Vários links seguidos não puderam ser importados. Confira os links que falharam e retome para continuar pelos próximos.",
+  listing_not_resumable: "Esta importação não pode recomeçar do início.",
   group_finished: "Esta importação já terminou; não há nada para cancelar.",
   group_not_found: "Importação não encontrada.",
   payload_too_large:
@@ -86,6 +92,7 @@ const BACKEND_FIRST = new Set([
   "unsupported_media",
   "network_error",
   "timeout",
+  "links_failing",
   "export_dest_forbidden",
   "export_no_space",
   "export_folder_missing",

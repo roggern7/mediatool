@@ -211,12 +211,13 @@ class GalleryDlInstagramDownloader(InstagramDownloader):
         events = list(self._run(request, timeout=self._test_timeout))
         return next((e for e in events if e.get("type") == "probe"), {})
 
-    def resolve_post(self, shortcode: str) -> list[RemoteMedia]:
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None) -> list[RemoteMedia]:
         try:
             shortcode = validate_shortcode(shortcode)
         except ValueError as exc:
             raise InstagramError("invalid_input", str(exc)) from None
-        events = self._run({"op": "resolve_post", "shortcode": shortcode}, timeout=self._short_timeout())
+        events = self._run({"op": "resolve_post", "shortcode": shortcode}, timeout=self._short_timeout(),
+                           cancel=cancel)
         return [_media_from_event(e) for e in events if e.get("type") == "item"]
 
     def download(

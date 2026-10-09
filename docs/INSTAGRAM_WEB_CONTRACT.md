@@ -101,7 +101,9 @@ varrido em busca de marcadores (o JavaScript embutido daria falso positivo).
 | graphql.py | `session_invalid` | `web_token_rejected` |
 | graphql.py | `profile_private` / `content_unavailable` | `root_null_private` / `root_null_authenticated` |
 | graphql.py | `contract_changed` | `invalid_json`, `not_object`, `persisted_query_error`, `missing_data`, `missing_root_field`, `root_not_object`, `edges_not_list`, `page_info_missing`, `repeated_cursor`, `cursor_missing_with_errors` |
+| graphql.py (post) | `content_unavailable` / `profile_private` | `post_null` / `post_null_private` |
 | provider.py | `unsupported_media` | `unsupported_media` |
+| provider.py (post) | `content_unavailable` / `contract_changed` | `post_no_media` / `post_shape_unknown` |
 
 `timeout` e `network_error` do cliente HTTP (stage `http`) não têm `detail`; o diagnóstico traz método, path e o nome
 da exceção. Fim anômalo da paginação (`contract_changed`, graphql.py): `detail` em `empty_page`, `cursor_missing`,
@@ -198,14 +200,36 @@ PROFILE_POSTS = QuerySpec("PolarisProfilePostsQuery", "28991540097136703",
      "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": False,
      "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": False})
 
-KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name,)   # nomes aceitos em instagram_web_doc_ids
+# Post isolado. NÃO VERIFICADO no Instagram real (observed_at = "unverified"); ver o aviso abaixo.
+POST_BY_SHORTCODE = QuerySpec("PolarisPostActionLoadPostQueryQuery", "8845758582119845",
+    "xdt_shortcode_media", "unverified", {})
+
+KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, POST_BY_SHORTCODE.name)   # aceitos em instagram_web_doc_ids
 DOC_ID_RE = re.compile(r"[0-9]{5,25}")                    # só dígitos ASCII, com fullmatch
 ENV_PREFIX = "MEDIA_TOOL_IG_DOC_"
+ROOT_ENV_PREFIX = "MEDIA_TOOL_IG_ROOT_"                   # override do campo raiz, só por env
+ROOT_FIELD_RE = re.compile(r"[a-z][a-z0-9_]{2,119}")      # nome de campo seguro, com fullmatch
 
 def resolve_spec(spec: QuerySpec, overrides: Mapping[str, str], env: Mapping[str, str] | None = None) -> QuerySpec
 def profile_posts_variables(spec: QuerySpec, username: str, count: int, after: str | None) -> dict
+def post_variables(spec: QuerySpec, shortcode: str) -> dict
 ```
 `queries.py` é o único arquivo de código com `doc_id`.
+
+> **ATENÇÃO: a consulta de post isolado NÃO foi verificada no Instagram real.** Não há evidência do Chrome do dono
+> nem requisição real para `POST_BY_SHORTCODE`: nome, `doc_id`, campo raiz, variáveis
+> (`{"shortcode": <código>, "fetch_tagged_user_count": null, "hoisted_comment_id": null, "hoisted_reply_id": null}`)
+> e o formato da resposta vêm de conhecimento público e só têm testes com respostas falsas. O que ESTÁ comprovado é o
+> transporte que ela reaproveita (bootstrap + `POST /graphql/query`). Antes de confiar no modo "Por link", rode a POC
+> de post (seção própria abaixo) com autorização do dono. Tudo é trocável sem nova versão: `doc_id` por setting
+> (`instagram_web_doc_ids`) ou env `MEDIA_TOOL_IG_DOC_POLARISPOSTACTIONLOADPOSTQUERYQUERY`; campo raiz por env
+> `MEDIA_TOOL_IG_ROOT_POLARISPOSTACTIONLOADPOSTQUERYQUERY`.
+
+Campo raiz por env: `MEDIA_TOOL_IG_ROOT_<NAME>` (lido de `Settings.env`, vale após reiniciar o backend; não há setting)
+troca o `root_field` da consulta `<NAME>` quando o valor é um nome de campo seguro (`ROOT_FIELD_RE`); valor inválido é
+ignorado com aviso que não o mostra. Serve para quando o `doc_id` trocado responde em outra raiz (ex.:
+`PolarisPostRootQuery`, raiz `xdt_api__v1__media__shortcode__web_info`, formato v1 `{"items": [...]}`, que
+`normalize_post` já entende). O nome enviado em `fb_api_req_friendly_name` continua o embutido.
 
 Precedência do `doc_id` (por nome, sem diferenciar maiúsculas): setting `instagram_web_doc_ids` > env
 `MEDIA_TOOL_IG_DOC_<NAME>` (ex.: `MEDIA_TOOL_IG_DOC_POLARISPROFILEPOSTSQUERY`), lida de `Settings.env`, que junta o
@@ -237,6 +261,8 @@ class InstagramWebGraphQL:
                            max_pages: int | None = 500, cancel: threading.Event | None = None,
                            on_page: Callable[[dict], None] | None = None) -> Iterator[dict]   # None = sem teto
         # gera nós sob demanda; max_media só reduz o count da 1a página; quem conta mídias e para é o chamador
+    def post_by_shortcode(self, shortcode: str) -> dict
+        # raiz da consulta de UM post (1 POST, no máximo 1 re-bootstrap); NÃO verificado no real
     last_viewer_id: str | None                 # xdt_viewer.user.id da última resposta com dados
     listing_account_confirmation: str | None   # estado da conta na 1a resposta da última listagem
 
@@ -299,6 +325,21 @@ da página serem entregues (também é chamado quando o consumidor para no meio 
 `cursor_changed` (bool: cursor presente e diferente do `after` enviado), `variables_keys` (nomes das variáveis
 enviadas; na página 2 inclui `after`, `before`, `first`, `last` do padrão Relay, verificado no real), `new_nodes`, `duplicate_nodes`
 (ids já vistos na listagem, descartados) e `account_confirmation` da página.
+
+### Consulta de post isolado (`post_by_shortcode`; NÃO verificada no Instagram real)
+
+Um POST de `POST_BY_SHORTCODE` com `post_variables` e `Referer: https://www.instagram.com/p/<shortcode>/`, pelo mesmo
+`_query` da listagem (mesmo formulário, headers, classificação de erros e 1 re-bootstrap por operação); a paginação
+não é usada. Devolve `data[root_field]` (objeto) para o provider normalizar. Diferença única em relação à listagem:
+**raiz presente e `null` é erro DO LINK, não de contrato**: `content_unavailable` (`post_null`, "A publicação não
+existe mais ou não está disponível para a conta da sessão.") ou, quando `errors` cita privado, `profile_private`
+(`post_null_private`). Isso vale com a conta confirmada pelo `xdt_viewer` (sem re-bootstrap, mesmo com `errors`
+citando login) e também sem `xdt_viewer`, desde que a resposta não traga evidência de token/sessão recusado; com essa
+evidência (códigos 1357001/1357004, mensagem de token) vale o re-bootstrap único e a classificação de sempre. Raiz
+AUSENTE (`missing_root_field`), sem `data` (`missing_data`), JSON inválido, erro de consulta persistida
+(`persisted_query_error`) e raiz que não é objeto nem `null` (`root_not_object`) continuam `contract_changed`. 429,
+checkpoint, sessão, restrição, rede e timeout: classificação existente, sem mudança. A listagem de perfil não mudou
+(raiz `null` nela segue `root_not_object`, ou `root_null_*` com a conta confirmada). O shortcode nunca é logado.
 
 ### Respostas 200 com `errors`
 
@@ -395,7 +436,22 @@ class NormalizeStats:   # contadores seguros para log
 def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
                    stats: NormalizeStats | None = None) -> list[RemoteMedia]
 def filter_by_content(items: list[RemoteMedia], content: ContentType) -> list[RemoteMedia]
+def legacy_to_v1(node: Mapping) -> dict          # nó GraphQL "legado" -> nó v1 (puro; só troca nomes de campo)
+def normalize_post(root: Mapping, *, stats: NormalizeStats | None = None) -> list[RemoteMedia]
 ```
+`normalize_post` (raiz da consulta de post isolado; **formato NÃO verificado no Instagram real**) devolve todas as
+mídias da publicação (carrossel inteiro, na ordem, índice 0-based), sem filtro de conteúdo, reaproveitando
+`normalize_node`. Aceita os dois formatos plausíveis: v1 (`{"items": [nó]}`, usando o primeiro item, ou um nó direto
+com `media_type` numérico) e GraphQL "legado", convertido por `legacy_to_v1`: `__typename`
+`[XDT]GraphImage`/`GraphVideo`/`GraphSidecar` -> `media_type` 1/2/8 (sem `__typename`: `edge_sidecar_to_children` ->
+8, senão `is_video`; nome desconhecido -> tipo não suportado), `shortcode` -> `code`, `id` -> `pk`,
+`display_resources[{src, config_width, config_height}]` + `display_url` (com `dimensions`) -> `image_versions2`,
+`video_url` (com `dimensions`) -> `video_versions`, `taken_at_timestamp` -> `taken_at`,
+`edge_sidecar_to_children.edges[].node` -> `carousel_media` (filho inválido fica como `null` para os índices não
+mudarem). `source_profile` = dono da publicação em minúsculas (`user.username`, senão `owner.username`; `""` se
+ausente ou fora do formato de nome de usuário).
+
+Listagem de perfil (`normalize_node`):
 `media_type` 1 imagem, 2 vídeo, 8 carrossel (`carousel_media` em ordem, índice 0-based). Imagem: maior candidato
 de `image_versions2.candidates` por largura*altura. Vídeo: maior de `video_versions` por largura*altura (empate:
 primeiro); thumbnail = maior candidato de imagem; `duration` de `video_duration` se houver; `has_audio` não está
@@ -429,7 +485,18 @@ padrão do app), ambos repassados a
   `forbidden/not_found` (URL expirada), refaz UMA listagem do `source_profile` (no máximo 3 páginas) para achar o
   mesmo `source_post_id` (por `media_id`, senão índice e tipo) e tenta de novo uma vez; não achou ->
   `content_unavailable`.
-- `resolve_post(shortcode)`: sem perfil não há consulta moderna comprovada -> `content_unavailable` explícito.
+- `resolve_post(shortcode, *, cancel=None) -> list[RemoteMedia]` (**consulta NÃO verificada no Instagram real**; ver
+  `web/queries.py`): bootstrap pelo cache compartilhado do app + UM `post_by_shortcode` + `normalize_post`. Devolve
+  TODAS as mídias da publicação (carrossel inteiro, na ordem, `source_media_index` 0-based), sem filtro de conteúdo,
+  com `listing_ref=None` e `source_profile` = dono da publicação (`""` se ausente). Antes do POST aplica o teto global
+  de páginas por hora (`wait_listing_page` do portão com `page_rate_limit`, quando o portão tem o método e o teto não
+  é 0): cada post resolvido conta como uma página. `cancel` vai para o cliente HTTP (a espera pela vaga no portão o
+  respeita; `GateCancelled` sobe como na renovação de página) e é conferido antes do bootstrap, depois dele e depois
+  da espera do teto: cancelado antes do POST -> lista vazia. Shortcode inválido -> `invalid_input` (sem requisição).
+  Sem nenhuma mídia: só itens de tipo não suportado -> `unsupported_media`; objeto sem código de publicação (formato
+  não reconhecido) -> `contract_changed` (`post_shape_unknown`); demais casos (itens sem URL `https://` utilizável,
+  `items` vazio) -> `content_unavailable` (`post_no_media`). Erros da consulta sobem como estão (ver "Consulta de
+  post isolado"). Log só com contagens: `Publicação resolvida (web): N mídias, N sem URL, N não suportadas`.
 - `test_session()`: nunca lança; sem download. Etapas:
   1. `session_present`: há sessão salva com `sessionid`? Senão `session_missing` (demais etapas `unknown`).
   2. `bootstrap` (1 GET de `/`): `ok` quando fb_dtsg e lsd foram extraídos; o viewer do HTML não conta.
@@ -477,6 +544,9 @@ padrão do app), ambos repassados a
   valendo).
 - `test_session()`: em `web` e `auto` testa o provider web (sem trocar o resultado pelo do gallery-dl); em
   `gallery_dl`, o teste legado (etapas web ficam `null`).
+- `resolve_post(shortcode, *, cancel=None)`: repassa `cancel` ao provider só quando informado. Em `auto`, o fallback
+  de sempre vale: `contract_changed`/`unsupported_media` do web -> gallery-dl; `content_unavailable`,
+  `profile_private` e os demais erros sobem como estão.
 
 `contract_changed` e `unsupported_media` não são retryable e não pausam o worker. Na prévia de perfil
 (`POST /api/instagram/profile`) eles respondem 502.
@@ -521,6 +591,32 @@ foram aceitas como descritas em `web/queries.py`. O orçamento de paginação, o
 URL por página estão em [BATCH_ROBUSTNESS.md](BATCH_ROBUSTNESS.md). A prévia de perfil (`topsearch`) segue não
 verificada no real.
 
+## POC de post isolado (`scripts/poc-instagram-post.ps1`)
+
+**Ainda NÃO foi executada: a consulta de post não está verificada no Instagram real, e a POC só deve rodar com
+autorização do dono.** `backend/tools/poc_instagram_post.py --url <link>`, chamado por
+`scripts\poc-instagram-post.ps1 -Url <link>` (`/p/`, `/reel/` ou `/reels/`). **Só resolução**: sem banco, sem
+download, sem processamento. Usa a sessão salva (`LocalInstagramSessionProvider`) e o `InstagramWebDownloader` real
+(`resolve_post`), retries 0 e sem re-bootstrap (token recusado vira `session_invalid`/`web_token_rejected` na hora).
+Tráfego: exatamente 1 GET `/` + 1 POST `/graphql/query`. Recusa rodar com o app escutando na porta (`app_running`,
+saída 2). Link inválido -> `invalid_input` sem nenhuma requisição (saída 1). Para no primeiro erro (saída 1) com só
+`code`/`message`/`stage`/`detail` seguros e, quando o erro traz, `top_keys`/`data_keys` (NOMES das chaves da resposta:
+`data_keys` mostra em qual campo raiz o Instagram respondeu). Ctrl+C -> `interrupted` (saída 130). O override de
+`doc_id` gravado no banco (setting) não é lido; valem o env/`.env` (`MEDIA_TOOL_IG_DOC_<NAME>`,
+`MEDIA_TOOL_IG_ROOT_<NAME>`) ou os valores embutidos. Relatório JSON (stdout): `query` (nome, `doc_id`, campo raiz e
+`observed_at` efetivos), `link_kind` (`p`/`reel`), `requests` (método, path sem query, status),
+`instagram_requests`, `cdn_requests` (deve ser 0), `other_requests`, `response_shape` (forma da raiz: `format`
+`legacy`/`v1_items`/`v1_node`, `root_keys`, `typename`, `children_count`, `child_keys`, `items_count`, `item_keys`; só
+nomes e contagens), `media_count` e `items` (na ordem: `media_type`, `is_reel`, `source_media_index`, `taken_at`,
+`cdn_url_valid`, `cdn_domain_suffix`, `shortcode_matches` = a resposta é da publicação pedida, `owner_present`).
+Nunca imprime shortcode, ids, cookies, tokens ou URLs.
+
+Como ler o resultado: `ok` com `media_count` igual ao número de itens da publicação e `cdn_url_valid` true em todos
+comprova a consulta (atualize então `observed_at` em `POST_BY_SHORTCODE` e este documento). `contract_changed` com
+`persisted_query_error`/`http_400` indica `doc_id` errado; com `missing_root_field`, compare `data_keys` com o campo
+raiz; `ok` com `media_count` 0 não existe (vira erro); `post_shape_unknown` indica formato de resposta novo
+(`response_shape` mostra as chaves para ajustar `normalize_post`).
+
 ## Como atualizar quando o Instagram mudar
 
 Sintoma: operações ou o teste de sessão terminam em `contract_changed`. Leia o `detail` (no cartão do teste de sessão,
@@ -541,6 +637,28 @@ Trocar o `doc_id` sem nova versão (vale a primeira fonte válida):
 3. Valor embutido: edite `PROFILE_POSTS` em `web/queries.py` (atualize também `observed_at`) e ajuste os testes que
    conferem o valor: `tests/test_web_queries.py`, `tests/test_web_graphql.py` e
    `tests/test_review_web_pipeline_e2e.py`.
+
+### Consulta de post isolado (modo "Por link")
+
+A consulta embutida não foi verificada no Instagram real; se o modo "Por link" falhar com `contract_changed`, pegue
+os valores atuais no navegador:
+1. Abra o Instagram logado, abra o DevTools (F12), aba Network, filtre por `graphql`.
+2. Abra uma publicação pelo link direto (`https://www.instagram.com/p/<código>/`) e, se a consulta não aparecer no
+   carregamento da página, clique numa publicação na grade de um perfil (abre o modal do post).
+3. Ache o `POST /graphql/query` cuja resposta traz a publicação. No corpo do formulário (aba Payload), copie
+   `fb_api_req_friendly_name` e `doc_id`; na resposta (aba Preview), anote o nome da chave dentro de `data` (o campo
+   raiz) e as chaves do objeto. **Nunca copie `fb_dtsg`, `lsd`, `jazoest` nem cookies.**
+4. Mesmo nome (`PolarisPostActionLoadPostQueryQuery`), `doc_id` diferente: troque só o `doc_id`, por setting
+   (`{"instagram_web_doc_ids": {"PolarisPostActionLoadPostQueryQuery": "<doc_id>"}}`) ou env
+   `MEDIA_TOOL_IG_DOC_POLARISPOSTACTIONLOADPOSTQUERYQUERY=<doc_id>`.
+5. Campo raiz diferente (ex.: `xdt_api__v1__media__shortcode__web_info`): além do `doc_id`, defina
+   `MEDIA_TOOL_IG_ROOT_POLARISPOSTACTIONLOADPOSTQUERYQUERY=<campo raiz>` no `.env` e reinicie o backend. Os formatos
+   v1 (`items`) e "legado" já são entendidos.
+6. Nome ou variáveis diferentes (a consulta observada não aceita `shortcode`): edite `POST_BY_SHORTCODE` e
+   `post_variables` em `web/queries.py` (atualize `observed_at` com a data) e os testes que conferem os valores:
+   `tests/test_web_queries.py`, `tests/test_web_graphql_post.py` e `tests/test_poc_instagram_post.py`. Formato de
+   resposta novo: ajuste `normalize_post`/`legacy_to_v1` em `web/normalize.py` com uma fixture falsa nova.
+7. Confira com a POC de post (1 GET + 1 POST), com autorização do dono, antes de usar o modo "Por link".
 
 Se o root field mudar, edite `root_field` em `PROFILE_POSTS` e as fixtures/testes que o usam
 (`tests/test_web_queries.py`, `tests/test_web_normalize.py`, `tests/test_review_web_pipeline_e2e.py` e as fixtures

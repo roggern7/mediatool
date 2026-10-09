@@ -199,6 +199,53 @@ export interface Batch {
   group_state?: GroupChildState | null;
   /** Última exportação para pasta concluída deste lote; null/ausente se nunca foi exportado. */
   last_export?: LastExport | null;
+  /** "links": importação por link (source_profile null); null = lote de Biblioteca; ausente em backends antigos. */
+  import_mode?: "profile" | "links" | null;
+  /** Só em lote por link: links por situação. */
+  links?: BatchLinksSummary | null;
+}
+
+export interface BatchLinksSummary {
+  total: number;
+  pending: number;
+  resolved: number;
+  failed: number;
+}
+
+/** Um link de um lote por link (GET /api/batches/{id}/links). */
+export interface BatchLink {
+  position: number;
+  url: string;
+  shortcode: string;
+  status: "pending" | "resolved" | "failed" | "cancelled";
+  error_code: string | null;
+  error_message: string | null;
+  items_found: number | null;
+  profile: string | null;
+}
+
+export interface BatchLinks {
+  items: BatchLink[];
+  total: number;
+}
+
+export interface ValidLink {
+  shortcode: string;
+  /** URL normalizada: é ela que vai em POST /api/import-links. */
+  url: string;
+}
+
+/** Pré-validação dos links (POST /api/import-links/preview). */
+export interface LinksPreview {
+  valid: ValidLink[];
+  invalid: InvalidProfileEntry[];
+  duplicates: number;
+}
+
+export interface ImportLinksRequest {
+  links: string[];
+  preset_id: number | null;
+  process: boolean;
 }
 
 export type GroupChildState = "waiting" | "active" | "attention" | "completed" | "failed" | "cancelled";

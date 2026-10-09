@@ -1,4 +1,7 @@
-"""Nó do PolarisProfilePostsQuery -> RemoteMedia (contrato INSTAGRAM_WEB_CONTRACT.md, web/normalize.py)."""
+"""Nó do PolarisProfilePostsQuery -> RemoteMedia (contrato INSTAGRAM_WEB_CONTRACT.md, web/normalize.py).
+
+Também a raiz da consulta de post isolado (``normalize_post``), cujo formato NÃO foi verificado no Instagram real.
+"""
 
 from __future__ import annotations
 
@@ -211,6 +214,92 @@ def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
         ))
     stats.items += len(result)
     return result
+
+
+# --------------------------------------------------------------------------- post isolado (consulta NÃO verificada)
+
+# `__typename` do formato GraphQL "legado" (com ou sem o prefixo XDT) -> media_type v1.
+_LEGACY_TYPES = {"GraphImage": MEDIA_IMAGE, "GraphVideo": MEDIA_VIDEO, "GraphSidecar": MEDIA_CAROUSEL}
+_OWNER_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._")
+
+
+def _legacy_media_type(node: Mapping) -> object:
+    typename = node.get("__typename")
+    if isinstance(typename, str) and typename:
+        name = typename[3:] if typename.startswith("XDT") else typename
+        return _LEGACY_TYPES.get(name, name)   # nome desconhecido: normalize_node conta como tipo não suportado
+    if isinstance(node.get("edge_sidecar_to_children"), Mapping):
+        return MEDIA_CAROUSEL
+    is_video = node.get("is_video")
+    return (MEDIA_VIDEO if is_video else MEDIA_IMAGE) if isinstance(is_video, bool) else None
+
+
+def legacy_to_v1(node: Mapping) -> dict:
+    """Nó do formato GraphQL "legado" (`shortcode`, `display_resources`, `video_url`, `edge_sidecar_to_children`)
+    -> nó no formato v1 que ``normalize_node`` entende. Puro: só troca nomes de campo; a escolha de versão e a
+    contagem de descartes continuam em ``normalize_node``. Formato NÃO verificado no Instagram real."""
+    dimensions = node.get("dimensions")
+    dimensions = dimensions if isinstance(dimensions, Mapping) else {}
+    width, height = dimensions.get("width"), dimensions.get("height")
+    candidates: list = []
+    resources = node.get("display_resources")
+    for entry in resources if isinstance(resources, list) else []:
+        candidates.append({"url": entry.get("src"), "width": entry.get("config_width"),
+                           "height": entry.get("config_height")} if isinstance(entry, Mapping) else entry)
+    if node.get("display_url") is not None:
+        candidates.append({"url": node.get("display_url"), "width": width, "height": height})
+    media_type = _legacy_media_type(node)
+    out: dict = {
+        "code": node.get("shortcode"),
+        "pk": node.get("id"),
+        "media_type": media_type,
+        "product_type": node.get("product_type"),
+        "taken_at": node.get("taken_at_timestamp"),
+        "image_versions2": {"candidates": candidates},
+        "video_duration": node.get("video_duration"),
+        "original_width": width,
+        "original_height": height,
+    }
+    if node.get("video_url") is not None:
+        out["video_versions"] = [{"url": node.get("video_url"), "width": width, "height": height}]
+    if media_type == MEDIA_CAROUSEL:
+        sidecar = node.get("edge_sidecar_to_children")
+        edges = sidecar.get("edges") if isinstance(sidecar, Mapping) else None
+        children: list = []
+        for edge in edges if isinstance(edges, list) else []:
+            child = edge.get("node") if isinstance(edge, Mapping) else None
+            # Filho inválido fica na lista (None): normalize_node o conta e os índices dos demais não mudam.
+            children.append(legacy_to_v1(child) if isinstance(child, Mapping) else None)
+        out["carousel_media"] = children
+        out["carousel_media_count"] = len(children)
+    return out
+
+
+def _post_owner(node: Mapping) -> str:
+    """Username do dono da publicação em minúsculas (`user.username`, senão `owner.username`); "" se ausente."""
+    for key in ("user", "owner"):
+        holder = node.get(key)
+        name = holder.get("username") if isinstance(holder, Mapping) else None
+        if isinstance(name, str) and 0 < len(name) <= 30 and set(name.lower()) <= _OWNER_CHARS:
+            return name.lower()
+    return ""
+
+
+def normalize_post(root: Mapping, *, stats: NormalizeStats | None = None) -> list[RemoteMedia]:
+    """Raiz da consulta de UM post -> todas as mídias dele (carrossel inteiro, na ordem), sem filtro de conteúdo.
+
+    Aceita os dois formatos plausíveis (a consulta não foi verificada no Instagram real): v1 (`{"items": [nó]}` ou
+    um nó direto com `media_type` numérico) e GraphQL "legado" (convertido por ``legacy_to_v1``). `source_profile`
+    é o dono da publicação. Lista vazia quando nada utilizável veio; ``stats`` diz por quê."""
+    node: object = root
+    items = root.get("items")
+    if isinstance(items, list):
+        node = next((item for item in items if isinstance(item, Mapping)), None)
+        if node is None:
+            return []
+    media_type = node.get("media_type")
+    v1 = isinstance(media_type, int) and not isinstance(media_type, bool)
+    return normalize_node(node if v1 else legacy_to_v1(node), profile=_post_owner(node), stats=stats)
 
 
 def filter_by_content(items: list[RemoteMedia], content: ContentType) -> list[RemoteMedia]:

@@ -25,7 +25,14 @@ from typing import TYPE_CHECKING
 from app.core.logging import redact, register_secret
 
 from .errors import InstagramWebError, classify_response
-from .queries import PROFILE_POSTS, QuerySpec, profile_posts_variables, resolve_spec
+from .queries import (
+    POST_BY_SHORTCODE,
+    PROFILE_POSTS,
+    QuerySpec,
+    post_variables,
+    profile_posts_variables,
+    resolve_spec,
+)
 
 if TYPE_CHECKING:
     from .bootstrap import WebBootstrap, WebState
@@ -525,6 +532,12 @@ def _has_root(payload: object, root_field: str) -> bool:
     return isinstance(data, Mapping) and isinstance(data.get(root_field), dict)
 
 
+def _root_is_null(payload: object, root_field: str) -> bool:
+    """``data`` presente com o campo raiz presente e ``null`` (consulta de post: a publicação não veio)."""
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    return isinstance(data, Mapping) and root_field in data and data[root_field] is None
+
+
 def _viewer_id(data: Mapping) -> str | None:
     """``data.xdt_viewer.user.id`` (prova de quem o Instagram acha que é o viewer); tolera ausente/null."""
     viewer = data.get("xdt_viewer")
@@ -667,8 +680,13 @@ class InstagramWebGraphQL:
                         _errors_text(self._last_errors))
         return root
 
-    def _query(self, spec: QuerySpec, variables: Mapping[str, object], referer_path: str, op: dict) -> dict:
-        """``op["rebootstrapped"]`` é compartilhado pela operação inteira (1 re-bootstrap por operação)."""
+    def _query(self, spec: QuerySpec, variables: Mapping[str, object], referer_path: str, op: dict, *,
+               post: bool = False) -> dict:
+        """``op["rebootstrapped"]`` é compartilhado pela operação inteira (1 re-bootstrap por operação).
+
+        ``post``: consulta de post isolado. Raiz presente e ``null`` (sem evidência de token recusado) é erro DO
+        LINK (``content_unavailable``/``profile_private`` com mensagem de publicação), não de contrato; a listagem
+        de perfil (``post=False``) não muda."""
         spec = self._spec(spec)
         force = False
         while True:
@@ -691,7 +709,11 @@ class InstagramWebGraphQL:
                     and self._authenticated_viewer(payload):
                 # xdt_viewer.user.id == ds_user_id: sessão comprovadamente autenticada. Raiz null/ausente aqui é
                 # problema do conteúdo, não token/sessão recusada (sem re-bootstrap, mesmo com errors citando login).
-                raise self._content_error(resp, payload, secrets)
+                if not post:
+                    raise self._content_error(resp, payload, secrets)
+                if _root_is_null(payload, spec.root_field):
+                    raise self._post_error(resp, payload, secrets)
+                # Post com a raiz AUSENTE: segue a classificação normal (contrato), abaixo.
             issue = None if has_root else _token_issue(resp, payload)
             if issue is None and not has_root and err is not None and err.code == "request_auth_failed":
                 # 401/require_login sem marcador de token também passam pela única renovação (seção 7).
@@ -711,6 +733,8 @@ class InstagramWebGraphQL:
                 raise self._after_renewal_error(spec, resp, payload, err, secrets)
             if err is not None:
                 raise err
+            if post and _root_is_null(payload, spec.root_field):
+                raise self._post_error(resp, payload, secrets)
             return self._extract(spec, resp, payload, secrets)
 
     def _after_renewal_error(self, spec: QuerySpec, resp: WebResponse, payload: object,
@@ -761,6 +785,18 @@ class InstagramWebGraphQL:
             code, detail = "content_unavailable", "root_null_authenticated"
             message = "O Instagram não entregou as publicações deste perfil para a conta da sessão."
         log.warning("GraphQL: sessão confirmada, mas sem publicações na resposta (%s, HTTP %s)", detail, resp.status)
+        return InstagramWebError(code, message, stage=STAGE, diagnostic=_diagnostic(resp, payload, detail, secrets))
+
+    def _post_error(self, resp: WebResponse, payload: object, secrets: tuple[str, ...]) -> InstagramWebError:
+        """Consulta de post com a raiz ``null``: a publicação não existe mais ou a conta da sessão não a vê."""
+        messages = " ".join(str(e.get("message") or e.get("summary") or "").lower() for e in _error_entries(payload))
+        if "private" in messages or "privad" in messages:
+            code, detail = "profile_private", "post_null_private"
+            message = "A publicação é de um perfil privado que a conta da sessão não segue."
+        else:
+            code, detail = "content_unavailable", "post_null"
+            message = "A publicação não existe mais ou não está disponível para a conta da sessão."
+        log.warning("GraphQL: publicação não veio na resposta (%s, HTTP %s)", detail, resp.status)
         return InstagramWebError(code, message, stage=STAGE, diagnostic=_diagnostic(resp, payload, detail, secrets))
 
     def _contract(self, resp: WebResponse, payload: object, detail: str, secrets: tuple[str, ...]):
@@ -988,6 +1024,18 @@ class InstagramWebGraphQL:
                         _counts_text(dropped))
         log.info("GraphQL página renovada: %d nós", len(nodes))
         return nodes
+
+    def post_by_shortcode(self, shortcode: str) -> dict:
+        """Raiz da consulta de UM post (1 POST; no máximo 1 re-bootstrap). NÃO VERIFICADO no Instagram real
+        (queries.POST_BY_SHORTCODE). Raiz ``null`` levanta ``content_unavailable``/``profile_private``; quem chama
+        normaliza o objeto devolvido (normalize.normalize_post). O shortcode nunca é logado."""
+        spec = POST_BY_SHORTCODE
+        variables = post_variables(self._spec(spec), shortcode)
+        root = self._query(spec, variables, f"/p/{shortcode}/", {"rebootstrapped": False}, post=True)
+        if self._last_errors:
+            log.warning("GraphQL %s: resposta com dados e errors parciais: %s", spec.name,
+                        _errors_text(self._last_errors))
+        return root
 
     @staticmethod
     def _contract_conn(conn: Mapping, detail: str) -> InstagramWebError:

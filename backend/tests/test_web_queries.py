@@ -7,8 +7,10 @@ import logging
 
 from app.integrations.instagram.web.queries import (
     KNOWN_QUERIES,
+    POST_BY_SHORTCODE,
     PROFILE_POSTS,
     QuerySpec,
+    post_variables,
     profile_posts_variables,
     resolve_spec,
 )
@@ -24,7 +26,49 @@ ENV_KEY = "MEDIA_TOOL_IG_DOC_POLARISPROFILEPOSTSQUERY"
 def test_profile_posts_spec_matches_contract():
     assert PROFILE_POSTS == QuerySpec("PolarisProfilePostsQuery", "28991540097136703",
                                       "xdt_api__v1__feed__user_timeline_graphql_connection", "2026-10-03", RELAY)
-    assert KNOWN_QUERIES == ("PolarisProfilePostsQuery",)
+    assert KNOWN_QUERIES == ("PolarisProfilePostsQuery", "PolarisPostActionLoadPostQueryQuery")
+
+
+# --------------------------------------------------------------------------- consulta de post (NÃO verificada)
+
+POST_DOC_ENV = "MEDIA_TOOL_IG_DOC_POLARISPOSTACTIONLOADPOSTQUERYQUERY"
+POST_ROOT_ENV = "MEDIA_TOOL_IG_ROOT_POLARISPOSTACTIONLOADPOSTQUERYQUERY"
+
+
+def test_post_spec_is_marked_unverified():
+    assert POST_BY_SHORTCODE == QuerySpec("PolarisPostActionLoadPostQueryQuery", "8845758582119845",
+                                          "xdt_shortcode_media", "unverified", {})
+
+
+def test_post_variables():
+    variables = post_variables(POST_BY_SHORTCODE, "FAKEPOSTIMG1")
+    assert variables == {"shortcode": "FAKEPOSTIMG1", "fetch_tagged_user_count": None, "hoisted_comment_id": None,
+                         "hoisted_reply_id": None}
+
+
+def test_post_doc_id_override_by_setting_and_env():
+    assert resolve_spec(POST_BY_SHORTCODE, {}, {}) is POST_BY_SHORTCODE
+    assert resolve_spec(POST_BY_SHORTCODE, {"polarispostactionloadpostqueryquery": "777777"}, {}).doc_id == "777777"
+    assert resolve_spec(POST_BY_SHORTCODE, {}, {POST_DOC_ENV: "888888"}).doc_id == "888888"
+    # o override de uma consulta não vaza para a outra
+    assert resolve_spec(PROFILE_POSTS, {"PolarisPostActionLoadPostQueryQuery": "777777"},
+                        {POST_DOC_ENV: "888888"}) is PROFILE_POSTS
+
+
+def test_root_field_override_by_env_only_for_that_query():
+    env = {POST_ROOT_ENV: " xdt_api__v1__media__shortcode__web_info ", POST_DOC_ENV: "999999"}
+    spec = resolve_spec(POST_BY_SHORTCODE, {}, env)
+    assert spec.root_field == "xdt_api__v1__media__shortcode__web_info" and spec.doc_id == "999999"
+    assert spec.name == POST_BY_SHORTCODE.name
+    assert resolve_spec(PROFILE_POSTS, {}, env) is PROFILE_POSTS
+
+
+def test_invalid_root_field_override_ignored_with_safe_warning(caplog):
+    caplog.set_level(logging.WARNING)
+    for bad in ("FAKE Root-Value;1", "Xdt_Upper", "q7", "x" * 121, "raiz\nnova", "ráiz_falsa"):
+        caplog.clear()
+        assert resolve_spec(POST_BY_SHORTCODE, {}, {POST_ROOT_ENV: bad}) is POST_BY_SHORTCODE
+        assert "campo raiz inválido" in caplog.text and bad not in caplog.text
 
 
 def test_resolve_without_overrides_keeps_builtin():

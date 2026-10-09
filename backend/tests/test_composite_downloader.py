@@ -52,8 +52,9 @@ class Recording(FakeInstagramDownloader):
         if self.error is not None:
             raise self.error
 
-    def resolve_post(self, shortcode):
+    def resolve_post(self, shortcode, **kwargs):
         self.calls.append("resolve_post")
+        self.resolve_kwargs = kwargs
         if self.error is not None:
             raise self.error
         return []
@@ -104,6 +105,39 @@ def test_web_strategy_never_falls_back(tmp_path):
     assert run_all_ops(dl, tmp_path) == ["contract_changed"] * 4
     assert dl.test_session().message == "web"
     assert gallery.calls == []
+
+
+@pytest.mark.parametrize("strategy, used", [("web", "web"), ("gallery_dl", "gallery"), ("auto", "web")])
+def test_resolve_post_forwards_cancel_only_when_given(strategy, used):
+    import threading
+
+    providers = {"web": Recording("web"), "gallery": Recording("gallery")}
+    dl = CompositeInstagramDownloader(providers["web"], providers["gallery"], strategy=strategy)
+    cancel = threading.Event()
+    assert dl.resolve_post("ABCDE1", cancel=cancel) == []
+    assert providers[used].resolve_kwargs == {"cancel": cancel}
+    # sem cancel nada é repassado (providers antigos, sem o parâmetro, continuam funcionando)
+    assert dl.resolve_post("ABCDE1") == [] and providers[used].resolve_kwargs == {}
+    assert providers[used].calls == ["resolve_post"] * 2
+    assert [p.calls for name, p in providers.items() if name != used] == [[]]
+
+
+@pytest.mark.parametrize("code", sorted(FALLBACK_CODES))
+def test_auto_resolve_post_fallback_keeps_cancel(code):
+    import threading
+
+    web, gallery = Recording("web", error=web_error(code)), Recording("gallery")
+    cancel = threading.Event()
+    assert CompositeInstagramDownloader(web, gallery, strategy="auto").resolve_post("ABCDE1", cancel=cancel) == []
+    assert web.resolve_kwargs == gallery.resolve_kwargs == {"cancel": cancel}
+
+
+@pytest.mark.parametrize("code", ["content_unavailable", "profile_private", "rate_limited", "invalid_input"])
+def test_auto_resolve_post_link_errors_do_not_fall_back(code):
+    web, gallery = Recording("web", error=web_error(code)), Recording("gallery")
+    with pytest.raises(InstagramError) as info:
+        CompositeInstagramDownloader(web, gallery, strategy="auto").resolve_post("ABCDE1")
+    assert info.value.code == code and gallery.calls == []
 
 
 @pytest.mark.parametrize("code", sorted(FALLBACK_CODES))

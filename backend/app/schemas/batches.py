@@ -53,6 +53,56 @@ class ImportGroupRequest(StrictModel):
     process: bool = Field(default=False, strict=True)
 
 
+class LinksPreviewRequest(StrictModel):
+    # Lista de entradas e/ou texto colado: um link de publicação por linha (vírgula, ponto e vírgula e espaço em
+    # branco também separam: link não tem espaço).
+    entries: list[str] | None = Field(default=None, max_length=100_000)
+    text: str | None = Field(default=None, max_length=2_000_000)
+
+
+class ValidLink(BaseModel):
+    shortcode: str
+    url: str   # normalizada: https://www.instagram.com/p/<código>/ ou .../reel/<código>/
+
+
+class LinksPreview(BaseModel):
+    valid: list[ValidLink]
+    invalid: list[InvalidProfileEntry]
+    duplicates: int
+
+
+class ImportLinksRequest(StrictModel):
+    # Cada entrada: link de uma publicação. Entrada inválida = 422 `invalid_links` (com a lista).
+    links: list[str] = Field(min_length=1, max_length=100_000)
+    preset_id: PositiveId | None = None
+    process: bool = Field(default=False, strict=True)
+
+
+class BatchLinkOut(BaseModel):
+    position: int   # 1-based, na ordem colada
+    url: str
+    shortcode: str
+    # `cancelled`: link que ainda estava pendente quando o lote foi cancelado.
+    status: Literal["pending", "resolved", "failed", "cancelled"]
+    error_code: str | None
+    error_message: str | None
+    items_found: int | None
+    profile: str | None
+
+
+class BatchLinkList(BaseModel):
+    items: list[BatchLinkOut]
+    total: int
+
+
+class BatchLinks(BaseModel):
+    # Links do lote por estado gravado (`pending + resolved + failed = total`).
+    total: int
+    pending: int
+    resolved: int
+    failed: int
+
+
 class RestartListingRequest(StrictModel):
     # Sem `confirm: true` a API responde 409 restart_confirmation_required com o aviso de custo.
     confirm: bool = Field(default=False, strict=True)
@@ -111,6 +161,10 @@ class BatchOut(BaseModel):
     # Por que a listagem terminou: "profile_end" (fim real do perfil; pode ter menos que o pedido) ou "limit"
     # (quantidade pedida atingida). None enquanto lista, em erro/cancelamento e em lotes antigos.
     listing_end: Literal["profile_end", "limit"] | None = None
+    # Como o lote foi criado: "profile" (importação por perfil), "links" (importação por link) ou None (Biblioteca).
+    import_mode: Literal["profile", "links"] | None = None
+    # Só em lote por link: quantos links há e em que estado (lista: GET /api/batches/{id}/links).
+    links: BatchLinks | None = None
     # Grupo de importação (vários perfis): None em lotes avulsos e antigos. `group_position` é 1-based.
     group_id: int | None = None
     group_position: int | None = None
@@ -124,6 +178,11 @@ class BatchOut(BaseModel):
     # Só com ?include_jobs=true: no máximo 500 jobs (os mais recentes); a lista completa é GET /api/jobs?batch_id=.
     jobs: list[JobOut] | None = None
     jobs_truncated: bool | None = None
+
+
+class ImportLinksOut(BatchOut):
+    # Só na resposta de POST /api/import-links: repetições removidas da lista enviada.
+    duplicates: int = 0
 
 
 class BatchList(BaseModel):

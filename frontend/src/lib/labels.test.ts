@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   batchLabel,
+  batchOriginLabel,
   batchTitle,
   batchToneOf,
   isDownloadOnly,
+  isLinksBatch,
   isQueuedInGroup,
   jobKindLabel,
   showDuplicate,
@@ -26,6 +28,30 @@ describe("rótulos de lote", () => {
     expect(batchTitle({ ...base, status: "running" })).toBe("Importando @perfil");
     expect(batchTitle({ ...base, status: "listing" })).toBe("Importando @perfil");
     expect(batchTitle({ ...base, status: "cancelled" })).toBe("Importação de @perfil");
+  });
+});
+
+describe("lote por link", () => {
+  const links = { ...base, source_profile: null, import_mode: "links", links: { total: 3 } };
+  it("só import_mode links conta como lote por link", () => {
+    expect(isLinksBatch(links)).toBe(true);
+    expect(isLinksBatch({ import_mode: "profile" })).toBe(false);
+    expect(isLinksBatch({ import_mode: null })).toBe(false);
+    expect(isLinksBatch({})).toBe(false);
+  });
+  it("origem e título não mostram perfil vazio", () => {
+    expect(batchOriginLabel(links)).toBe("Links (3)");
+    expect(batchOriginLabel({ ...links, links: null })).toBe("Importação por link");
+    expect(batchOriginLabel({ ...base, import_mode: "profile" })).toBe("@perfil");
+    expect(batchOriginLabel({ source_profile: null })).toBe("@?");
+    expect(batchTitle({ ...links, status: "listing" })).toBe("Importando por link");
+    expect(batchTitle({ ...links, status: "completed" })).toBe("Importação por link");
+  });
+  it("em listing está resolvendo os links; atenção e os demais estados seguem iguais", () => {
+    expect(batchLabel({ ...links, status: "listing" })).toBe("Resolvendo links");
+    expect(batchLabel({ ...links, status: "listing", listing_state: "needs_attention" })).toBe("Precisa de atenção");
+    expect(batchLabel({ ...links, status: "running" })).toBe("Em andamento");
+    expect(batchLabel({ ...links, status: "failed" })).toBe("Falhou");
   });
 });
 

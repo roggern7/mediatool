@@ -1,0 +1,41 @@
+{
+ "data": {
+  "xdt_shortcode_media": {
+   "__typename": "XDTGraphVideo",
+   "id": "3200000000000000002",
+   "shortcode": "FAKEPOSTREEL",
+   "dimensions": {
+    "height": 1920,
+    "width": 1080
+   },
+   "display_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/preel1_1080x1920.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+   "display_resources": [
+    {
+     "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/preel1_640x1137.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+     "config_width": 640,
+     "config_height": 1137
+    },
+    {
+     "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/preel1_1080x1920.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+     "config_width": 1080,
+     "config_height": 1920
+    }
+   ],
+   "is_video": true,
+   "video_url": "https://video-fake.fbcdn.net/v/t50.fake/preel1_1080x1920.mp4?efg=FAKE&oh=FAKE_OH&oe=00000000",
+   "video_duration": 12.5,
+   "has_audio": true,
+   "product_type": "clips",
+   "taken_at_timestamp": 1700000000,
+   "owner": {
+    "id": "900000001",
+    "username": "Dono_Fake",
+    "is_private": false
+   }
+  }
+ },
+ "extensions": {
+  "is_final": true
+ },
+ "status": "ok"
+}

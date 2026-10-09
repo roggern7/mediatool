@@ -150,7 +150,7 @@ class FakeInstagramDownloader(InstagramDownloader):
         size = ref.page_size
         return [replace(item, listing_ref=ref) for item in self.items[(ref.page_index - 1) * size: ref.page_index * size]]
 
-    def resolve_post(self, shortcode: str) -> list[RemoteMedia]:
+    def resolve_post(self, shortcode: str, *, cancel=None) -> list[RemoteMedia]:
         return [item for item in self.items if item.source_post_id == shortcode]
 
     def download(self, item: RemoteMedia, dest_dir: Path, *, cancel=None, progress=None) -> Path:

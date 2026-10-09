@@ -281,6 +281,13 @@ class JobRepository:
             (batch_id, page_index),
         )
 
+    def post_refreshed_at(self, batch_id: int, post_id: str) -> str | None:
+        """Última renovação de URL registrada para jobs desta publicação no lote (lote por link)."""
+        return self.db.scalar(
+            "SELECT MAX(media_url_refreshed_at) FROM jobs WHERE batch_id = ? AND source_post_id = ?",
+            (batch_id, post_id),
+        )
+
     def apply_refreshed_urls(
         self, batch_id: int, urls: list[tuple[str, int, str, str | None]], refreshed_at: str
     ) -> int:

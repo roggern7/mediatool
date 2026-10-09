@@ -94,8 +94,10 @@ class CompositeInstagramDownloader(InstagramDownloader):
     def get_profile(self, username: str) -> ProfileInfo:
         return self._call("get_profile", lambda d: d.get_profile(username))
 
-    def resolve_post(self, shortcode: str) -> list[RemoteMedia]:
-        return self._call("resolve_post", lambda d: d.resolve_post(shortcode))
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None) -> list[RemoteMedia]:
+        # cancel só é repassado quando informado (providers antigos não o conhecem).
+        extra: dict = {} if cancel is None else {"cancel": cancel}
+        return self._call("resolve_post", lambda d: d.resolve_post(shortcode, **extra))
 
     def download(
         self,

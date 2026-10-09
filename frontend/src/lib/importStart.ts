@@ -15,9 +15,9 @@ import {
 } from "./importOptions";
 
 /** Resposta da pré-validação, com a lista (chave) para a qual ela foi pedida. */
-export interface PreviewResult {
+export interface PreviewResult<T = ProfilesPreview> {
   key: string;
-  data: ProfilesPreview;
+  data: T;
 }
 
 /** Chave da lista de entradas enviada ao preview (as entradas nunca contêm quebra de linha). */
@@ -29,7 +29,7 @@ export function entriesKey(entries: string[]): string {
  * Preview que pode ser exibido e usado para iniciar: só a resposta do backend para EXATAMENTE a lista atual,
  * com a digitação parada e a conferência terminada. Qualquer outra situação é "ainda conferindo" (null).
  */
-export function settledPreview(input: {
+export function settledPreview<T = ProfilesPreview>(input: {
   /** Chave da lista atual do campo. */
   currentKey: string;
   /** Chave pedida ao backend (atrasada pelo debounce). */
@@ -37,8 +37,8 @@ export function settledPreview(input: {
   /** O campo mudou e a lista atual ainda não foi recalculada. */
   typing: boolean;
   loading: boolean;
-  result: PreviewResult | null | undefined;
-}): ProfilesPreview | null {
+  result: PreviewResult<T> | null | undefined;
+}): T | null {
   const { currentKey, requestedKey, typing, loading, result } = input;
   if (typing || loading || currentKey === "" || requestedKey !== currentKey) return null;
   return result && result.key === currentKey ? result.data : null;

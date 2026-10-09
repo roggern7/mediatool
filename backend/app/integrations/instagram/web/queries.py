@@ -2,6 +2,10 @@
 
 Único lugar do código com `doc_id`. O valor embutido é o observado no Chrome do dono; pode ser trocado sem
 nova versão por env `MEDIA_TOOL_IG_DOC_<NAME>` ou pelo setting `instagram_web_doc_ids` (nome -> doc_id).
+
+ATENÇÃO: a consulta de post isolado (POST_BY_SHORTCODE) NÃO foi observada no Chrome do dono nem verificada no
+Instagram real; nome, doc_id, campo raiz e variáveis vêm de conhecimento público e são trocáveis sem nova versão
+(doc_id por setting/env; campo raiz por env `MEDIA_TOOL_IG_ROOT_<NAME>`).
 """
 
 from __future__ import annotations
@@ -16,6 +20,10 @@ log = logging.getLogger(__name__)
 # Só dígitos ASCII (\d aceitaria dígitos Unicode); usar com fullmatch.
 DOC_ID_RE = re.compile(r"[0-9]{5,25}")
 ENV_PREFIX = "MEDIA_TOOL_IG_DOC_"
+# Override do campo raiz (`data.<campo>`) por env, para quando o doc_id trocado responder em outra raiz.
+ROOT_ENV_PREFIX = "MEDIA_TOOL_IG_ROOT_"
+# Nome de campo seguro: minúsculas ASCII, dígitos e `_` (vai para o header X-Root-Field-Name); usar com fullmatch.
+ROOT_FIELD_RE = re.compile(r"[a-z][a-z0-9_]{2,119}")
 
 
 @dataclass(frozen=True)
@@ -35,8 +43,17 @@ PROFILE_POSTS = QuerySpec(
      "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": False},
 )
 
+# Post isolado pelo shortcode. NÃO VERIFICADO: sem evidência do navegador do dono e sem requisição real (por isso
+# `observed_at` é "unverified"). Nome/doc_id/raiz do conhecimento público; a resposta esperada é o formato GraphQL
+# "legado" (ver normalize.normalize_post). Se o Instagram recusar, troque o doc_id (setting/env) e, se a consulta
+# nova responder em outra raiz (ex.: `PolarisPostRootQuery`, raiz `xdt_api__v1__media__shortcode__web_info`), o
+# campo raiz por env `MEDIA_TOOL_IG_ROOT_POLARISPOSTACTIONLOADPOSTQUERYQUERY`.
+POST_BY_SHORTCODE = QuerySpec(
+    "PolarisPostActionLoadPostQueryQuery", "8845758582119845", "xdt_shortcode_media", "unverified", {},
+)
+
 # Nomes aceitos em `instagram_web_doc_ids` (o schema valida contra esta lista).
-KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name,)
+KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, POST_BY_SHORTCODE.name)
 
 
 def _valid_override(value: object, *, name: str, source: str) -> str | None:
@@ -55,7 +72,11 @@ def resolve_spec(spec: QuerySpec, overrides: Mapping[str, str],
     Settings.env, que inclui o .env; ``os.environ`` não é lido aqui) > valor embutido. Override inválido (fora de
     ``[0-9]{5,25}``) cai para a próxima fonte, com aviso que não mostra o valor. Nomes fora de KNOWN_QUERIES são
     ignorados com aviso que não mostra nome nem valor.
+
+    Campo raiz: env `MEDIA_TOOL_IG_ROOT_<NAME>` (só env; nome de campo seguro, ROOT_FIELD_RE) > valor embutido.
+    Valor inválido é ignorado com aviso que não o mostra.
     """
+    spec = _resolve_root(spec, env)
     known = {name.upper() for name in KNOWN_QUERIES}
     unknown = sum(1 for key in (overrides or {}) if not isinstance(key, str) or key.upper() not in known)
     if unknown:
@@ -71,6 +92,24 @@ def resolve_spec(spec: QuerySpec, overrides: Mapping[str, str],
         if doc_id:
             return replace(spec, doc_id=doc_id)
     return spec
+
+
+def _resolve_root(spec: QuerySpec, env: Mapping[str, str] | None) -> QuerySpec:
+    value = (env or {}).get(ROOT_ENV_PREFIX + spec.name.upper())
+    if not value:
+        return spec
+    if isinstance(value, str) and ROOT_FIELD_RE.fullmatch(value.strip()):
+        return replace(spec, root_field=value.strip())
+    log.warning("campo raiz inválido ignorado para %s (origem: env)", spec.name)
+    return spec
+
+
+def post_variables(spec: QuerySpec, shortcode: str) -> dict:
+    """Variáveis da consulta de post isolado. NÃO VERIFICADO no Instagram real (conhecimento público)."""
+    variables: dict = {"shortcode": shortcode, "fetch_tagged_user_count": None, "hoisted_comment_id": None,
+                       "hoisted_reply_id": None}
+    variables.update(spec.relay_providers)
+    return variables
 
 
 def profile_posts_variables(spec: QuerySpec, username: str, count: int, after: str | None) -> dict:

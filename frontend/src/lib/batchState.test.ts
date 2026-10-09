@@ -27,6 +27,22 @@ describe("estado do lote", () => {
     expect(n?.canResume).toBe(true);
     expect(n?.text).toContain("Motivo: O Instagram recusou a chamada usada pelo Media Tool.");
   });
+  it("lote por link parado por falhas seguidas (links_failing): mensagem do backend e retomar", () => {
+    const b = {
+      listing_state: "needs_attention",
+      error_code: "links_failing",
+      error_message: "3 links seguidos falharam",
+    };
+    const n = batchNotice(b, now);
+    expect(n?.kind).toBe("needs_attention");
+    expect(n?.canResume).toBe(true);
+    expect(n?.text).toContain("Motivo: 3 links seguidos falharam.");
+    // Sem a mensagem do backend, o texto fixo em pt-BR entra no lugar (nunca o código cru).
+    const fallback = batchNotice({ ...b, error_message: null }, now);
+    expect(fallback?.canResume).toBe(true);
+    expect(fallback?.text).toContain("Motivo: Vários links seguidos não puderam ser importados.");
+    expect(fallback?.text).not.toContain("links_failing");
+  });
   it("needs_attention sem motivo continua claro", () => {
     const n = batchNotice({ listing_state: "needs_attention" }, now);
     expect(n?.text.startsWith("A importação parou e precisa de você.")).toBe(true);

@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -49,6 +50,14 @@ RECENT_REFRESH_FAILED_MESSAGE = (
     "A renovação do link desta página da listagem falhou há pouco; o item não foi tentado de novo para poupar o "
     "Instagram."
 )
+# Lote por link: a renovação pede a publicação de novo (resolve_post), sem página de listagem.
+POST_STILL_REFUSED_MESSAGE = (
+    "O link de download desta mídia continua recusado mesmo após consultar a publicação de novo."
+)
+RECENT_POST_REFRESH_FAILED_MESSAGE = (
+    "A renovação do link desta publicação falhou há pouco; o item não foi tentado de novo para poupar o Instagram."
+)
+NOT_IN_POST_MESSAGE ="A mídia não apareceu mais na publicação ao renovar o link de download."
 # Irmãos de uma renovação que falhou com estes códigos voltam pelo retry controlado (os demais falham na hora).
 RETRYABLE_REFRESH_CODES = frozenset({"network_error", "timeout", "rate_limited", "request_auth_failed"})
 
@@ -482,6 +491,9 @@ class JobExecutor:
         page_index = ref.get("listing_page_index") or job.get("listing_page_index")
         page_size = ref.get("listing_page_size") or job.get("listing_page_size")
         cursor = ref.get("listing_cursor")
+        if batch_id is not None and page_index is None and self._links_batch(batch_id):
+            # Lote por link: não há página de listagem; a publicação é pedida de novo (resolve_post).
+            return self._download_after_expired_post(downloader, used_url, temp_dir)
         if batch_id is None or page_index is None or page_size is None or (int(page_index) > 1 and not cursor):
             raise JobFailure("content_unavailable", NO_LISTING_REF_MESSAGE)
         page_index = int(page_index)
@@ -557,6 +569,92 @@ class JobExecutor:
             # A página conta como renovada agora (evita nova chamada para os irmãos dentro do intervalo mínimo).
             self._set(media_url_refreshed_at=now)
             raise JobFailure("content_unavailable", NOT_IN_PAGE_MESSAGE)
+
+    # ---- renovação de URL expirada em lote por link (docs/CONTRACTS.md, seção 8.3) -----------------------------
+    def _links_batch(self, batch_id: int) -> bool:
+        batch = self.ctx.batches.get(batch_id)
+        return batch is not None and batch.get("import_mode") == "links"
+
+    def _download_after_expired_post(self, downloader, used_url: str, temp_dir: Path) -> Path:
+        """URL recusada (ou já apagada) num lote por link: pede a publicação de novo (uma vez por publicação) e tenta
+        este download UMA vez de novo."""
+        job = self.job
+        batch_id = job["batch_id"]
+        shortcode = job["source_post_id"] or ""
+        logger.info("Job %s: link de download expirado; renovação da publicação no lote %s", self.job_id, batch_id)
+        with _page_refresh_lock((id(self.ctx), batch_id, "post", shortcode), self.cancel):
+            self._check_cancel()
+            current = self.ctx.jobs.get_remote_ref(self.job_id)
+            if current.get("media_url") and current["media_url"] != used_url:
+                logger.info("Job %s: link já renovado por outro job da mesma publicação", self.job_id)
+            else:
+                # Toda tentativa de renovação da publicação fica registrada em `listing_pages`, com a posição do link
+                # no lugar do índice de página (lote por link não tem páginas): mesmas proteções de `_refresh_page`.
+                position = self.ctx.batches.link_position(batch_id, shortcode)
+                if position is None:
+                    # Publicação sem link correspondente no lote: chave própria (negativa), nunca dividida com outra.
+                    position = -(zlib.crc32(shortcode.encode("utf-8")) + 1)
+                now = parse_utc(utc_now())
+                record = self.ctx.jobs.listing_page(batch_id, position) or {}
+                record_at = parse_utc(record.get("last_refresh_at"))
+                recent = record_at is not None and (now - record_at).total_seconds() < REFRESH_MIN_INTERVAL
+                if recent and not record.get("last_refresh_ok") and not instagram_paused(self.worker):
+                    # Renovação recente desta publicação falhou: mesmo código, sem nova requisição (os itens irmãos
+                    # do carrossel não repetem a consulta).
+                    code = record.get("last_refresh_code") or "content_unavailable"
+                    raise _ReplayedFailure(code, RECENT_POST_REFRESH_FAILED_MESSAGE,
+                                           retryable=code in RETRYABLE_REFRESH_CODES)
+                last = parse_utc(self.ctx.jobs.post_refreshed_at(batch_id, shortcode))
+                if recent and record.get("last_refresh_ok") and (last is None or record_at > last):
+                    last = record_at
+                if last is not None and (now - last).total_seconds() < REFRESH_MIN_INTERVAL:
+                    raise JobFailure("content_unavailable", POST_STILL_REFUSED_MESSAGE)
+                # Seção 8: nenhuma requisição ao Instagram durante pausa (o job aguarda sem consumir tentativa).
+                if instagram_paused(self.worker):
+                    raise _AwaitPause()
+                self._check_cancel()
+                self._refresh_post(downloader, shortcode, position)
+                current = self.ctx.jobs.get_remote_ref(self.job_id)
+        self.ref = current
+        self._check_cancel()
+        try:
+            return self._download(downloader, self._remote_media(), temp_dir)
+        except InstagramError as exc:
+            if exc.code != "media_url_expired":
+                raise
+            raise JobFailure("content_unavailable", POST_STILL_REFUSED_MESSAGE) from None
+
+    def _refresh_post(self, downloader, shortcode: str, position: int) -> None:
+        """UMA chamada de `resolve_post`; grava as URLs novas de todos os jobs não terminais da publicação no lote.
+        Erros sobem com a classificação normal (pausa etc.), sem nova tentativa aqui."""
+        job = self.job
+        try:
+            items = downloader.resolve_post(shortcode, cancel=self.cancel)
+        except BaseException as exc:
+            if not (is_cancellation(exc) or self.cancel.is_set() or isinstance(exc, InstagramPaused)):
+                # Como em `_refresh_page`: a tentativa fica registrada; 3 falhas seguidas do mesmo código pausam o
+                # lote.
+                code = classify(exc).code
+                streak = self.ctx.jobs.record_refresh(job["batch_id"], position, ok=False, code=code, at=utc_now())
+                if streak >= BREAKER_REFRESH_FAILURES:
+                    self._pause_batch(job["batch_id"], code, f"{BREAKER_REFRESH_FAILURES} renovações seguidas")
+            raise
+        self.ctx.jobs.record_refresh(job["batch_id"], position, ok=True, code=None, at=utc_now())
+        self._check_cancel()
+        self.worker.note_auth_success()  # publicação entregue: resposta autenticada com sucesso (seção 7)
+        now = utc_now()
+        urls = [
+            (item.source_post_id, int(item.source_media_index or 0), item.media_url, item.thumbnail_url)
+            for item in items
+            if item.media_url
+        ]
+        updated = self.ctx.jobs.apply_refreshed_urls(job["batch_id"], urls, now)
+        logger.info("Lote %s: publicação renovada (%s jobs com link novo)", job["batch_id"], updated)
+        key = (job["source_post_id"], int(job["source_media_index"] or 0))
+        if key not in {(post_id, index) for post_id, index, _, _ in urls}:
+            # A publicação conta como renovada agora (evita nova chamada para os irmãos no intervalo mínimo).
+            self._set(media_url_refreshed_at=now)
+            raise JobFailure("content_unavailable", NOT_IN_POST_MESSAGE)
 
     def _link_sha_duplicate(self, existing: dict[str, Any], downloaded: Path) -> dict[str, Any]:
         downloaded.unlink(missing_ok=True)

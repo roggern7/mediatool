@@ -404,6 +404,20 @@ A tabela **Importações recentes** lista as importações anteriores: cada grup
 os lotes de um perfil. Só uma listagem roda por vez. Mídias já baixadas antes não são baixadas de novo (ver
 deduplicação na seção Fila).
 
+### Importar por link
+
+No modo **Por link**, cole um ou vários links de publicações, um por linha (`https://www.instagram.com/p/...`,
+`/reel/...` ou `/reels/...`; até 500 por vez). O app baixa todas as mídias de cada publicação: foto, Reel, vídeo ou o
+carrossel inteiro. Os links colados formam um lote só (`POST /api/import-links`, contrato em `docs/CONTRACTS.md`,
+seção 8.3), consultado um link por vez. Link repetido é removido; link que falha (publicação apagada, perfil privado)
+fica marcado com o motivo e os outros seguem. O lote aparece em **Importações recentes** e aceita **Cancelar**,
+**Tentar falhas novamente**, **Baixar ZIP** e **Exportar para pasta** como os demais.
+
+Ressalva: a consulta de publicação isolada ainda NÃO foi verificada no Instagram real; a validação depende de uma
+prova com 1 link autorizada pelo dono (`scripts\poc-instagram-post.ps1`). Como proteção, se 3 links seguidos
+falharem o lote para e pede atenção (`links_failing`) em vez de gastar uma consulta por link; **Retomar** continua
+pelos próximos.
+
 ## Presets
 
 Dois presets internos vêm prontos (criados pela migration `0001`): **Padrão** e **Anti-duplicidade**. Ambos podem

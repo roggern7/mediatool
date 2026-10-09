@@ -513,6 +513,16 @@ def test_download_expired_url_resolves_once(tmp_path, fake_popen, code):
     assert fake_popen.instances[0].request["shortcode"] == "CAROUSEL001"
 
 
+def test_resolve_post_accepts_cancel(tmp_path, fake_popen):
+    fake_popen.script = [(fixture_lines("resolve_post.jsonl"), [], 0, False)] * 3
+    downloader = make_downloader(tmp_path)
+    items = downloader.resolve_post("CAROUSEL001", cancel=threading.Event())
+    assert items and items == downloader.resolve_post("CAROUSEL001")
+    cancelled = threading.Event()
+    cancelled.set()
+    assert downloader.resolve_post("CAROUSEL001", cancel=cancelled) == []
+
+
 def test_download_expired_twice_fails_without_more_retries(tmp_path, fake_popen):
     fake_popen.script = [(fixture_lines("resolve_post.jsonl"), [], 0, False)]
     cdn = FakeCdn([DownloadError("forbidden", "x"), DownloadError("forbidden", "y")])

@@ -293,16 +293,56 @@ class InstagramWebDownloader(InstagramDownloader):
         # ``limit=None`` ("Todos"): até o fim real do perfil, sem teto de quantidade nem de páginas.
         return self._iter_media(username, content, limit, cancel, resume, on_checkpoint)
 
-    def resolve_post(self, shortcode: str) -> list[RemoteMedia]:
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None) -> list[RemoteMedia]:
+        """Bootstrap (cache do app) + 1 POST da consulta de post isolado. A consulta NÃO foi verificada no
+        Instagram real (queries.POST_BY_SHORTCODE; doc_id e campo raiz trocáveis por setting/env).
+
+        Devolve TODAS as mídias da publicação (carrossel inteiro, na ordem), sem filtro de conteúdo, com
+        ``listing_ref=None`` e ``source_profile`` = dono da publicação ("" se ausente). Cada post conta como uma
+        página no teto global por hora. Cancelado antes do POST -> lista vazia (quem chama confere o cancelamento).
+        Sem mídia: só tipo não suportado -> ``unsupported_media``; objeto sem código de publicação ->
+        ``contract_changed``; demais (itens sem URL utilizável) -> ``content_unavailable``."""
         try:
-            validate_shortcode(shortcode)
+            shortcode = validate_shortcode(shortcode)
         except ValueError as exc:
             raise InstagramError("invalid_input", str(exc)) from None
-        # Sem o perfil não há consulta moderna comprovada para um post isolado.
-        raise InstagramError(
-            "content_unavailable",
-            "Ainda não é possível abrir um post isolado do Instagram; importe pelo perfil.",
-        )
+        from app.integrations.instagram.web.errors import InstagramWebError
+        from app.integrations.instagram.web.normalize import NormalizeStats, normalize_post
+
+        if cancel is not None and cancel.is_set():
+            return []
+        with self._ops(cancel, shared=True) as ops:
+            ops.bootstrap.get()
+            if cancel is not None and cancel.is_set():
+                return []
+            wait_page = getattr(self._gate, "wait_listing_page", None)
+            if wait_page is not None:
+                per_hour = page_rate_limit(self._env)
+                if per_hour > 0:
+                    wait_page(cancel, max_per_hour=per_hour)
+                    if cancel is not None and cancel.is_set():
+                        return []
+            root = ops.graphql.post_by_shortcode(shortcode)
+        stats = NormalizeStats()
+        items = normalize_post(root, stats=stats)
+        del root
+        log.info("Publicação resolvida (web): %d mídias, %d sem URL, %d não suportadas", len(items),
+                 stats.skipped_no_url, stats.skipped_unsupported)
+        if items:
+            return items
+        diagnostic = {"skipped_unsupported": stats.skipped_unsupported, "skipped_no_url": stats.skipped_no_url}
+        if stats.skipped_unsupported and not stats.skipped_no_url:
+            raise InstagramWebError(
+                "unsupported_media", "A publicação só tem mídia de um tipo que o Media Tool ainda não sabe baixar.",
+                stage="normalize", diagnostic={**diagnostic, "detail": "unsupported_media"})
+        if stats.skipped_invalid_node:
+            # Objeto sem código de publicação: a resposta veio num formato que o Media Tool não reconhece.
+            raise InstagramWebError(
+                "contract_changed", "O Instagram mudou a forma de responder e o Media Tool precisa ser atualizado.",
+                stage="normalize", diagnostic={**diagnostic, "detail": "post_shape_unknown"})
+        raise InstagramWebError(
+            "content_unavailable", "A publicação não trouxe nenhuma foto ou vídeo que possa ser baixado.",
+            stage="normalize", diagnostic={**diagnostic, "detail": "post_no_media"})
 
     def download(
         self,

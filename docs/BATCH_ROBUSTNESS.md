@@ -93,6 +93,74 @@ Decisões do dono que substituem o que conflitar nas seções 0, 1, 6 e 9:
   listagem/download é avisado depois do commit (cooperativo).
 - Testes: `backend/tests/test_import_all_filters.py`, `test_import_groups.py`, `test_import_groups_scale.py` (`slow`).
 
+## 0.2 Importação por link (execução do lote)
+
+Contrato da API: `docs/CONTRACTS.md`, seção 8.3. O lote por link (`batches.import_mode = 'links'`, migration 0014) é
+um lote comum de importação e reaproveita tudo o que existe: a MESMA fila e a mesma thread de listagem (uma listagem
+por vez no app inteiro, perfis e links juntos, em ordem de criação), os jobs de ingest, a deduplicação, o portão
+global, o teto de páginas por hora, as pausas e a exportação. Não há downloader nem thread a mais.
+
+- **Um link por vez** (`ImportRunner._run_links`): para cada link `pending` de `batch_links`, em ordem de `position`,
+  o runner confere cancelamento, pausa do Instagram e backpressure (mesmos tetos da listagem de perfil:
+  `MAX_PENDING_INGEST`, `MAX_PENDING_INGEST_GLOBAL`, backlog de processamento) e chama
+  `downloader.resolve_post(shortcode, cancel=...)`: UMA requisição ao Instagram pelo portão. Numa transação só, cria
+  os jobs de todas as mídias da publicação (ordem do carrossel; `listing_page_index`/cursor/`listing_page_size`
+  NULL) e marca o link `resolved` (`items_found`, `profile`, `resolved_at`). Link `resolved` ou `failed` nunca é
+  pedido de novo; o mesmo shortcode nunca aparece duas vezes no lote (UNIQUE).
+- **Erro do link** (`content_unavailable`, `profile_private`, `profile_not_found`, `unsupported_media`,
+  `invalid_input`, ou resposta sem nenhuma mídia): o link fica `failed` com o código e a mensagem, e o runner segue
+  para o próximo. Não muda o estado dos outros links nem pausa nada.
+- **Erro do lote/ambiente**: o link continua `pending` e NENHUM outro link é pedido no trecho (um problema sistêmico
+  nunca vira N requisições falhas seguidas). Pausa do Instagram (`InstagramPaused` do portão, ou código que pausa:
+  `rate_limited`, `action_blocked`, `request_auth_failed`, `checkpoint_required`, `session_invalid`/`expired`) ->
+  listagem `paused`, retomada sozinha no fim da pausa. Erro retryable ou de rede (`network_error`, `timeout`) ->
+  `paused` com o backoff do lote (1 min, 5 min, 15 min, 1 h...). Qualquer outro (`session_missing`,
+  `access_refused`, `contract_changed`, `internal_error`, exceção inesperada) -> `needs_attention` com o erro
+  visível, nova tentativa automática a cada 6 h (máx. 4) e "Retomar" (`resume-listing`). Link resolvido zera o
+  backoff e as tentativas.
+- **Link que trava o lote** (`batch_links.attention_count`): cada vez que um link leva o lote a `needs_attention`
+  por erro não retryable que não é de sessão/pausa/rede, o contador do link sobe. Na 1a vez vale a regra acima
+  (link pendente, nenhum outro pedido). Na 2a vez do MESMO link (`LINK_ATTENTION_LIMIT`), ele fica `failed` com esse
+  erro e o lote segue para os próximos: um link que sempre devolve `contract_changed`/`internal_error` não impede
+  os seguintes. `contract_changed` com `diagnostic["detail"] == "post_shape_unknown"` (o provider o levanta para UMA
+  publicação) é erro DO LINK já na 1a vez. Nunca marcam o link como falho: `session_missing`, `session_invalid`,
+  `session_expired`, `checkpoint_required`, `rate_limited`, `action_blocked`, `request_auth_failed`,
+  `network_error`, `timeout` e qualquer erro retryable.
+- **Disjuntor de links falhos seguidos** (`batches.link_fail_streak`, `LINK_FAIL_BREAKER = 3`): a consulta de
+  publicação isolada ainda não foi verificada no Instagram real; se ela estiver errada, todo link viraria
+  `content_unavailable` e o lote gastaria uma requisição por link marcando tudo como falho. Por isso 3 links
+  SEGUIDOS falhos (sem nenhum resolvido entre eles; o contador é persistido e vale entre trechos) com links ainda
+  pendentes param o trecho e deixam o lote em `needs_attention` com `error_code = links_failing`. O contador zera
+  quando um link resolve, quando o disjuntor dispara e no "Retomar"; a retomada (manual ou a automática de 6 h,
+  máx. 4) continua pelos pendentes, e os falhos ficam falhos. Sem link pendente depois da 3a falha, o lote conclui
+  normalmente (`links_failed` se nenhum job foi criado).
+- **Retomada** (reinício do app, pausa, backpressure, espera do teto de páginas): continua dos links pendentes; o
+  ponto de retomada é a própria tabela `batch_links` (não há cursor). Se o app cair entre a resposta do Instagram e
+  a gravação, o link é pedido de novo e o índice único dos jobs descarta os repetidos. `restart-listing` é recusado
+  (409 `listing_not_resumable`).
+- **Fim**: sem link pendente a listagem fica `done` (`listing_end` NULL) e o lote vai a `running` -> `completed`
+  quando os jobs terminam. Parte dos links falha e ao menos um job: `error_message` "X de N links não puderam ser
+  importados." (`error_code` NULL). Nenhum job criado: lote `failed`, `error_code = links_failed`.
+- **Cancelamento**: igual ao do lote por perfil (jobs ociosos cancelados na transação, o trecho em andamento para na
+  próxima conferência); os links ainda pendentes aparecem como `cancelled` na API (o estado gravado continua
+  `pending`).
+- **Deduplicação**: a de sempre (`_add_item`). Mídia já na Biblioteca -> job `completed`/`skipped` sem download;
+  item em voo em outro lote -> `duplicate_in_flight`. A consulta do link acontece mesmo assim (é ela que diz quais
+  mídias a publicação tem).
+- **Link de download expirado** (`pipeline._download_after_expired_post`): job de lote por link não tem página de
+  listagem; a renovação chama `resolve_post(shortcode)` UMA vez por publicação (trava em memória por app, lote e
+  shortcode; intervalo mínimo `REFRESH_MIN_INTERVAL` por publicação via `media_url_refreshed_at`), grava as URLs
+  novas de todos os jobs abertos da publicação no lote e tenta o download uma vez. Durante pausa do Instagram o job
+  volta a `pending` sem consumir tentativa. Mídia ausente da resposta, ou URL nova também recusada ->
+  `content_unavailable`. Erros da consulta seguem a classificação normal. Vale também para "repetir job" depois que
+  as URLs foram apagadas. Mesmas proteções da renovação por página (seção 9, A1/A4): toda tentativa é registrada em
+  `listing_pages` com `page_index = position` do link (ok/falha, código, quando); dentro de `REFRESH_MIN_INTERVAL`
+  depois de uma FALHA, os itens irmãos do carrossel repetem o mesmo código sem requisição nova (retryable só para
+  `RETRYABLE_REFRESH_CODES`, sem aplicar pausa de novo): carrossel de 10 itens = 1 consulta, não 10; 3 renovações
+  seguidas falhas com o mesmo código pausam o lote (`BREAKER_REFRESH_FAILURES`). Lotes por perfil não mudam.
+- **Log**: só id do lote e contagens; shortcode, link colado e URL de mídia nunca são registrados.
+- Testes: `backend/tests/test_import_links.py`, `test_import_links_runner.py`.
+
 ## 0. Meta de escala (REVISÃO, prevalece sobre o resto deste documento)
 
 O produto precisa suportar lotes de 1.000, 2.000, 5.000 e 10.000 mídias por operação. Consequências:

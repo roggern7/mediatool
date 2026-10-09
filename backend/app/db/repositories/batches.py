@@ -30,6 +30,8 @@ LISTING_COLUMNS = frozenset(
         "listing_dropped_partial",
         # Por que a listagem terminou (migration 0012): 'profile_end' | 'limit'.
         "listing_end",
+        # Lote por link (migration 0014): links seguidos falhos sem nenhum resolvido entre eles.
+        "link_fail_streak",
     }
 )
 TERMINAL_BATCH_STATUSES = ("completed", "failed", "cancelled")
@@ -107,6 +109,7 @@ class BatchRepository:
         process: bool = False,
         group_id: int | None = None,
         group_position: int | None = None,
+        import_mode: str | None = None,
     ) -> int:
         now = utc_now()
         cursor = self.db.execute(
@@ -120,6 +123,8 @@ class BatchRepository:
         if group_id is not None:   # filho de grupo (migration 0012); lote avulso não toca as colunas novas
             self.db.execute("UPDATE batches SET group_id = ?, group_position = ? WHERE id = ?",
                             (group_id, group_position, cursor.lastrowid))
+        if import_mode is not None:   # lote por link (migration 0014); os demais não tocam a coluna nova
+            self.db.execute("UPDATE batches SET import_mode = ? WHERE id = ?", (import_mode, cursor.lastrowid))
         return cursor.lastrowid
 
     def get(self, batch_id: int) -> dict[str, Any] | None:
@@ -193,6 +198,72 @@ class BatchRepository:
             " AND source_profile IS NOT NULL"
         )
         return {str(row["source_profile"]).lower() for row in rows}
+
+    # ---- importação por link (migration 0014) ------------------------------------------------------------------
+    def add_links(self, batch_id: int, links: list[tuple[str, str]]) -> None:
+        """Grava os links `(shortcode, url normalizada)` do lote na ordem dada (`position` 1-based), todos
+        `pending`. Chamar dentro da transação que cria o lote."""
+        with self.db.transaction() as conn:
+            conn.executemany(
+                "INSERT INTO batch_links (batch_id, position, shortcode, url) VALUES (?, ?, ?, ?)",
+                [(batch_id, position, shortcode, url) for position, (shortcode, url) in enumerate(links, start=1)],
+            )
+
+    def next_pending_link(self, batch_id: int) -> dict[str, Any] | None:
+        """Próximo link ainda não pedido ao Instagram, em ordem de `position`."""
+        return row_dict(self.db.fetchone(
+            "SELECT * FROM batch_links WHERE batch_id = ? AND status = 'pending' ORDER BY position LIMIT 1",
+            (batch_id,)))
+
+    def resolve_link(self, batch_id: int, position: int, *, items_found: int, profile: str | None) -> None:
+        """Link resolvido (chamar na MESMA transação que cria os jobs das mídias dele)."""
+        self.db.execute(
+            "UPDATE batch_links SET status = 'resolved', items_found = ?, profile = ?, resolved_at = ?,"
+            " error_code = NULL, error_message = NULL WHERE batch_id = ? AND position = ?",
+            (items_found, profile, utc_now(), batch_id, position),
+        )
+
+    def fail_link(self, batch_id: int, position: int, *, code: str, message: str) -> None:
+        """Erro só deste link: não é pedido de novo e não muda o estado dos outros."""
+        self.db.execute(
+            "UPDATE batch_links SET status = 'failed', error_code = ?, error_message = ?, resolved_at = ?"
+            " WHERE batch_id = ? AND position = ? AND status = 'pending'",
+            (code, message, utc_now(), batch_id, position),
+        )
+
+    def bump_link_attention(self, batch_id: int, position: int) -> int:
+        """Mais uma vez em que este link deixaria o lote em `needs_attention`. Retorna o total do link."""
+        row = self.db.fetchone(
+            "UPDATE batch_links SET attention_count = attention_count + 1 WHERE batch_id = ? AND position = ?"
+            " RETURNING attention_count", (batch_id, position))
+        return int(row[0]) if row is not None else 0
+
+    def link_position(self, batch_id: int, shortcode: str) -> int | None:
+        """`position` do link desta publicação no lote (chave do registro de renovação de URL em `listing_pages`)."""
+        value = self.db.scalar(
+            "SELECT position FROM batch_links WHERE batch_id = ? AND shortcode = ?", (batch_id, shortcode))
+        return None if value is None else int(value)
+
+    def link_counts(self, batch_ids: list[int]) -> dict[int, dict[str, int]]:
+        """`{total, pending, resolved, failed}` dos links de cada lote, numa consulta para a lista inteira."""
+        if not batch_ids:
+            return {}
+        rows = self.db.fetchall(
+            "SELECT batch_id, COUNT(*) AS total, SUM(status = 'pending') AS pending,"
+            " SUM(status = 'resolved') AS resolved, SUM(status = 'failed') AS failed"
+            f" FROM batch_links WHERE batch_id IN ({placeholders(len(batch_ids))}) GROUP BY batch_id",
+            tuple(batch_ids),
+        )
+        return {row["batch_id"]: {key: int(row[key] or 0) for key in ("total", "pending", "resolved", "failed")}
+                for row in rows}
+
+    def list_links(self, batch_id: int, *, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+        """Links do lote em ordem de `position` (paginação por `offset`) e o total."""
+        total = int(self.db.scalar("SELECT COUNT(*) FROM batch_links WHERE batch_id = ?", (batch_id,)))
+        rows = self.db.fetchall(
+            "SELECT * FROM batch_links WHERE batch_id = ? ORDER BY position LIMIT ? OFFSET ?",
+            (batch_id, limit, offset))
+        return [row_dict(row) for row in rows], total
 
     # ---- grupos de importação (migration 0012) -----------------------------------------------------------------
     def create_group(self, *, content_type: str, requested_limit: int | None, preset_id: int | None,
@@ -317,7 +388,7 @@ class BatchRepository:
         ) if from_start else ""
         cursor = self.db.execute(
             "UPDATE batches SET listing_state = 'pending', listing_retry_at = NULL, listing_retry_level = 0,"
-            f" listing_cursor_refusals = 0, listing_attention_tries = 0{restart},"
+            f" listing_cursor_refusals = 0, listing_attention_tries = 0, link_fail_streak = 0{restart},"
             " error_code = NULL, error_message = NULL, updated_at = ?"
             " WHERE id = ? AND status = 'listing' AND listing_state IN ('paused', 'needs_attention')",
             (utc_now(), batch_id),

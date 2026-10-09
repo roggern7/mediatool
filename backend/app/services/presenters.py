@@ -162,6 +162,8 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
     # Lote encerrado com contadores congelados não agrega os jobs; lote aberto agrega pelo índice coberto.
     stats = ctx.jobs.batch_stats([b["id"] for b in batches if not _frozen(b)])
     exports = ctx.exports.last_completed("batch_id", [b["id"] for b in batches])
+    # Lotes por link: contagem dos links numa consulta agregada para a página inteira (nenhuma se não há lote assim).
+    link_counts = ctx.batches.link_counts([b["id"] for b in batches if b.get("import_mode") == "links"])
     result = []
     for batch in batches:
         row = stats.get(batch["id"], {})
@@ -190,6 +192,12 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
         # contagem da página refeita) sem somar duas vezes.
         data["listing_dropped"] = _listing_dropped(batch)
         data["listing_end"] = batch.get("listing_end")
+        if batch.get("import_mode") == "links":
+            data["import_mode"] = "links"
+            data["links"] = link_counts.get(batch["id"], {"total": 0, "pending": 0, "resolved": 0, "failed": 0})
+        else:
+            data["import_mode"] = "profile" if batch["source"] == "instagram_import" else None
+            data["links"] = None
         data["group_id"] = batch.get("group_id")
         data["group_position"] = batch.get("group_position")
         data["group_state"] = _group_state(batch)
@@ -221,6 +229,20 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
             data["jobs_truncated"] = truncated
         result.append(data)
     return result
+
+
+def batch_links_out(batch: dict[str, Any], links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Links de um lote por link. Link ainda pendente de um lote cancelado é apresentado como `cancelled` (o estado
+    gravado continua `pending`; nada mais será pedido ao Instagram)."""
+    cancelled = batch["status"] == "cancelled"
+    return [
+        {
+            **{key: link[key] for key in ("position", "url", "shortcode", "error_code", "error_message",
+                                          "items_found", "profile")},
+            "status": "cancelled" if cancelled and link["status"] == "pending" else link["status"],
+        }
+        for link in links
+    ]
 
 
 def batch_single(ctx: AppContext, batch_id: int, *, with_jobs: bool = False) -> dict[str, Any] | None:

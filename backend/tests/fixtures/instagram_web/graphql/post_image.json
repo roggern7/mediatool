@@ -1,0 +1,52 @@
+{
+ "data": {
+  "xdt_shortcode_media": {
+   "__typename": "XDTGraphImage",
+   "id": "3200000000000000001",
+   "shortcode": "FAKEPOSTIMG1",
+   "dimensions": {
+    "height": 1350,
+    "width": 1080
+   },
+   "display_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/pimg1_1080x1350.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+   "display_resources": [
+    {
+     "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pimg1_640x800.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+     "config_width": 640,
+     "config_height": 800
+    },
+    {
+     "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pimg1_1080x1350.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+     "config_width": 1080,
+     "config_height": 1350
+    },
+    {
+     "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pimg1_750x937.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+     "config_width": 750,
+     "config_height": 937
+    }
+   ],
+   "is_video": false,
+   "product_type": "feed",
+   "taken_at_timestamp": 1700000000,
+   "owner": {
+    "id": "900000001",
+    "username": "Dono_Fake",
+    "is_private": false
+   },
+   "edge_media_to_caption": {
+    "edges": [
+     {
+      "node": {
+       "text": "legenda falsa #fake"
+      }
+     }
+    ]
+   }
+  }
+ },
+ "extensions": {
+  "is_final": true
+ },
+ "status": "ok"
+}

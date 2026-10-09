@@ -1,0 +1,146 @@
+{
+ "data": {
+  "xdt_shortcode_media": {
+   "__typename": "XDTGraphSidecar",
+   "id": "3200000000000000003",
+   "shortcode": "FAKEPOSTCAR1",
+   "dimensions": {
+    "height": 1350,
+    "width": 1080
+   },
+   "display_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1a_1080x1350.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+   "is_video": false,
+   "product_type": "carousel_container",
+   "taken_at_timestamp": 1700000000,
+   "owner": {
+    "id": "900000001",
+    "username": "Dono_Fake",
+    "is_private": false
+   },
+   "edge_sidecar_to_children": {
+    "edges": [
+     {
+      "node": {
+       "__typename": "XDTGraphImage",
+       "id": "3200000000000000031",
+       "shortcode": "FAKECHILD001",
+       "dimensions": {
+        "height": 1350,
+        "width": 1080
+       },
+       "display_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1a_1080x1350.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+       "display_resources": [
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1a_640x800.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 640,
+         "config_height": 800
+        },
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1a_1080x1350.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 1080,
+         "config_height": 1350
+        },
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1a_750x937.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 750,
+         "config_height": 937
+        }
+       ],
+       "is_video": false
+      }
+     },
+     {
+      "node": {
+       "__typename": "XDTGraphVideo",
+       "id": "3200000000000000032",
+       "shortcode": "FAKECHILD002",
+       "dimensions": {
+        "height": 1920,
+        "width": 1080
+       },
+       "display_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1b_1080x1920.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+       "display_resources": [
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1b_640x1137.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 640,
+         "config_height": 1137
+        },
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1b_1080x1920.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 1080,
+         "config_height": 1920
+        }
+       ],
+       "is_video": true,
+       "video_url": "https://video-fake.fbcdn.net/v/t50.fake/pcar1b_1080x1920.mp4?efg=FAKE&oh=FAKE_OH&oe=00000000",
+       "video_duration": 12.5,
+       "has_audio": true
+      }
+     },
+     {
+      "node": {
+       "__typename": "XDTGraphImage",
+       "id": "3200000000000000033",
+       "shortcode": "FAKECHILD003",
+       "dimensions": {
+        "height": 1350,
+        "width": 1080
+       },
+       "display_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1c_1080x1350.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+       "display_resources": [
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1c_640x800.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 640,
+         "config_height": 800
+        },
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1c_1080x1350.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 1080,
+         "config_height": 1350
+        },
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1c_750x937.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 750,
+         "config_height": 937
+        }
+       ],
+       "is_video": false
+      }
+     },
+     {
+      "node": {
+       "__typename": "XDTGraphVideo",
+       "id": "3200000000000000034",
+       "shortcode": "FAKECHILD004",
+       "dimensions": {
+        "height": 1920,
+        "width": 1080
+       },
+       "display_url": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1d_1080x1920.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+       "display_resources": [
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1d_640x1137.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 640,
+         "config_height": 1137
+        },
+        {
+         "src": "https://scontent-fake.cdninstagram.com/v/t51.fake/pcar1d_1080x1920.jpg?stp=fake&oh=FAKE_OH&oe=00000000",
+         "config_width": 1080,
+         "config_height": 1920
+        }
+       ],
+       "is_video": true,
+       "video_url": "https://video-fake.fbcdn.net/v/t50.fake/pcar1d_1080x1920.mp4?efg=FAKE&oh=FAKE_OH&oe=00000000",
+       "video_duration": 12.5,
+       "has_audio": true
+      }
+     }
+    ]
+   }
+  }
+ },
+ "extensions": {
+  "is_final": true
+ },
+ "status": "ok"
+}
