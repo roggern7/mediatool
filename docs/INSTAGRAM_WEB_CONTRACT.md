@@ -427,6 +427,85 @@ comportamento HTTP padrão. **Redirect nunca é seguido**: qualquer 3xx, inclusi
 `Set-Cookie` apagando `sessionid` numa resposta anônima é ignorado). Por isso um problema de UMA publicação não mexe
 no status da sessão do dono.
 
+#### Fluxos separados (`video_dash_manifest`): maior qualidade no modo "Por link"
+
+Módulo: `web/dash_manifest.py` (`select_dash_streams`). Só o modo "Por link" lê o manifesto (`normalize_post` chama
+`normalize_node(..., dash=True)`); a listagem de perfil continua ignorando o campo (nunca foi observada com manifesto
+real).
+
+**O que foi observado no real** (2026-10-10, o MESMO Reel público; só a leitura do nó, nenhum download de fluxo):
+- `video_versions`: 3 entradas `{type: 101|102|103, url}` SEM largura/altura. A POC real baixou a primeira: MP4
+  progressivo H.264 720x1280, 30 fps, com áudio HE-AAC. É a única versão H.264.
+- `original_width/height`: 1080x1920; `has_audio: true`; `is_dash_eligible: 1`; `number_of_qualities: 9`.
+- `video_dash_manifest`: string XML (MPD, ~19 KB): raiz `MPD` no namespace `urn:mpeg:dash:schema:mpd:2011`, perfil
+  `isoff-on-demand`, `type="static"`, `mediaPresentationDuration="PT69.288345S"`, 1 `Period`.
+  - 1 `AdaptationSet contentType="video"` com 9 `Representation`, TODAS VP9 (`codecs="vp09..."`, `mimeType="video/mp4"`):
+    540x960 (5), 720x1280 (2), 1080x1920 a 30 fps (rótulo "960p") e 1080x1920 a 59 fps (rótulo "1080p", 3,28 Mb/s).
+    Atributos: `id`, `bandwidth`, `codecs`, `mimeType`, `width`, `height`, `frameRate` (fração, ex.: `15360/512`),
+    `FBContentLength` (bytes do arquivo), `FBQualityLabel`.
+  - 1 `AdaptationSet contentType="audio"` com 1 `Representation` `codecs="mp4a.40.5"`, `mimeType="audio/mp4"`.
+  - Cada `Representation` tem UMA `<BaseURL>` https absoluta (arquivo fMP4 inteiro, host `*.fbcdn.net`, assinatura
+    na query) e um `<SegmentBase>` com `<Initialization>`: um arquivo por representação, sem lista de segmentos.
+- Fixture: `backend/tests/fixtures/instagram_web/dash/observed_sanitized.mpd` (o manifesto real com URLs, ids e
+  identificador trocados por valores falsos).
+
+**Forma aceita** (qualquer outra coisa cai no MP4 direto, sem erro e sem requisição): até 512 KiB; sem `<!`
+(DOCTYPE/ENTITY/CDATA/comentário) e sem `&` que não seja uma das cinco entidades predefinidas ou referência numérica
+(`unsafe_xml`); raiz `MPD` no namespace DASH com `type` ausente ou `static`; exatamente 1 `Period`; nenhum
+`SegmentTemplate`/`SegmentList`; nenhuma `BaseURL` fora de `Representation` nem relativa; no máximo 1 `AdaptationSet`
+de vídeo e 1 de áudio (por `contentType`, ou `mimeType` quando ele falta) e nenhum de outro tipo;
+`mediaPresentationDuration` `PT[nH][nM][n(.n)S]` (ausente = duração desconhecida). Uma `Representation` é utilizável
+com `mimeType` `video/mp4`/`audio/mp4`, `codecs` `vp09.`/`avc1.`/`avc3.` (vídeo) ou `mp4a.40.` (áudio), exatamente 1
+`BaseURL` aprovada por `validate_cdn_url`, `SegmentBase`, `bandwidth` inteiro e, no vídeo, `width`/`height` inteiros
+(`frameRate` `n/d` ou `n`, opcional). As demais representações são ignoradas. `DashParse.outcome`: `ok`, `absent`,
+`too_large`, `unsafe_xml`, `xml_error`, `unsupported_form`, `no_usable_video`, `no_usable_audio` (só o token vai para
+o log, com contagens).
+
+**Escolha**: vídeo de maior área (largura x altura), depois mais quadros por segundo, depois maior `bandwidth`
+(empate: a primeira); áudio de maior `bandwidth`. No Reel observado: 1080x1920 a 59 fps (VP9) + HE-AAC.
+
+**Quando os fluxos separados são usados** (as três condições): (a) o manifesto tem a forma aceita; (b) a área
+escolhida é MAIOR que a declarada pela versão de `video_versions` escolhida (sem largura/altura conta 0); (c) se
+`original_width/height` existem, a área escolhida ALCANÇA a do original. Senão, MP4 direto (um DASH máximo de 720p com
+original de 1080p não troca H.264 por VP9 sem ganho provado). `RemoteMedia.media_url` continua sendo SEMPRE o MP4
+direto (fallback); os fluxos vão em `dash_video_url`, `dash_audio_url`, `dash_video_bytes`, `dash_audio_bytes`,
+`dash_width`, `dash_height`, `dash_duration`.
+
+**Download e junção** (`jobs/pipeline.py`, `_download_dash`; `media_processor/remux.py`): dois GETs pelo
+`cdn_download` de sempre (vídeo, depois áudio; `InstagramDownloader.download_url`), junção com
+`ffmpeg -i <vídeo> -i <áudio> -map 0:v:0 -map 1:a:0 -c copy -fflags +bitexact -flags:v +bitexact -flags:a +bitexact
+-movflags +faststart -f mp4` (nenhuma recodificação, corte, filtro ou preset; mesma entrada e mesma versão do ffmpeg
+= mesmos bytes) e verificação por ffprobe (vídeo e áudio presentes, dimensões do manifesto, codec `vp9`/`h264` +
+`aac`, duração dentro de max(1 s, 2%)). O original fica VP9 em MP4 (`media.video_codec = "vp9"`).
+
+| situação nos fluxos separados | resultado |
+|---|---|
+| FFmpeg/ffprobe ausente; tamanhos declarados acima de `max_download_bytes` | MP4 direto, sem pedir nenhum fluxo |
+| fluxo grande demais, não é mídia, status HTTP inesperado (nem 200 nem 403/404/410; ex.: 206/416/5xx) | MP4 direto |
+| tamanho diferente de `FBContentLength`; junção falhou; verificação reprovada | MP4 direto (temporários apagados antes) |
+| 403/404/410 em qualquer das duas URLs | MP4 direto, SEM renovação e sem consulta ao Instagram (falha de conteúdo como as demais) |
+| os fluxos falharam e o MP4 direto também veio 403/404/410 | `media_url_expired` -> a renovação única de sempre (1 consulta da publicação); depois dela o download roda mais UMA vez do começo (fluxos separados com as URLs novas, se a publicação renovada trouxer manifesto; recusados de novo, MP4 direto renovado; MP4 direto ainda recusado = job falha, referência apagada) |
+| falha de rede (retryable) | sobe como hoje (retry controlado do job), sem MP4 direto |
+| cancelamento | job cancelado, temporários apagados |
+
+**Teto de requisições, sem laço**: no máximo **3 requisições ao CDN por chamada de download** (vídeo, áudio, MP4 direto) e, contando a renovação única, no máximo **6 requisições ao CDN e 1 consulta da publicação por tentativa do job** (3 antes da renovação + 3 depois; a renovação acontece no máximo uma vez
+e só quando o MP4 direto vem vencido).
+
+Sem FFmpeg/ffprobe, ou em qualquer fallback, a qualidade cai para o MP4 direto **sem aviso na interface**: o único registro é a linha de log `dash_fallback=<motivo>` do job.
+
+**Números hostis ou corrompidos**: duração só com dígitos limitados e entre 0 e 48 h (fora disso o manifesto é
+`unsupported_form`); representação com `width`/`height` acima de 16384, `frameRate` acima de 1000, `bandwidth` acima
+de 10^9 ou `FBContentLength` acima de 2^40 é ignorada (nada é baixado para ser reprovado depois).
+`job_remote_refs.dash_streams` só recebe JSON válido: valor não finito ou fora de faixa = sem fluxos separados (MP4
+direto), e um valor malformado já gravado é ignorado na leitura.
+
+**NÃO verificado** (o código não inventa: tudo isto cai no MP4 direto ou falha de forma segura): se a CDN entrega o
+arquivo inteiro de uma `BaseURL` num GET simples (o navegador usa `Range`); manifesto sem áudio, com vários
+`Period`, com `SegmentTemplate`/`SegmentList`, com `BaseURL` relativa, com H.264 ou AV1 (H.264 é aceito por
+inferência; AV1 é ignorado); vídeo dentro de carrossel e vídeo que não é Reel; `video_dash_manifest` nulo ou ausente;
+as dimensões reais das outras `video_versions`; sincronia A/V da junção de arquivos reais (edit lists).
+**Download de `BaseURL` pelo app e junção NUNCA rodaram contra o CDN real; verificados só com mídias sintéticas e o manifesto real saneado.**
+
 ### Respostas 200 com `errors`
 
 **Aceito (sem falha, sem nova tentativa):** HTTP 200 com `data[root_field]` objeto, `edges` lista e `page_info`
@@ -712,6 +791,10 @@ comprova o caso testado (registre-o então nesta página, em "O que foi observad
 redirect; `cdn_url_valid` false indica host de CDN fora da lista aceita; `max_image_width` mostra a qualidade de foto
 disponível sem login.
 
+**Qualidade baixada pela POC real** (2026-10-10): o download da POC pegou a primeira `video_versions`, um MP4
+progressivo H.264 de 720x1280 a 30 fps, enquanto o original declarado era 1080x1920. Os fluxos de 1080p só existem
+no `video_dash_manifest` (seção "Fluxos separados"); o download deles nunca foi feito no real.
+
 ## Como atualizar quando o Instagram mudar
 
 Sintoma: operações ou o teste de sessão terminam em `contract_changed`. Leia o `detail` (no cartão do teste de sessão,
@@ -746,6 +829,10 @@ conhecido) ou `post_shape_unknown` (o envelope veio, mas a mídia mudou de forma
    `OBSERVED_AT`, e a fixture `backend/tests/post_document_fixtures.py` (valores falsos) com os testes
    `tests/test_web_post_document.py` e `tests/test_web_provider_post.py`. Forma nova da mídia: ajuste
    `normalize_node`/`normalize_post` em `web/normalize.py`.
+   Forma nova do `video_dash_manifest`: os vídeos continuam sendo baixados pelo MP4 direto (o log da publicação
+   mostra `dash=<outcome>:<n>`); ajuste `web/dash_manifest.py` e a fixture `tests/dash_fixtures.py` só com NOMES de
+   elementos/atributos observados (testes: `tests/test_dash_manifest.py`, `tests/test_normalize_dash.py`,
+   `tests/test_import_links_dash.py`).
 4. Se a página passar a exigir login (redirect ou tela de login em 200), não há ajuste de constante que resolva: o
    Media Tool não usa a sessão salva para abrir publicações por link. Registre o caso e decida com o dono.
 5. Confira com a POC do documento público (1 GET anônimo), com autorização do dono.

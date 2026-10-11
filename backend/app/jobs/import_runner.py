@@ -52,6 +52,7 @@ from app.integrations.instagram.downloader import (
     RemoteMedia,
 )
 from app.integrations.instagram.validation import post_path_kind
+from app.jobs.dash_ref import dash_json
 from app.jobs.errors import JobCancelled, message_with_diagnostic, safe_diagnostic, safe_message
 from app.jobs.pipeline import LINKS_HOLD_DONE_MESSAGE, instagram_paused, links_query_lock
 from app.services import disk
@@ -1084,6 +1085,7 @@ class ImportRunner:
             "listing_page_index": None if ref is None else ref.page_index,
             "listing_cursor": None if ref is None else ref.cursor,
             "listing_page_size": None if ref is None else ref.page_size,
+            "dash_streams": dash_json(item),
         }
         process = batch["process"] and batch["params"] is not None
         existing = self.ctx.media.find_by_source(

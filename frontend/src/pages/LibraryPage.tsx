@@ -14,6 +14,7 @@ import {
   formatDuration,
   formatFps,
   formatResolution,
+  formatVideoCodec,
 } from "../lib/format";
 import { ACTIVE_BATCH, JOB_STATUS_LABEL, TERMINAL_JOB, jobTone } from "../lib/labels";
 import { MAX_BULK_PROCESS, canOfferSelectAll, processByFilterBody, withinBulkCap } from "../lib/filterSelection";
@@ -770,6 +771,12 @@ function MediaDetail({
             <dd>{formatFps(media.fps)}</dd>
             <dt>Áudio</dt>
             <dd>{media.has_audio == null ? "-" : media.has_audio ? "Sim" : "Não"}</dd>
+            {media.video_codec ? (
+              <>
+                <dt>Codec</dt>
+                <dd>{formatVideoCodec(media.video_codec)}</dd>
+              </>
+            ) : null}
           </>
         ) : null}
         <dt>Tamanho</dt>

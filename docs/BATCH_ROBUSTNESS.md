@@ -305,6 +305,21 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
 - **Renovação e `access_refused`**: a renovação usa a trava e a recusa em espera do lote descritas acima em
   "Recusa em espera" (não há estado próprio da renovação).
 - **Log**: só id do lote e contagens; shortcode, link colado e URL de mídia nunca são registrados.
+- **Fluxos separados (maior qualidade do vídeo)**: vídeo de link com `job_remote_refs.dash_streams` baixa o fluxo de
+  vídeo e o de áudio pelo CDN e junta sem recodificar (etapa `muxing`); contrato em
+  `docs/INSTAGRAM_WEB_CONTRACT.md`, "Fluxos separados". **Teto, sem laço:** no máximo **3 requisições ao CDN por chamada de download** (vídeo, áudio, MP4 direto) e, contando a renovação única, no máximo **6 requisições ao CDN e 1 consulta da publicação por tentativa do job**.
+  Justificativa: a regra de não insistir protege as CONSULTAS ao Instagram (`resolve_post`, listagem); um GET
+  assinado ao CDN é o que o job faria de qualquer forma. Fluxo recusado (403/404/410), status HTTP inesperado (ex.:
+  206/416/5xx) e qualquer outra falha de conteúdo vão DIRETO para o MP4 direto, sem renovação e sem consulta. Só se o
+  MP4 direto também vier vencido entra a renovação única de sempre; depois dela o download roda mais uma vez do
+  começo (fluxos com as URLs novas, depois MP4 direto renovado) e, se ainda for recusado, o job falha e a referência
+  é apagada. Falha de rede (retryable) e cancelamento sobem como hoje, sem MP4 direto.
+  Sem FFmpeg/ffprobe, ou em qualquer fallback, a qualidade cai para o MP4 direto **sem aviso na interface**: o único registro é a linha de log `dash_fallback=<motivo>` do job. Os temporários (os dois fluxos, o `.part` e o arquivo juntado) ficam em `temp/job-<id>/`:
+  apagados antes do fallback, ao fim do job, na nova tentativa e pela recuperação do startup; job interrompido
+  recomeça do zero (sem retomada parcial). Disco: os dois fluxos + o arquivo juntado cabem na reserva de
+  2 x `max_download_bytes` por download já exigida. **Download de `BaseURL` pelo app e junção NUNCA rodaram contra o CDN real; verificados só com mídias sintéticas e o manifesto real saneado.**
+  Testes: `test_dash_manifest.py`, `test_normalize_dash.py`, `test_import_links_dash.py`,
+  `processor/tests/test_remux.py`.
 - Testes: `backend/tests/test_import_links.py`, `test_import_links_runner.py`, `test_import_links_refused.py`,
   `test_import_links_refused_diag.py`, `test_import_links_mismatch.py`, `test_import_links_refresh_refused.py`,
   `test_import_links_hold.py`, `test_import_links_public_document.py`, `test_gallerydl_post_mismatch.py`; leitura
@@ -736,7 +751,7 @@ mas nunca acontece sozinho depois do download.
   padrão quando `preset_id` é `null`; 404 `preset_not_found` se o informado não existe). Nenhuma configuração
   persistida liga processamento automático; `batches.process` já nasce 0 (sem migration nova, lotes antigos intactos).
 - Job de ingest download-only (`jobs.params` NULL): `pending -> downloading -> completed` logo depois de original
-  salvo + validação por assinatura + SHA-256 + registro em `media` (sem miniatura, sem metadados técnicos). Não passa por `downloaded`/`processing`, não
+  salvo + validação por assinatura + SHA-256 + registro em `media` (sem miniatura, sem metadados técnicos; exceção: vídeo de lote por link juntado de fluxos separados, ver abaixo). Não passa por `downloaded`/`processing`, não
   cria job `kind = process` nem rendition, e é concluído pelo pool de download. Interrompido (encerramento, disco,
   nova tentativa) depois de registrar o original, volta a `pending` (não a `downloaded`) e o pool de download o
   conclui sem baixar de novo. Linhas antigas download-only que estejam em `downloaded` continuam sendo concluídas
@@ -748,7 +763,10 @@ mas nunca acontece sozinho depois do download.
   2 x max_download_bytes x download_concurrency; a parcela das saídas do FFmpeg (2 x max_download_bytes x
   processing_concurrency) só entra enquanto houver processamento em aberto (`JobRepository.has_processing_work`).
 - Dois níveis separados. (1) Download puro (`params` NULL, o padrão): ZERO ffprobe e ZERO FFmpeg, mesmo com as
-  ferramentas instaladas. A mídia é validada só pela assinatura do arquivo (`has_media_signature`: JPEG, PNG, GIF,
+  ferramentas instaladas. ÚNICA exceção (seção 0.2, "Fluxos separados"): vídeo de lote por link que vem em dois
+  arquivos (vídeo e áudio) usa o FFmpeg para juntá-los sem recodificar (etapa `muxing`) e o ffprobe para conferir a
+  junção; essa mídia é registrada COM `width`/`height`/`duration`/`fps`/`has_audio`/`video_codec` (continua sem
+  miniatura). Sem as ferramentas ela é baixada pelo MP4 direto, nas regras do download puro. A mídia é validada só pela assinatura do arquivo (`has_media_signature`: JPEG, PNG, GIF,
   WebP, MP4/MOV/HEIC, WebM; para ISO BMFF os 4 primeiros bytes precisam ser um tamanho de caixa plausível, então
   texto com "free"/"skip" nos bytes 4-8 é rejeitado), recebe SHA-256 e é registrada sem miniatura e sem
   `width`/`height`/`duration`/`fps`/`has_audio` (nulos; a API devolve `thumbnail_url: null` e o endpoint de miniatura

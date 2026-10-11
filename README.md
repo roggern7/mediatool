@@ -39,7 +39,7 @@ locais. Nada é enviado para servidores de terceiros além das requisições ao 
 | Git | qualquer versão recente | Para clonar o repositório. |
 | Python | 3.13 (mínimo 3.11) | Usado num ambiente virtual `.venv` do projeto. |
 | Node.js / npm | Node 24 / npm 11 | Só para instalar e gerar o build do painel. |
-| FFmpeg / ffprobe | qualquer build recente | Opcional: só para processar mídias, gerar miniaturas e metadados. Baixar originais não precisa. `winget install Gyan.FFmpeg` (o setup só avisa, não instala). |
+| FFmpeg / ffprobe | qualquer build recente | Opcional: só para processar mídias, gerar miniaturas e metadados. Baixar originais não precisa; sem ele, vídeos importados por link vêm na qualidade do MP4 direto (ex.: 720p em vez de 1080p), sem aviso. `winget install Gyan.FFmpeg` (o setup só avisa, não instala). |
 
 Nada é instalado globalmente pelos scripts: dependências Python vão para `.venv` e as do painel para
 `frontend\node_modules`.
@@ -420,6 +420,16 @@ Como proteção, se 3 links seguidos
 falharem o lote para e pede atenção (`links_failing`) em vez de gastar uma consulta por link; **Retomar** continua
 pelos próximos.
 
+**Qualidade do vídeo.** Quando a página pública oferece o vídeo em arquivos separados de vídeo e áudio numa resolução
+maior que a do MP4 direto (no Reel observado: 1080p contra 720p), o app baixa os dois e junta sem recodificar (etapa
+"Juntando vídeo e áudio"; precisa do FFmpeg). O original de 1080p vem em **VP9 dentro de MP4**: toca no Chrome, Edge
+e Firefox, mas o Safari/QuickTime e alguns editores podem não abrir; o codec aparece no detalhe da Biblioteca. Se
+algo não der certo com os arquivos separados (ou se o FFmpeg/ffprobe não estiver instalado), o app baixa o MP4 direto
+como antes, **sem aviso na interface**: a qualidade menor só aparece nas dimensões da mídia e no log
+(`dash_fallback=<motivo>`). Uma mídia que já está na
+Biblioteca nunca é substituída. Ressalva: o download dos arquivos separados e a junção foram verificados só com
+mídias de teste; ainda não rodaram contra o Instagram real.
+
 ## Presets
 
 Dois presets internos vêm prontos (criados pela migration `0001`): **Padrão** e **Anti-duplicidade**. Ambos podem
@@ -446,7 +456,8 @@ O fluxo principal e padrão do Media Tool é **só baixar**: cada mídia termina
 está salvo, conferido (SHA-256) e registrado, sem passar pelo FFmpeg. O processamento com preset é opcional e
 separado: nada é processado automaticamente depois do download. O download puro não usa FFmpeg nem ffprobe (nem
 quando estão instalados): valida o arquivo pela assinatura, calcula o SHA-256 e registra, então as mídias ficam sem
-miniatura e sem dados técnicos. A análise (metadados técnicos e miniatura) acontece no processamento opcional. Na API, `POST /api/imports` aceita `process`
+miniatura e sem dados técnicos. Única exceção: vídeo importado por link que vem em arquivos separados de vídeo e
+áudio é juntado pelo FFmpeg sem recodificar e conferido pelo ffprobe (fica com dados técnicos, sem miniatura). A análise (metadados técnicos e miniatura) acontece no processamento opcional. Na API, `POST /api/imports` aceita `process`
 (padrão `false`) e `preset_id` (padrão `null`) como opcionais.
 
 - Na importação: ligue **Processar após baixar (opcional)**, escolha o **Preset do processamento** e clique em

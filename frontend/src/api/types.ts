@@ -17,6 +17,7 @@ export type JobStage =
   | "queued"
   | "waiting_retry"
   | "downloading"
+  | "muxing"
   | "hashing"
   | "probing"
   | "thumbnail"
@@ -145,6 +146,8 @@ export interface Media {
   height: number | null;
   fps: number | null;
   has_audio: boolean | null;
+  /** Codec de vídeo do original ("vp9", "h264"...); null quando não foi analisado. */
+  video_codec: string | null;
   mime_type: string | null;
   taken_at: string | null;
   created_at: string;

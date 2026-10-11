@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatDuration, formatSpeed, formatResolution, parseDecimal, formatPercent } from "./format";
+import {
+  formatBytes,
+  formatDuration,
+  formatSpeed,
+  formatResolution,
+  formatVideoCodec,
+  parseDecimal,
+  formatPercent,
+} from "./format";
 
 describe("formatBytes", () => {
   it("formata unidades em pt-BR", () => {
@@ -36,6 +44,12 @@ describe("outros formatadores", () => {
   it("resolução", () => {
     expect(formatResolution(1080, 1920)).toBe("1080×1920");
     expect(formatResolution(null, 10)).toBe("-");
+  });
+  it("codec de vídeo do original", () => {
+    expect(formatVideoCodec("vp9")).toBe("VP9");
+    expect(formatVideoCodec("h264")).toBe("H.264");
+    expect(formatVideoCodec("mpeg4")).toBe("MPEG4");
+    expect(formatVideoCodec(null)).toBe("-");
   });
   it("percentual limitado", () => {
     expect(formatPercent(0.456)).toBe("46%");

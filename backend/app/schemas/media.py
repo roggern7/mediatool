@@ -41,6 +41,7 @@ class MediaOut(BaseModel):
     height: int | None
     fps: float | None
     has_audio: bool | None
+    video_codec: str | None
     mime_type: str | None
     taken_at: str | None
     created_at: str

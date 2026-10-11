@@ -36,9 +36,11 @@ _USER_AGENT = "media-tool/1.0"
 
 
 class DownloadError(Exception):
-    def __init__(self, code: DownloadErrorCode, message: str) -> None:
+    def __init__(self, code: DownloadErrorCode, message: str, *, http_status: int | None = None) -> None:
         self.code = code
         self.message = message
+        # Status HTTP inesperado da CDN (só no `network_error` de `_raise_for_status`); None nos demais erros.
+        self.http_status = http_status
         super().__init__(f"{code}: {message}")
 
 
@@ -140,7 +142,7 @@ def _raise_for_status(status: int) -> None:
     if status in (404, 410):
         raise DownloadError("not_found", f"Mídia não encontrada na CDN (HTTP {status}).")
     if status != 200:
-        raise DownloadError("network_error", f"Resposta inesperada da CDN (HTTP {status}).")
+        raise DownloadError("network_error", f"Resposta inesperada da CDN (HTTP {status}).", http_status=status)
 
 
 def cdn_download(

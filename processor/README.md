@@ -24,6 +24,8 @@ suffix = mp.output_suffix(probe, opts)                     # ".mp4" (vídeo, inc
 mp.build_command(src, dst, probe, opts) -> list[str]       # puro, não executa
 mp.process(src, dst, opts, progress=cb, cancel=event, timeout=s) -> ProcessResult
 mp.make_thumbnail(src, dst, width=320) -> Path             # JPEG; dst existente -> ProcessorError
+mp.mux_streams(video, audio, dst, cancel=event, timeout=300) -> None   # vídeo + áudio -> MP4 com -c copy
+# mux_streams: verificado só com mídias sintéticas do ffmpeg local; NUNCA rodou com arquivos do CDN real do Instagram.
 sha256_file(path) -> str
 ```
 

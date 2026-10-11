@@ -25,6 +25,8 @@ from .errors import (
 from .hashing import sha256_file
 from .options import ProcessingOptions
 from .probe import ProbeResult, run_probe, video_stream
+from .remux import MUX_TIMEOUT
+from .remux import mux_streams as _mux_streams
 from .tools import ToolInfo, locate, popen_kwargs, tool_info
 
 STDERR_LIMIT = 64 * 1024  # bytes de stderr mantidos (cauda)
@@ -412,3 +414,9 @@ class MediaProcessor:
             _remove(tmp)
             raise
         return dst
+
+    # ---- junção de fluxos separados (sem recodificar) ----
+    def mux_streams(self, video: Path, audio: Path, dst: Path, *, cancel: threading.Event | None = None,
+                    timeout: float | None = MUX_TIMEOUT) -> None:
+        """Junta um arquivo de vídeo e um de áudio em `dst` (MP4) com `-c copy` (ver remux.py)."""
+        _mux_streams(self._require("ffmpeg"), Path(video), Path(audio), Path(dst), cancel=cancel, timeout=timeout)

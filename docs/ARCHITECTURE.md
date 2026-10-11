@@ -85,10 +85,12 @@ documento explica como as peças se encaixam.
    migration `0002`), respeitando a concorrência configurada. Com o Instagram pausado (seção 7), só não são
    reivindicados ingests que ainda precisam baixar; jobs de processamento seguem.
 5. Ingest (`app.jobs.pipeline`): checagem por origem de novo -> `downloading` (adapter/cdn_downloader para
-   `storage\temp`) -> `hashing` (SHA-256) -> deduplicação por hash -> `probing` -> promoção atômica para
+   `storage\temp`; vídeo de lote por link com fluxos separados: dois downloads e `muxing`, a junção sem recodificar)
+   -> `hashing` (SHA-256) -> deduplicação por hash -> `probing` -> promoção atômica para
    `storage\originals` -> `thumbnail` -> `downloaded`. No download puro (padrão, sem `params`) as etapas `probing`
    e `thumbnail` não chamam ffprobe/FFmpeg: só validação por assinatura, sem miniatura nem metadados; a análise
-   fica para o processamento opcional (BATCH_ROBUSTNESS.md seção 10). Se a URL de CDN expirou (403/404/410), a URL é renovada uma
+   fica para o processamento opcional (BATCH_ROBUSTNESS.md seção 10). Exceção: o vídeo juntado de fluxos separados
+   usa FFmpeg (junção) e ffprobe (conferência) e fica com metadados; sem as ferramentas, vale o MP4 direto. Se a URL de CDN expirou (403/404/410), a URL é renovada uma
    vez e o download é tentado uma vez de novo. Web: renovação por página (`refresh_page`: bootstrap + 1 POST da
    página de origem do item, guardada no job; a página renovada atualiza todos os jobs pendentes dela, no máximo uma
    vez a cada 10 min); ver [BATCH_ROBUSTNESS.md](BATCH_ROBUSTNESS.md) seção 2. gallery-dl:
@@ -106,7 +108,8 @@ process:  pending -> processing -> completed
 qualquer: -> failed | cancelled
 ```
 
-`stage` detalha a etapa: `queued`, `waiting_retry`, `downloading`, `hashing`, `probing`, `thumbnail`, `processing`,
+`stage` detalha a etapa: `queued`, `waiting_retry`, `downloading`, `muxing` (junção de vídeo e áudio do lote por
+link), `hashing`, `probing`, `thumbnail`, `processing`,
 `finalizing`, `done`, `skipped`. `progress` vai de 0 a 1 ou é `null` quando não há medida real (nunca é inventado).
 
 Batch (`status`): `listing` -> `running` -> `completed` (todos os jobs terminais, mesmo com falhas parciais),

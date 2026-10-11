@@ -408,8 +408,10 @@ class InstagramWebDownloader(InstagramDownloader):
         stats = NormalizeStats()
         items = normalize_post(root, stats=stats)
         del root
-        log.info("Publicação resolvida (web): %d mídias, %d sem URL, %d não suportadas", len(items),
-                 stats.skipped_no_url, stats.skipped_unsupported)
+        log.info("Publicação resolvida (web): %d mídias, %d sem URL, %d não suportadas, dash=%s dash_escolhido=%d",
+                 len(items), stats.skipped_no_url, stats.skipped_unsupported,
+                 ",".join(f"{outcome}:{count}" for outcome, count in sorted(stats.dash.items())) or "-",
+                 stats.dash_chosen)
         if items:
             return items
         diagnostic = {"skipped_unsupported": stats.skipped_unsupported, "skipped_no_url": stats.skipped_no_url}
@@ -434,6 +436,24 @@ class InstagramWebDownloader(InstagramDownloader):
         cancel: threading.Event | None = None,
         progress: Callable[[int, int | None], None] | None = None,
     ) -> Path:
+        return self._download_to(item.media_url, dest_dir, cancel, progress)
+
+    def download_url(
+        self,
+        url: str,
+        dest_dir: Path,
+        *,
+        cancel: threading.Event | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
+        """UM fluxo separado (DASH) pelo mesmo `cdn_download` e com os mesmos erros de ``download``, menos um: status
+        HTTP inesperado da CDN (nem 200 nem 403/404/410, ex.: 206/416) vira ``download_failed`` NÃO retryable, para
+        a pipeline usar o MP4 direto em vez de insistir. NUNCA rodou contra o CDN real (o navegador pede ``Range``;
+        não se sabe se a CDN entrega o arquivo inteiro num GET simples)."""
+        return self._download_to(url, dest_dir, cancel, progress, separate_stream=True)
+
+    def _download_to(self, url: str, dest_dir: Path, cancel: threading.Event | None,
+                     progress: Callable[[int, int | None], None] | None, *, separate_stream: bool = False) -> Path:
         from app.services.cdn_downloader import DownloadError
 
         cdn = self._cdn_downloader
@@ -443,11 +463,13 @@ class InstagramWebDownloader(InstagramDownloader):
         # Sem renovação interna: URL recusada pelo CDN (403/404) -> media_url_expired; a pipeline decide renovar a
         # página (refresh_page). Cancelamento (DownloadError "cancelled") sobe como está.
         try:
-            result = cdn(item.media_url, Path(dest_dir), max_bytes=self._max_download_bytes, cancel=cancel,
-                         progress=progress)
+            result = cdn(url, Path(dest_dir), max_bytes=self._max_download_bytes, cancel=cancel, progress=progress)
         except DownloadError as exc:
             if exc.code in _EXPIRED_CODES and cancel is not None and cancel.is_set():
                 raise   # cancelado: sobe como está (sem media_url_expired, que levaria a renovar a página)
+            if separate_stream and exc.code == "network_error" and getattr(exc, "http_status", None) is not None:
+                raise InstagramError("download_failed", "Resposta inesperada do servidor de mídia.",
+                                     retryable=False) from None
             raise _download_error(exc) from None
         return Path(result.path)
 

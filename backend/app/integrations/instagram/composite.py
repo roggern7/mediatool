@@ -122,6 +122,18 @@ class CompositeInstagramDownloader(InstagramDownloader):
     ) -> Path:
         return self._call("download", lambda d: d.download(item, dest_dir, cancel=cancel, progress=progress))
 
+    def download_url(
+        self,
+        url: str,
+        dest_dir: Path,
+        *,
+        cancel: threading.Event | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
+        # Fluxo separado (DASH): mesmo provider que atende `resolve_post` (quem entregou as URLs), sem fallback.
+        source = self.fallback if self.strategy == "gallery_dl" else self.primary
+        return source.download_url(url, dest_dir, cancel=cancel, progress=progress)
+
     def refresh_page(
         self, profile: str, ref: ListingRef, *, cancel: threading.Event | None = None
     ) -> list[RemoteMedia]:

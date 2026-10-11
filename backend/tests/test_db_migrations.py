@@ -197,3 +197,49 @@ def test_anti_duplicate_migration_only_touches_the_builtin_row(tmp_path, db):
 def test_split_statements_handles_strings_with_semicolons():
     sql = "-- comentário\nCREATE TABLE t (v TEXT);\nINSERT INTO t VALUES ('a;b');\n"
     assert split_statements(sql) == ["CREATE TABLE t (v TEXT);", "INSERT INTO t VALUES ('a;b');"]
+
+
+def test_dash_streams_migration_is_additive_over_existing_rows(tmp_path, db):
+    """Migration 0016: `job_remote_refs.dash_streams` e `media.video_codec` (anuláveis) num banco COM dados; nenhuma
+    linha existente muda ou some."""
+    apply_migrations(db, _migrations_until(tmp_path, 15))
+    assert schema_version(db) == 15
+    now = "2026-01-01T00:00:00.000Z"
+    db.execute("INSERT INTO batches (id, source, process, status, found, created_at, updated_at)"
+               " VALUES (1, 'instagram_import', 0, 'running', 2, ?, ?)", (now, now))
+    for media_id, kind, sha in ((1, "video", "a" * 64), (2, "image", "b" * 64)):
+        db.execute("INSERT INTO media (id, source_platform, source_post_id, source_media_index, media_type,"
+                   " original_path, original_sha256, file_size, width, height, fps, has_audio, mime_type, created_at,"
+                   " updated_at) VALUES (?, 'instagram', ?, 0, ?, ?, ?, 17978873, 720, 1280, 30.0, 1, 'video/mp4',"
+                   " ?, ?)", (media_id, f"POST{media_id}", kind, f"originals/{sha[:2]}/{sha}.mp4", sha, now, now))
+    db.execute("INSERT INTO jobs (id, batch_id, media_id, kind, status, source_post_id, source_media_index,"
+               " created_at, updated_at) VALUES (1, 1, 1, 'ingest', 'completed', 'POST1', 0, ?, ?)", (now, now))
+    db.execute("INSERT INTO jobs (id, batch_id, kind, status, source_post_id, source_media_index, created_at,"
+               " updated_at) VALUES (2, 1, 'ingest', 'pending', 'POST3', 0, ?, ?)", (now, now))
+    db.execute("INSERT INTO job_remote_refs (job_id, media_url, thumbnail_url, listing_cursor, listing_page_index,"
+               " listing_page_size) VALUES (2, 'https://video-fake.fbcdn.net/v.mp4?oh=FAKE', NULL, 'FAKE_CURSOR', 1,"
+               " 12)")
+    tables = ("media", "jobs", "job_remote_refs", "batches", "presets")
+    before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
+
+    assert apply_migrations(db) == [m.version for m in discover_migrations() if m.version > 15]
+    assert schema_version(db) >= 16
+    new_columns = {"media": "video_codec", "job_remote_refs": "dash_streams"}
+    for table in tables:
+        rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
+        column = new_columns.get(table)
+        if column is not None:
+            info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
+            assert info[column]["type"] == "TEXT" and not info[column]["notnull"] and info[column]["dflt_value"] is None
+            assert rows and all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        assert rows == before[table], table
+    assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
+
+    # A coluna nova só aceita NULL ou JSON válido, e não impede apagar/limpar a linha.
+    db.execute("UPDATE job_remote_refs SET dash_streams = ? WHERE job_id = 2", ('{"dash_width":1080}',))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE job_remote_refs SET dash_streams = 'nao e json' WHERE job_id = 2")
+    db.execute("UPDATE media SET video_codec = 'vp9' WHERE id = 1")
+    db.execute("UPDATE batches SET status = 'completed' WHERE id = 1")   # trigger da 0005: apaga as referências
+    assert db.scalar("SELECT COUNT(*) FROM job_remote_refs") == 0
+    assert apply_migrations(db) == []

@@ -173,6 +173,16 @@ class RemoteMedia:
     listing_dropped: dict[str, int] | None = field(default=None, compare=False, repr=False)
     # A mídia é item de um carrossel (filtro "photos_carousels"; vídeo de carrossel não é Reel).
     in_carousel: bool = field(default=False, compare=False)
+    # Fluxos separados (DASH) de maior qualidade, só no lote por link (web/dash_manifest.py); None = baixar
+    # `media_url`, que continua sendo SEMPRE o MP4 direto (fallback). As duas URLs são tão sensíveis quanto
+    # `media_url`. O download delas e a junção NUNCA rodaram contra o CDN real.
+    dash_video_url: str | None = field(default=None, repr=False)
+    dash_audio_url: str | None = field(default=None, repr=False)
+    dash_video_bytes: int | None = None
+    dash_audio_bytes: int | None = None
+    dash_width: int | None = None
+    dash_height: int | None = None
+    dash_duration: float | None = None
 
 
 SessionTestOutcome = Literal[
@@ -289,3 +299,15 @@ class InstagramDownloader(ABC):
         cancel: threading.Event | None = None,
         progress: Callable[[int, int | None], None] | None = None,
     ) -> Path: ...
+
+    def download_url(
+        self,
+        url: str,
+        dest_dir: Path,
+        *,
+        cancel: threading.Event | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
+        """Baixa UM fluxo separado (`dash_video_url`/`dash_audio_url`). Padrão: indisponível (a pipeline usa o MP4
+        direto, sem requisição)."""
+        raise InstagramError("content_unavailable", "Este provider não baixa fluxos separados.")

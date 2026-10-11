@@ -72,6 +72,14 @@ export function formatFps(fps: number | null | undefined): string {
   return `${fmt.format(fps)} fps`;
 }
 
+const VIDEO_CODEC_LABEL: Record<string, string> = { vp9: "VP9", h264: "H.264", hevc: "H.265 (HEVC)", av1: "AV1" };
+
+/** Nome legível do codec de vídeo do original (valor do ffprobe); desconhecido sai em maiúsculas. */
+export function formatVideoCodec(codec: string | null | undefined): string {
+  if (!codec) return "-";
+  return VIDEO_CODEC_LABEL[codec.toLowerCase()] ?? codec.toUpperCase();
+}
+
 export function formatPercent(fraction: number): string {
   const clamped = Math.min(1, Math.max(0, fraction));
   return `${Math.round(clamped * 100)}%`;

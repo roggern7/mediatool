@@ -15,6 +15,7 @@ export const JOB_STAGE_LABEL: Record<JobStage, string> = {
   queued: "Na fila",
   waiting_retry: "Aguardando nova tentativa",
   downloading: "Download",
+  muxing: "Juntando vídeo e áudio",
   hashing: "Calculando hash",
   probing: "Analisando",
   thumbnail: "Miniatura",

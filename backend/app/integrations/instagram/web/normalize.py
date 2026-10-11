@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..downloader import ContentType, RemoteMedia
+from .dash_manifest import select_dash_streams
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,10 @@ class NormalizeStats:
     skipped_invalid_node: int = 0    # nó sem `code` (não dá para montar source_url)
     # Cada descarte acima também é contado por motivo (nomes fixos; ver EXPECTED_REASONS).
     reasons: dict[str, int] = field(default_factory=dict)
+    # Leitura do `video_dash_manifest` (só com `dash=True`): vídeos por `DashParse.outcome` e quantos ficaram com
+    # os fluxos separados escolhidos.
+    dash: dict[str, int] = field(default_factory=dict)
+    dash_chosen: int = 0
 
     def _drop(self, reason: str, amount: int = 1) -> None:
         self.reasons[reason] = self.reasons.get(reason, 0) + amount
@@ -120,8 +125,33 @@ def _str_id(value: object) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def _dash_fields(item: Mapping, video: Mapping, stats: NormalizeStats) -> dict:
+    """Campos `dash_*` do RemoteMedia quando os fluxos separados valem a pena; {} = usar o MP4 direto.
+
+    Só quando (a) o manifesto tem a forma observada, (b) a área escolhida é maior que a declarada pelo MP4 direto
+    (sem declaração conta 0) e (c) alcança a área de `original_width/height`, quando declarados. O download dessas
+    URLs e a junção NUNCA rodaram contra o CDN real."""
+    selection, parse = select_dash_streams(item.get("video_dash_manifest"))
+    stats.dash[parse.outcome] = stats.dash.get(parse.outcome, 0) + 1
+    if selection is None:
+        return {}
+    chosen = selection.video
+    area = chosen.width * chosen.height
+    original = _area({"width": item.get("original_width"), "height": item.get("original_height")})
+    if area <= _area(video) or area < original:
+        return {}
+    stats.dash_chosen += 1
+    return {
+        "dash_video_url": chosen.url, "dash_audio_url": selection.audio.url,
+        "dash_video_bytes": chosen.content_length, "dash_audio_bytes": selection.audio.content_length,
+        "dash_width": chosen.width, "dash_height": chosen.height, "dash_duration": selection.duration,
+    }
+
+
 def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
-                   stats: NormalizeStats | None = None) -> list[RemoteMedia]:
+                   stats: NormalizeStats | None = None, dash: bool = False) -> list[RemoteMedia]:
+    """``dash``: lê o `video_dash_manifest` dos vídeos (só ``normalize_post`` liga; a listagem de perfil nunca foi
+    observada com manifesto real e continua ignorando o campo)."""
     stats = stats if stats is not None else NormalizeStats()
     stats.nodes += 1
     code = node.get("code")
@@ -159,6 +189,7 @@ def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
             continue
         item_type = item.get("media_type")
         image = _best_image(item)
+        dash_fields: dict = {}
         if item_type == MEDIA_VIDEO:
             video = _largest(item.get("video_versions"))
             if video is None:
@@ -174,6 +205,12 @@ def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
             duration = item.get("video_duration")
             duration = float(duration) if isinstance(duration, (int, float)) else None
             extension = _extension(media_url, "mp4")
+            if dash:
+                dash_fields = _dash_fields(item, video, stats)
+                if dash_fields:
+                    width, height = dash_fields["dash_width"], dash_fields["dash_height"]
+                    if dash_fields["dash_duration"] is not None:
+                        duration = dash_fields["dash_duration"]
         elif item_type == MEDIA_IMAGE:
             if image is None:
                 stats.skipped_no_url += 1
@@ -212,6 +249,7 @@ def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
             taken_at=taken_at,
             extension=extension,
             in_carousel=media_type == MEDIA_CAROUSEL,
+            **dash_fields,
         ))
     stats.items += len(result)
     return result
@@ -301,7 +339,7 @@ def normalize_post(root: Mapping, *, stats: NormalizeStats | None = None) -> lis
             return []
     media_type = node.get("media_type")
     v1 = isinstance(media_type, int) and not isinstance(media_type, bool)
-    return normalize_node(node if v1 else legacy_to_v1(node), profile=_post_owner(node), stats=stats)
+    return normalize_node(node if v1 else legacy_to_v1(node), profile=_post_owner(node), stats=stats, dash=True)
 
 
 def post_code(root: Mapping) -> str | None:

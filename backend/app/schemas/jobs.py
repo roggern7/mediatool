@@ -6,8 +6,8 @@ from pydantic import BaseModel
 
 JobStatus = Literal["pending", "downloading", "downloaded", "processing", "completed", "failed", "cancelled"]
 JobStage = Literal[
-    "queued", "waiting_retry", "downloading", "hashing", "probing", "thumbnail", "processing", "finalizing", "done",
-    "skipped",
+    "queued", "waiting_retry", "downloading", "muxing", "hashing", "probing", "thumbnail", "processing",
+    "finalizing", "done", "skipped",
 ]
 
 

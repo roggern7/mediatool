@@ -18,6 +18,7 @@ MEDIA_COLUMNS = frozenset(
         "source_platform", "source_profile", "source_url", "source_post_id", "source_media_index", "post_id",
         "media_id_remote", "media_type", "original_filename", "original_path", "original_sha256", "file_size",
         "duration", "width", "height", "fps", "has_audio", "mime_type", "thumbnail_path", "taken_at",
+        "video_codec",
     }
 )
 RENDITION_COLUMNS = frozenset(

@@ -34,7 +34,10 @@ SOURCE_COLUMNS = (
 # Só serve enquanto o download está pendente: linha apagada quando o job conclui; URLs apagadas quando falha ou é
 # cancelado (cursor/página ficam para o retry com renovação); tudo apagado quando o lote conclui ou é cancelado.
 # Lote concluído: o trigger tr_batches_completed_drop_refs (migration 0005) apaga tudo na instrução da conclusão.
-REMOTE_REF_COLUMNS = ("media_url", "thumbnail_url", "listing_cursor", "listing_page_index", "listing_page_size")
+# `dash_streams` (lote por link): JSON com as URLs assinadas dos fluxos separados; tão sensível quanto `media_url`
+# e apagado nos mesmos pontos.
+REMOTE_REF_COLUMNS = ("media_url", "thumbnail_url", "listing_cursor", "listing_page_index", "listing_page_size",
+                      "dash_streams")
 # Elegibilidade do claim; uma busca por status em ordem de id (ix_jobs_status_id) para pending e outra para
 # downloaded, cada uma parando no primeiro elegível (sem ordenar todos os pendentes).
 _CLAIM_ELIGIBLE = """claimed_by IS NULL AND cancel_requested = 0
@@ -59,7 +62,8 @@ _POOL_BRANCHES: dict[str | None, list[tuple[str, str]]] = {
     "download": [("pending", "AND kind = 'ingest'")],
     "process": [("pending", "AND kind = 'process'"), ("downloaded", "")],
 }
-_CLEAR_URLS_SQL = "UPDATE job_remote_refs SET media_url = NULL, thumbnail_url = NULL WHERE job_id = ?"
+_CLEAR_URLS_SQL = ("UPDATE job_remote_refs SET media_url = NULL, thumbnail_url = NULL, dash_streams = NULL"
+                   " WHERE job_id = ?")
 
 _TERMINAL_SQL = "('completed', 'failed', 'cancelled')"
 
@@ -126,8 +130,8 @@ class JobRepository:
             job_id = cursor.lastrowid
             if not completed_skipped and any(value is not None for value in ref.values()):
                 conn.execute(
-                    "INSERT INTO job_remote_refs (job_id, media_url, thumbnail_url, listing_cursor, listing_page_index,"
-                    " listing_page_size) VALUES (?, ?, ?, ?, ?, ?)",
+                    f"INSERT INTO job_remote_refs (job_id, {', '.join(REMOTE_REF_COLUMNS)})"
+                    f" VALUES ({placeholders(len(REMOTE_REF_COLUMNS) + 1)})",
                     (job_id, *(ref[c] for c in REMOTE_REF_COLUMNS)),
                 )
         return job_id
@@ -289,14 +293,15 @@ class JobRepository:
         )
 
     def apply_refreshed_urls(
-        self, batch_id: int, urls: list[tuple[str, int, str, str | None]], refreshed_at: str
+        self, batch_id: int, urls: list[tuple[str, int, dict[str, Any]]], refreshed_at: str
     ) -> int:
-        """Grava URLs renovadas (post, índice, media_url, thumbnail_url) nos jobs não terminais do lote.
+        """Grava URLs renovadas (post, índice, {media_url, thumbnail_url, dash_streams}) nos jobs não terminais do
+        lote. `dash_streams` ausente/None apaga o anterior (a renovação sem manifesto volta ao MP4 direto).
 
         A referência remota é criada se não existir (job repetido depois de terminar já não tem linha)."""
         updated = 0
         with self.db.transaction() as conn:
-            for post_id, index, media_url, thumbnail_url in urls:
+            for post_id, index, ref in urls:
                 ids = [
                     row["id"]
                     for row in conn.execute(
@@ -308,10 +313,11 @@ class JobRepository:
                 ]
                 for job_id in ids:
                     conn.execute(
-                        "INSERT INTO job_remote_refs (job_id, media_url, thumbnail_url) VALUES (?, ?, ?)"
+                        "INSERT INTO job_remote_refs (job_id, media_url, thumbnail_url, dash_streams)"
+                        " VALUES (?, ?, ?, ?)"
                         " ON CONFLICT (job_id) DO UPDATE SET media_url = excluded.media_url,"
-                        " thumbnail_url = excluded.thumbnail_url",
-                        (job_id, media_url, thumbnail_url),
+                        " thumbnail_url = excluded.thumbnail_url, dash_streams = excluded.dash_streams",
+                        (job_id, ref.get("media_url"), ref.get("thumbnail_url"), ref.get("dash_streams")),
                     )
                 updated += len(ids)
         return updated

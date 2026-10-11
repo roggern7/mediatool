@@ -3,6 +3,10 @@
 Ingest: download (temp) -> sha256 -> dedup -> probe -> promoção atômica do original -> thumbnail. Download-only (sem
 `params`, o padrão) NÃO chama ffprobe/FFmpeg (valida por assinatura, sem probe nem thumbnail) e termina em `completed`; com processamento pedido o job fica `downloaded` e o processamento é
 etapa separada, reivindicada pelo pool de FFmpeg (docs/BATCH_ROBUSTNESS.md, seção 9, A3).
+ÚNICA exceção ao "download-only sem FFmpeg": vídeo de lote por link com fluxos separados (DASH) usa o FFmpeg para
+JUNTAR vídeo e áudio sem recodificar (`-c copy`, etapa `muxing`) e o ffprobe para conferir a junção, gravando os
+metadados técnicos do original; sem FFmpeg/ffprobe, ou em qualquer falha de conteúdo, baixa o MP4 direto como antes
+(`_download_dash`).
 Process: processamento a partir do original existente. O original nunca é aberto para escrita.
 """
 
@@ -13,6 +17,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -25,6 +30,7 @@ from app.db.connection import parse_utc, utc_now
 from app.db.repositories.common import canonical_json
 from app.integrations.instagram.downloader import InstagramError, ListingRef, RemoteMedia
 from app.integrations.instagram.validation import post_path_kind
+from app.jobs.dash_ref import dash_fields_from_json, dash_json
 from app.jobs.errors import Failure, JobCancelled, JobFailure, classify, is_cancellation
 from app.services.instagram_gate import InstagramPaused
 from app.services.storage import has_media_signature, mime_for, normalize_extension
@@ -100,6 +106,9 @@ _DISK_FULL_ERRNOS = {errno.ENOSPC}
 _DISK_FULL_WINERRORS = {39, 112}  # ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
 # Saída do FFmpeg quando o disco enche (strerror do ENOSPC no Windows e no POSIX).
 _DISK_FULL_MARKERS = ("no space left on device", "not enough space on the disk", "there is not enough space")
+# Fluxos separados (DASH) do lote por link: codecs aceitos na verificação do arquivo juntado.
+DASH_VIDEO_CODECS = frozenset({"vp9", "h264"})
+DASH_AUDIO_CODEC = "aac"
 
 
 
@@ -110,6 +119,14 @@ class _AwaitPause(Exception):
 class _ReplayedFailure(JobFailure):
     """Irmão de uma renovação recente que falhou: repete o código registrado sem requisição nova. Não aplica pausa
     (só a requisição real que falhou aplica); respeita a vigente."""
+
+
+class _DashRejected(Exception):
+    """Falha de conteúdo no caminho dos fluxos separados: o job usa o MP4 direto. `reason` é um token fixo."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class _RefreshBlocked(_ReplayedFailure):
@@ -124,6 +141,22 @@ def _is_disk_full(exc: BaseException) -> bool:
         text = f"{exc} {getattr(exc, 'stderr', '') or ''}".lower()
         return any(marker in text for marker in _DISK_FULL_MARKERS)
     return False
+
+
+def _dash_probe_problem(probe: Any, item: RemoteMedia) -> str | None:
+    """Motivo (token fixo) para recusar o arquivo juntado, ou None se ele é o que o manifesto prometeu: vídeo e
+    áudio presentes, dimensões iguais (sem ordem, para tolerar rotação), codecs aceitos e duração coerente."""
+    if not probe.has_video or not probe.has_audio:
+        return "streams_missing"
+    if sorted((probe.width or 0, probe.height or 0)) != sorted((item.dash_width or 0, item.dash_height or 0)):
+        return "dimensions_mismatch"
+    if probe.video_codec not in DASH_VIDEO_CODECS or probe.audio_codec != DASH_AUDIO_CODEC:
+        return "codec_mismatch"
+    if item.dash_duration is not None:
+        tolerance = max(1.0, 0.02 * item.dash_duration)
+        if probe.duration is None or abs(probe.duration - item.dash_duration) > tolerance:
+            return "duration_mismatch"
+    return None
 
 
 def instagram_paused(worker: Any) -> bool:
@@ -182,6 +215,8 @@ class JobExecutor:
         self.phase = "download" if job["status"] == "downloading" else "process"
         # Lote por link: renovação recusada (`access_refused`) ou bloqueada à espera do dono não conta no disjuntor.
         self._skip_breaker = False
+        # ffprobe do arquivo juntado a partir dos fluxos separados (já verificado); None = download comum.
+        self._dash_probe = None
 
     # ---- ciclo de vida -----------------------------------------------------------------------------------------
     def run(self) -> None:
@@ -442,6 +477,7 @@ class JobExecutor:
             duration=None,
             taken_at=job["taken_at"],
             extension=None,
+            **(dash_fields_from_json(self._ref().get("dash_streams")) or {}),
         )
 
     def _ref(self) -> dict[str, Any]:
@@ -482,7 +518,9 @@ class JobExecutor:
             return self._link_sha_duplicate(existing, downloaded)
 
         self._stage("probing")
-        probe = self._validated_probe(downloaded)
+        # Arquivo juntado dos fluxos separados: o ffprobe da verificação da junção já vale (inclusive em download
+        # puro, que não analisa os demais arquivos).
+        probe = self._dash_probe if self._dash_probe is not None else self._validated_probe(downloaded)
         media_type = probe.media_type if probe is not None else (self.job["media_type"] or "image")
         ext = normalize_extension(downloaded.suffix, media_type)
         self._check_cancel()
@@ -512,6 +550,7 @@ class JobExecutor:
                         "height": probe.height if probe else None,
                         "fps": probe.fps if probe else None,
                         "has_audio": int(probe.has_audio) if probe else None,
+                        "video_codec": probe.video_codec if probe and media_type == "video" else None,
                         "mime_type": mime_for(original),
                         "taken_at": self.job["taken_at"],
                     }
@@ -528,7 +567,113 @@ class JobExecutor:
         return self.ctx.media.get(media_id)
 
     def _download(self, downloader, item: RemoteMedia, temp_dir: Path) -> Path:
+        """Vídeo com fluxos separados (lote por link): vídeo + áudio + junção sem recodificar; em falha de conteúdo
+        (inclusive fluxo recusado com 403/404), o MP4 direto de sempre, sem consulta ao Instagram.
+
+        Teto de requisições ao CDN, sem laço: no máximo 3 por chamada (vídeo, áudio, MP4 direto). Só o MP4 direto
+        vencido leva à renovação única (`_download_after_expired*`), que chama este método mais UMA vez: no máximo 6
+        requisições ao CDN e 1 consulta da publicação por tentativa do job."""
+        self._dash_probe = None
+        if item.media_type == "video" and item.dash_video_url and item.dash_audio_url:
+            muxed = self._download_dash(downloader, item, temp_dir)
+            if muxed is not None:
+                return muxed
+            self._check_cancel()
         return Path(downloader.download(item, temp_dir, cancel=self.cancel, progress=self._download_progress))
+
+    # ---- fluxos separados (DASH) do lote por link --------------------------------------------------------------
+    def _download_dash(self, downloader, item: RemoteMedia, temp_dir: Path) -> Path | None:
+        """Baixa `dash_video_url` e `dash_audio_url`, junta com `-c copy` e confere o resultado pelo ffprobe.
+        Devolve o MP4 juntado, ou None para o chamador baixar o MP4 direto (`media_url`).
+
+        None (falha de conteúdo, sem erro): FFmpeg/ffprobe ausente, tamanho acima do limite, download recusado sem
+        ser falha de rede (403/404 `media_url_expired`, grande demais, mídia inválida, status HTTP inesperado,
+        provider sem fluxos separados), tamanho diferente do declarado, junção ou verificação reprovada. Fluxo
+        recusado NÃO renova nada: a renovação só acontece se o MP4 direto também vier vencido. Sobem como hoje:
+        falha de rede retryable, cancelamento e disco cheio.
+
+        O arquivo juntado recebe o mesmo padrão de nome dos downloads diretos (`cdn-<hex>.mp4`).
+
+        O download dessas URLs e a junção NUNCA rodaram contra o CDN real; verificados só com mídias sintéticas."""
+        processors = self.ctx.processors
+        if not (processors.ffmpeg_info().found and processors.ffprobe_info().found):
+            return self._dash_fallback("tools_missing")
+        expected = [item.dash_video_bytes, item.dash_audio_bytes]
+        if sum(size or 0 for size in expected) > self.ctx.settings.max_download_bytes:
+            return self._dash_fallback("too_large")
+        output = temp_dir / f"cdn-{uuid.uuid4().hex}.mp4"
+        files: list[Path] = [output, output.with_suffix(output.suffix + ".part")]
+        sizes: list[int | None] = list(expected)
+        done = [0, 0]
+        best = [0.0]
+
+        def progress_of(index: int):
+            def report(current: int, total: int | None) -> None:
+                done[index] = current
+                if sizes[index] is None and total:
+                    sizes[index] = total
+                known = sum(size for size in sizes if size)
+                if known:
+                    best[0] = max(best[0], min(1.0, sum(done) / known))   # nunca anda para trás
+                    self._report_progress(best[0])
+            return report
+
+        try:
+            self._stage("downloading", progress=0.0)
+            self._check_cancel()
+            streams: list[Path] = []
+            for index, url in enumerate((item.dash_video_url, item.dash_audio_url)):
+                path = Path(downloader.download_url(url, temp_dir, cancel=self.cancel, progress=progress_of(index)))
+                files.append(path)
+                streams.append(path)
+                self._check_cancel()
+            for path, size in zip(streams, expected):
+                if size is not None and path.stat().st_size != size:
+                    raise _DashRejected("size_mismatch")
+            self._stage("muxing")
+            self._check_cancel()
+            processor = processors.get()
+            processor.mux_streams(streams[0], streams[1], output, cancel=self.cancel)
+            self._check_cancel()
+            probe = processor.probe(output)
+            problem = _dash_probe_problem(probe, item)
+            if problem is not None:
+                raise _DashRejected(problem)
+        except BaseException as exc:
+            for path in files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if isinstance(exc, JobCancelled):
+                raise
+            if is_cancellation(exc) or self.cancel.is_set():
+                raise JobCancelled() from None
+            if _is_disk_full(exc):
+                raise
+            if isinstance(exc, _DashRejected):
+                reason = exc.reason
+            elif isinstance(exc, InstagramError):
+                if exc.retryable:
+                    raise
+                reason = exc.code   # inclui media_url_expired: sem renovação aqui, vai para o MP4 direto
+            elif isinstance(exc, ProcessorError):   # inclui FFmpegNotFoundError e InvalidMediaError
+                reason = exc.code
+            else:
+                raise
+            self._dash_fallback(reason)
+            self._stage("downloading")
+            return None
+        for path in files[2:]:
+            path.unlink(missing_ok=True)
+        self._dash_probe = probe
+        return output
+
+    def _dash_fallback(self, reason: str) -> None:
+        """Só o token do motivo vai para o log (nunca URL, shortcode ou conteúdo do manifesto)."""
+        logger.info("Job %s: fluxos separados não usados (dash_fallback=%s); baixando o MP4 direto", self.job_id,
+                    reason)
+        return None
 
     # ---- renovação de URL expirada (seção 2) -------------------------------------------------------------------
     def _download_after_expired(self, downloader, used_url: str, temp_dir: Path) -> Path:
@@ -606,14 +751,15 @@ class JobExecutor:
         self._check_cancel()
         now = utc_now()
         urls = [
-            (item.source_post_id, int(item.source_media_index or 0), item.media_url, item.thumbnail_url)
+            (item.source_post_id, int(item.source_media_index or 0),
+             {"media_url": item.media_url, "thumbnail_url": item.thumbnail_url, "dash_streams": dash_json(item)})
             for item in items
             if item.media_url
         ]
         updated = self.ctx.jobs.apply_refreshed_urls(job["batch_id"], urls, now)
         logger.info("Lote %s: página %s renovada (%s jobs com link novo)", job["batch_id"], ref.page_index, updated)
         key = (job["source_post_id"], int(job["source_media_index"] or 0))
-        if key not in {(post_id, index) for post_id, index, _, _ in urls}:
+        if key not in {(post_id, index) for post_id, index, _ in urls}:
             # A página conta como renovada agora (evita nova chamada para os irmãos dentro do intervalo mínimo).
             self._set(media_url_refreshed_at=now)
             raise JobFailure("content_unavailable", NOT_IN_PAGE_MESSAGE)
@@ -733,14 +879,15 @@ class JobExecutor:
             self.worker.note_auth_success()
         now = utc_now()
         urls = [
-            (item.source_post_id, int(item.source_media_index or 0), item.media_url, item.thumbnail_url)
+            (item.source_post_id, int(item.source_media_index or 0),
+             {"media_url": item.media_url, "thumbnail_url": item.thumbnail_url, "dash_streams": dash_json(item)})
             for item in items
             if item.media_url
         ]
         updated = self.ctx.jobs.apply_refreshed_urls(job["batch_id"], urls, now)
         logger.info("Lote %s: publicação renovada (%s jobs com link novo)", job["batch_id"], updated)
         key = (job["source_post_id"], int(job["source_media_index"] or 0))
-        if key not in {(post_id, index) for post_id, index, _, _ in urls}:
+        if key not in {(post_id, index) for post_id, index, _ in urls}:
             # A publicação conta como renovada agora (evita nova chamada para os irmãos no intervalo mínimo).
             self._set(media_url_refreshed_at=now)
             raise JobFailure("content_unavailable", NOT_IN_POST_MESSAGE)
@@ -794,7 +941,8 @@ class JobExecutor:
         if not probe.width or not probe.height:
             return
         self.ctx.media.update(media["id"], duration=probe.duration, width=probe.width, height=probe.height,
-                              fps=probe.fps, has_audio=int(probe.has_audio))
+                              fps=probe.fps, has_audio=int(probe.has_audio),
+                              video_codec=probe.video_codec if media.get("media_type") == "video" else None)
 
     def _ensure_thumbnail(self, media_id: int, original: Path) -> None:
         """Reaproveita `thumbs/<media_id>.jpg` se já existe; senão gera em temp e promove sem sobrescrever."""

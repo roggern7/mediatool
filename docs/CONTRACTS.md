@@ -236,7 +236,8 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
   atualiza a linha embutida se ela ainda tiver exatamente os 6 params originais; renditions, jobs e lotes não mudam).
 - `media(id, source_platform, source_profile, source_url, source_post_id, source_media_index DEFAULT 0, post_id, media_id_remote,
   media_type, original_filename, original_path /*relativo a storage*/, original_sha256 UNIQUE, file_size, duration, width,
-  height, fps, has_audio, mime_type, thumbnail_path, taken_at, created_at, updated_at)`;
+  height, fps, has_audio, mime_type, thumbnail_path, taken_at, created_at, updated_at, video_codec /*migration 0016;
+  codec de vídeo do original pelo ffprobe, ex. "vp9"/"h264"; NULL quando não analisado*/)`;
   índice único parcial `(source_platform, source_post_id, source_media_index)` quando `source_post_id` não nulo.
 - `renditions(id, media_id FK CASCADE, preset_id FK SET NULL, preset_name, params json, job_id, processed_path,
   processed_sha256, file_size, duration, width, height, fps, has_audio, created_at /*processed_at*/)`
@@ -278,7 +279,8 @@ Nenhuma tabela guarda sessão/cookies.
 Job `status`: `pending | downloading | downloaded | processing | completed | failed | cancelled`.
 Ingest download-only (padrão): `pending -> downloading -> completed`. Ingest com `process: true`:
 `pending -> downloading -> downloaded -> processing -> completed`. Process: `pending -> processing -> completed`.
-`stage`: `queued, waiting_retry, downloading, hashing, probing, thumbnail, processing, finalizing, done, skipped`.
+`stage`: `queued, waiting_retry, downloading, muxing, hashing, probing, thumbnail, processing, finalizing, done, skipped`
+(`muxing`: junção de vídeo e áudio baixados separados, só no lote por link; seção 8.3).
 `progress`: 0..1 ou null (nunca inventado).
 Deduplicação em dois níveis: (1) antes de baixar, mídia com mesmo (platform, post_id/shortcode, index) já existe ->
 não baixa, `is_duplicate=1, duplicate_reason=source_id`; (2) após baixar, SHA-256 igual a mídia existente -> descarta
@@ -380,7 +382,7 @@ Rendition = { id, media_id, preset_id|null, preset_name|null, job_id|null, proce
   width|null, height|null, fps|null, has_audio|null, created_at, file_url }
 Media = { id, source_platform, source_profile|null, source_url|null, source_post_id|null, source_media_index, media_type,
   original_filename|null, original_sha256, file_size, duration|null, width|null, height|null, fps|null, has_audio|null,
-  mime_type|null, taken_at|null, created_at, thumbnail_url|null, original_url, renditions: Rendition[], last_job: Job|null }
+  video_codec|null, mime_type|null, taken_at|null, created_at, thumbnail_url|null, original_url, renditions: Rendition[], last_job: Job|null }
 Job = { id, batch_id|null, media_id|null, rendition_id|null, kind, preset_id|null, preset_name|null, status, stage|null,
   progress|null, error_code|null, error_message|null, attempts, max_attempts, next_attempt_at|null, is_duplicate,
   duplicate_reason|null, source_platform|null, source_profile|null, source_url|null, source_post_id|null,
@@ -1074,6 +1076,29 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
 - Mídia que já está na Biblioteca não é baixada de novo: o job nasce `completed`/`skipped`
   (`is_duplicate`, `duplicate_reason: "source_id"`) e entra na exportação do lote.
 
+**Maior qualidade do vídeo (fluxos separados)**. Quando o documento público traz um `video_dash_manifest` na forma
+observada e a maior representação alcança a resolução original, o vídeo é baixado como DOIS arquivos (vídeo e áudio)
+e juntado sem recodificar; senão, e em qualquer falha de conteúdo, vale o MP4 direto de sempre. Regra de escolha,
+forma aceita e mapa de fallback: `docs/INSTAGRAM_WEB_CONTRACT.md`, "Fluxos separados". Para o frontend:
+- `Job.stage` ganha `muxing` ("Juntando vídeo e áudio"), entre `downloading` e `hashing`. Durante `downloading` o
+  `progress` é a soma dos dois arquivos.
+- `Media.video_codec` (`string|null`): codec de vídeo do original (`"vp9"`, `"h264"`...); `null` em fotos e em mídias
+  não analisadas (download puro do MP4 direto, mídias antigas). O detalhe da Biblioteca mostra "Codec" quando há valor.
+- **Compatibilidade**: o original de 1080p vem em **VP9 dentro de MP4**. Chromium e Firefox reproduzem; Safari,
+  QuickTime e alguns editores podem não abrir. Não há opção de configuração nesta versão e nada é recodificado no
+  download; processar com um preset que recodifica gera H.264.
+- `job_remote_refs.dash_streams` (migration 0016, TEXT JSON): URLs assinadas e tamanhos/dimensões esperados dos dois
+  fluxos. **Tão sensível quanto `media_url`**: nunca sai pela API, por log, mensagem de erro ou diagnóstico, e é
+  apagado nos mesmos pontos (job falho/cancelado: NULL; job concluído e lote concluído/cancelado: a linha some). A
+  renovação de URL regrava `media_url`, `thumbnail_url` e `dash_streams` juntos (publicação renovada sem manifesto:
+  `dash_streams` NULL e o job baixa o MP4 direto).
+- Teto por tentativa do job: no máximo **3 requisições ao CDN por chamada de download** (vídeo, áudio, MP4 direto) e, contando a renovação única, no máximo **6 requisições ao CDN e 1 consulta da publicação por tentativa do job**. Fluxo recusado
+  (403/404) vai direto para o MP4 direto, sem renovação.
+- Sem FFmpeg/ffprobe, ou em qualquer fallback, a qualidade cai para o MP4 direto **sem aviso na interface**: o único registro é a linha de log `dash_fallback=<motivo>` do job.
+- Mídia já na Biblioteca nunca é rebaixada nem substituída: reimportar o link continua duplicata por origem, sem
+  download. Lotes por perfil não usam fluxos separados.
+- **Download de `BaseURL` pelo app e junção NUNCA rodaram contra o CDN real; verificados só com mídias sintéticas e o manifesto real saneado.**
+
 ## 9. Processor (`media_processor`)
 
 ```python
@@ -1097,6 +1122,8 @@ class MediaProcessor:
     def process(self, src, dst, opts, *, progress: Callable[[float], None]|None = None,
                 cancel: threading.Event|None = None, timeout: float|None = None) -> ProcessResult
     def make_thumbnail(self, src: Path, dst: Path, *, width: int = 320) -> Path
+    def mux_streams(self, video: Path, audio: Path, dst: Path, *, cancel: threading.Event|None = None,
+                    timeout: float|None = 300.0) -> None   # junta vídeo + áudio em MP4 com -c copy (sem recodificar)
 def sha256_file(path: Path) -> str
 ```
 subprocess com lista e `shell=False`; nunca tocar `src`; escrever temp e renomear. Vídeo: H.264 libx264 crf ~20,

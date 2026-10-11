@@ -298,6 +298,7 @@ def media_out(ctx: AppContext, items: list[dict[str, Any]]) -> list[dict[str, An
                 "height": media["height"],
                 "fps": media["fps"],
                 "has_audio": None if has_audio is None else bool(has_audio),
+                "video_codec": media.get("video_codec"),
                 "mime_type": media["mime_type"],
                 "taken_at": media["taken_at"],
                 "created_at": media["created_at"],
