@@ -1,5 +1,5 @@
 """Auditoria da importação por link, itens 1, 2 e 10: tipos de publicação ponta a ponta com a pilha web REAL
-(GraphQL simulado -> normalize_post -> cdn_download simulado) e mídias sintéticas reais. Offline."""
+(documento público simulado -> normalize_post -> cdn_download simulado) e mídias sintéticas reais. Offline."""
 
 from __future__ import annotations
 
@@ -14,9 +14,11 @@ from audit_links_helpers import (  # noqa: F401 - fixtures
     base_media,
     check_invariants,
     make_app,
+    make_root,
     storage_leftovers,
 )
 from import_links_fakes import create_links, link, link_rows
+from post_document_fixtures import data_sjs_script, envelope, media_payload, post_html
 
 P, R, V, C = "AAAAAaaaa01", "BBBBBbbbb02", "CCCCCcccc03", "DDDDDdddd04"
 
@@ -88,28 +90,30 @@ def test_download_only_has_no_thumbnail_pergunta(harness_factory, base_media, au
 # --------------------------------------------------------------------------- formatos de resposta
 
 
-def test_response_formats_legacy_v1_items_and_direct_v1_node(harness_factory, base_media, audit_env):
+def test_document_with_two_envelopes_and_little_noise_resolves_the_requested_post(harness_factory, base_media,
+                                                                                    audit_env):
+    """O documento traz o envelope de OUTRA publicação antes do da pedida: vale o do shortcode do link."""
     h, sim = make_app(harness_factory, base_media, audit_env)
     sim.add("image", P)
-    sim.add("v1", R)
-    direct = sim.add("v1", V)["items"][0]
-    sim.http.roots[V] = direct   # nó v1 direto (sem a lista `items`)
-    batch = create_links(h, [link(P), link(R), link(V)])
+    scripts = [data_sjs_script(media_payload(envelope(make_root("image", V)))),
+               data_sjs_script(media_payload(envelope(make_root("carousel", R))))]
+    sim.http.roots[R] = post_html(scripts, noise=1)   # corpo HTML cru
+    batch = create_links(h, [link(P), link(R)])
     h.run_all()
     rows = link_rows(h, batch["id"])
-    assert [(r["status"], r["items_found"]) for r in rows] == [("resolved", 1), ("resolved", 2), ("resolved", 2)], rows
-    assert lib(h)["total"] == 5
+    assert [(r["status"], r["items_found"]) for r in rows] == [("resolved", 1), ("resolved", 4)], rows
+    assert lib(h)["total"] == 5 and lib(h, q=V)["total"] == 0
     check_invariants(h)
 
 
 def _no_url(root):
-    return {k: v for k, v in root.items() if k not in ("display_url", "display_resources")}
+    return {k: v for k, v in root.items() if k != "image_versions2"}
 
 
 @pytest.mark.parametrize("name, mutate, code", [
     ("null", lambda root: None, "content_unavailable"),
     ("no_url", _no_url, "content_unavailable"),
-    ("unsupported", lambda root: {**root, "__typename": "XDTGraphFakeNewKind"}, "unsupported_media"),
+    ("unsupported", lambda root: {**root, "media_type": 99}, "unsupported_media"),
     ("unknown_shape", lambda root: {"fake_unknown": {"a": 1}}, "contract_changed"),
 ])
 def test_bad_responses_fail_only_that_link_and_import_nothing(harness_factory, base_media, audit_env, name, mutate,
@@ -132,8 +136,8 @@ def test_carousel_child_without_url_pergunta_index_gap(harness_factory, base_med
     """Pergunta: filho sem URL num carrossel: o índice dos demais fica 'furado' ([0,2,3]) ou é compactado?"""
     h, sim = make_app(harness_factory, base_media, audit_env)
     root = sim.add("carousel", C)
-    child = root["edge_sidecar_to_children"]["edges"][1]["node"]
-    for key in ("display_url", "display_resources", "video_url"):
+    child = root["carousel_media"][1]
+    for key in ("image_versions2", "video_versions"):
         child.pop(key, None)
     batch = create_links(h, [link(C)])
     h.run_all()
@@ -161,7 +165,7 @@ def test_response_for_a_different_post_is_rejected(harness_factory, base_media, 
     assert row["error_code"] == "contract_changed" and "outra publicação" in row["error_message"], row
     assert h.ctx.jobs.for_batch(batch["id"]) == [] and sim.calls == [P]
     with pytest.raises(Exception) as raised:
-        sim.downloader.resolve_post(P)
+        sim.downloader.resolve_post(P, path_kind="p")
     assert (raised.value.code, raised.value.diagnostic) == ("contract_changed", {"detail": "post_mismatch"})
 
 

@@ -3,9 +3,9 @@
 Único lugar do código com `doc_id`. O valor embutido é o observado no Chrome do dono; pode ser trocado sem
 nova versão por env `MEDIA_TOOL_IG_DOC_<NAME>` ou pelo setting `instagram_web_doc_ids` (nome -> doc_id).
 
-ATENÇÃO: a consulta de post isolado (POST_BY_SHORTCODE) NÃO foi observada no Chrome do dono nem verificada no
-Instagram real; nome, doc_id, campo raiz e variáveis vêm de conhecimento público e são trocáveis sem nova versão
-(doc_id por setting/env; campo raiz por env `MEDIA_TOOL_IG_ROOT_<NAME>`).
+A consulta de post isolado por POST GraphQL foi REMOVIDA (nunca foi verificada no Instagram real): a publicação de um
+link é lida do documento público (web/post_document.py). O nome dela segue aceito em `instagram_web_doc_ids` e no
+env só para configurações já salvas não quebrarem (DISABLED_QUERY_NAMES); o valor é ignorado com aviso.
 """
 
 from __future__ import annotations
@@ -43,17 +43,27 @@ PROFILE_POSTS = QuerySpec(
      "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": False},
 )
 
-# Post isolado pelo shortcode. NÃO VERIFICADO: sem evidência do navegador do dono e sem requisição real (por isso
-# `observed_at` é "unverified"). Nome/doc_id/raiz do conhecimento público; a resposta esperada é o formato GraphQL
-# "legado" (ver normalize.normalize_post). Se o Instagram recusar, troque o doc_id (setting/env) e, se a consulta
-# nova responder em outra raiz (ex.: `PolarisPostRootQuery`, raiz `xdt_api__v1__media__shortcode__web_info`), o
-# campo raiz por env `MEDIA_TOOL_IG_ROOT_POLARISPOSTACTIONLOADPOSTQUERYQUERY`.
-POST_BY_SHORTCODE = QuerySpec(
-    "PolarisPostActionLoadPostQueryQuery", "8845758582119845", "xdt_shortcode_media", "unverified", {},
-)
+# Consultas desativadas: o nome continua válido em `instagram_web_doc_ids` e em `MEDIA_TOOL_IG_DOC_<NAME>` /
+# `MEDIA_TOOL_IG_ROOT_<NAME>` (configuração salva antes da remoção), mas nenhum valor é usado.
+DISABLED_QUERY_NAMES: tuple[str, ...] = ("PolarisPostActionLoadPostQueryQuery",)
 
 # Nomes aceitos em `instagram_web_doc_ids` (o schema valida contra esta lista).
-KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, POST_BY_SHORTCODE.name)
+KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, *DISABLED_QUERY_NAMES)
+
+_disabled_override_logged = False
+
+
+def _warn_disabled_overrides(overrides: Mapping[str, str], env: Mapping[str, str] | None) -> None:
+    """Avisa UMA vez (por processo) que há override para consulta desativada; nunca mostra nome nem valor."""
+    global _disabled_override_logged
+    if _disabled_override_logged:
+        return
+    disabled = {name.upper() for name in DISABLED_QUERY_NAMES}
+    in_setting = any(isinstance(key, str) and key.upper() in disabled for key in (overrides or {}))
+    in_env = any((env or {}).get(prefix + name) for prefix in (ENV_PREFIX, ROOT_ENV_PREFIX) for name in disabled)
+    if in_setting or in_env:
+        _disabled_override_logged = True
+        log.warning("override para consulta desativada ignorado")
 
 
 def _valid_override(value: object, *, name: str, source: str) -> str | None:
@@ -76,6 +86,7 @@ def resolve_spec(spec: QuerySpec, overrides: Mapping[str, str],
     Campo raiz: env `MEDIA_TOOL_IG_ROOT_<NAME>` (só env; nome de campo seguro, ROOT_FIELD_RE) > valor embutido.
     Valor inválido é ignorado com aviso que não o mostra.
     """
+    _warn_disabled_overrides(overrides, env)
     spec = _resolve_root(spec, env)
     known = {name.upper() for name in KNOWN_QUERIES}
     unknown = sum(1 for key in (overrides or {}) if not isinstance(key, str) or key.upper() not in known)
@@ -102,14 +113,6 @@ def _resolve_root(spec: QuerySpec, env: Mapping[str, str] | None) -> QuerySpec:
         return replace(spec, root_field=value.strip())
     log.warning("campo raiz inválido ignorado para %s (origem: env)", spec.name)
     return spec
-
-
-def post_variables(spec: QuerySpec, shortcode: str) -> dict:
-    """Variáveis da consulta de post isolado. NÃO VERIFICADO no Instagram real (conhecimento público)."""
-    variables: dict = {"shortcode": shortcode, "fetch_tagged_user_count": None, "hoisted_comment_id": None,
-                       "hoisted_reply_id": None}
-    variables.update(spec.relay_providers)
-    return variables
 
 
 def profile_posts_variables(spec: QuerySpec, username: str, count: int, after: str | None) -> dict:

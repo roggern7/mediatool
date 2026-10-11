@@ -211,7 +211,9 @@ class GalleryDlInstagramDownloader(InstagramDownloader):
         events = list(self._run(request, timeout=self._test_timeout))
         return next((e for e in events if e.get("type") == "probe"), {})
 
-    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None) -> list[RemoteMedia]:
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
+                     path_kind: str | None = None) -> list[RemoteMedia]:
+        # `path_kind` é aceito e ignorado: o gallery-dl resolve a publicação só pelo shortcode.
         try:
             shortcode = validate_shortcode(shortcode)
         except ValueError as exc:

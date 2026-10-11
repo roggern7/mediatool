@@ -270,9 +270,15 @@ class InstagramDownloader(ABC):
         """Pede de novo a página ``ref`` da listagem e devolve as mídias dela com URLs novas. Padrão: indisponível."""
         raise InstagramError("content_unavailable", "Este provider não renova links de mídia expirados.")
 
+    # True: `resolve_post` consulta com a sessão do dono (uma publicação entregue prova a sessão). O provider web
+    # lê o documento público sem sessão e declara False.
+    resolve_post_authenticated: bool = True
+
     @abstractmethod
-    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None) -> list[RemoteMedia]:
-        """TODAS as mídias da publicação (carrossel inteiro, na ordem), sem filtro de conteúdo."""
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
+                     path_kind: str | None = None) -> list[RemoteMedia]:
+        """TODAS as mídias da publicação (carrossel inteiro, na ordem), sem filtro de conteúdo. ``path_kind``:
+        "p" ou "reel", o tipo do link de quem chama (validation.post_path_kind); só o provider web o usa."""
 
     @abstractmethod
     def download(

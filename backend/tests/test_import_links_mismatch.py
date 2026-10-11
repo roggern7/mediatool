@@ -25,13 +25,13 @@ def media_count(h) -> int:
 # --------------------------------------------------------------------------- provider web
 
 
-@pytest.mark.parametrize("kind", ["image", "reel", "carousel", "v1"])
+@pytest.mark.parametrize("kind", ["image", "reel", "video", "carousel"])
 def test_provider_rejects_the_answer_for_another_post(kind, caplog):
     sim = WebSim({})
     sim.add(kind, R)
     sim.http.answer_with[P] = R
     with caplog.at_level("DEBUG"), pytest.raises(InstagramError) as raised:
-        sim.downloader.resolve_post(P)
+        sim.downloader.resolve_post(P, path_kind="p")
     error = raised.value
     assert (error.code, error.stage, error.diagnostic) == ("contract_changed", "normalize", {"detail": "post_mismatch"})
     assert error.retryable is False and sim.calls == [P]
@@ -44,32 +44,31 @@ def test_provider_rejects_a_case_only_difference_and_accepts_the_exact_code():
     sim.add("image", A)
     sim.http.answer_with[A_UPPER] = A
     with pytest.raises(InstagramError) as raised:
-        sim.downloader.resolve_post(A_UPPER)
+        sim.downloader.resolve_post(A_UPPER, path_kind="p")
     assert raised.value.diagnostic == {"detail": "post_mismatch"}
-    assert [item.source_post_id for item in sim.downloader.resolve_post(A)] == [A]
+    assert [item.source_post_id for item in sim.downloader.resolve_post(A, path_kind="p")] == [A]
 
 
 def test_provider_accepts_the_right_carousel_whose_children_have_their_own_codes():
     sim = WebSim({})
     root = sim.add("carousel", C)
-    children = [edge["node"]["shortcode"] for edge in root["edge_sidecar_to_children"]["edges"]]
-    assert children and C not in children, "os filhos trazem shortcode próprio; só o da publicação é comparado"
-    items = sim.downloader.resolve_post(C)
+    for index, child in enumerate(root["carousel_media"]):
+        child["code"] = f"FAKECHILD00{index}"   # os filhos trazem shortcode próprio; só o da publicação é comparado
+    items = sim.downloader.resolve_post(C, path_kind="p")
     assert [(item.source_post_id, item.source_media_index) for item in items] == [(C, i) for i in range(4)]
 
 
-@pytest.mark.parametrize("kind, key", [("image", "shortcode"), ("v1", "code")])
-def test_answer_without_any_shortcode_keeps_the_existing_behaviour(kind, key):
+@pytest.mark.parametrize("kind", ["image", "carousel"])
+def test_answer_without_any_shortcode_keeps_the_existing_behaviour(kind):
     """Decisão: resposta SEM shortcode não é `post_mismatch`. Continua como antes: normalize não devolve mídia
     (`node_no_code`) e o provider levanta `contract_changed` com `post_shape_unknown` (erro do link)."""
     sim = WebSim({})
     root = sim.add(kind, P)
-    node = root["items"][0] if kind == "v1" else root
     assert post_code(root) == P
-    del node[key]
+    del root["code"]   # o envelope continua com o shortcode pedido; só o nó da mídia vem sem código
     assert post_code(root) is None
     with pytest.raises(InstagramError) as raised:
-        sim.downloader.resolve_post(P)
+        sim.downloader.resolve_post(P, path_kind="p")
     assert (raised.value.code, raised.value.diagnostic["detail"]) == ("contract_changed", "post_shape_unknown")
 
 

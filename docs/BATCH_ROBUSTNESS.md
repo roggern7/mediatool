@@ -103,14 +103,22 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
 - **Um link por vez** (`ImportRunner._run_links`): para cada link `pending` de `batch_links`, em ordem de `position`,
   o runner confere cancelamento, pausa do Instagram e backpressure (mesmos tetos da listagem de perfil:
   `MAX_PENDING_INGEST`, `MAX_PENDING_INGEST_GLOBAL`, backlog de processamento) e chama
-  `downloader.resolve_post(shortcode, cancel=...)`: UMA requisição ao Instagram pelo portão. Numa transação só, cria
+  `downloader.resolve_post(shortcode, cancel=..., path_kind=...)`: UMA requisição ao Instagram pelo portão. No
+  provider web ela é um **GET anônimo do documento público da publicação** (sem nenhum cookie da sessão do dono; ver
+  `docs/INSTAGRAM_WEB_CONTRACT.md`, "Documento público da publicação"); `path_kind` (`p` ou `reel`) vem da URL
+  normalizada do link (`batch_links.url`, via `validation.post_path_kind`), redirect nunca é seguido e a publicação
+  entregue **não** chama `worker.note_auth_success()` (`resolve_post_authenticated` é False no provider web: a
+  resposta anônima não prova a sessão; no gallery-dl segue True). Verificado no Instagram real só para um Reel
+  público sem login (2026-10-10); foto, carrossel, caminho `/p/` e publicação restrita NÃO foram verificados. A
+  criação do lote continua exigindo sessão configurada (`POST /api/import-links` -> 409 `session_missing`), como
+  antes; só a consulta da publicação deixou de usá-la. Numa transação só, cria
   os jobs de todas as mídias da publicação (ordem do carrossel; `listing_page_index`/cursor/`listing_page_size`
   NULL) e marca o link `resolved` (`items_found`, `profile`, `resolved_at`). Link `resolved` ou `failed` nunca é
   pedido de novo; o mesmo shortcode nunca aparece duas vezes no lote (UNIQUE).
 - **Resposta de outra publicação** (`post_mismatch`): o shortcode devolvido tem de ser EXATAMENTE o pedido
-  (comparação que diferencia maiúsculas). Fonte única no provider web (`InstagramWebDownloader.resolve_post`, com
-  `normalize.post_code`: `code` no formato v1, `shortcode` no legado, do mesmo nó que `normalize_post` usa; os
-  filhos de carrossel têm shortcode próprio e não entram na comparação): resposta de outra publicação levanta
+  (comparação que diferencia maiúsculas). Fonte única no provider web (`InstagramWebDownloader.resolve_post`: o
+  `code` do envelope do documento e o do nó da mídia, conferidos em `post_document.select_media_node` e de novo com
+  `normalize.post_code`; os filhos de carrossel não entram na comparação): resposta de outra publicação levanta
   `contract_changed` com `detail = post_mismatch` antes de normalizar, sem devolver mídia; vale para a resolução e
   para a renovação de URL. Resposta SEM shortcode não é `post_mismatch`: continua como antes (`normalize_node` não
   devolve mídia e o provider levanta `contract_changed`/`post_shape_unknown`), então nenhum formato que hoje
@@ -120,6 +128,13 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   job com `contract_changed` sem gravar URL em job nenhum; a renovação interna do provider `gallery-dl`
   (`GalleryDlInstagramDownloader.download`) faz a mesma conferência antes de escolher a URL nova. `post_mismatch` é erro DO LINK (como
   `post_shape_unknown`): o lote segue para o próximo. Nenhum dos dois shortcodes vai para o log.
+- **Documento sem o envelope** (`contract_changed` com `detail = post_envelope_missing`: o HTML veio, mas sem os
+  dados da publicação no formato conhecido; inclui uma eventual tela de login respondida com 200, caso NÃO
+  observado): também é erro DO LINK (`LINK_CONTRACT_DETAILS`), sem fallback para o gallery-dl em `auto`. Se o
+  formato mudou para todos, o disjuntor de 3 links falhos seguidos para o lote. **Publicação restrita**
+  (`content_unavailable` com `post_gated_logged_out`): o link falha com "A publicação exige login ou está restrita.
+  O Media Tool não usa a sessão salva para abrir publicações por link." e NÃO arma a recusa em espera (não é recusa
+  da requisição). Publicação inexistente (404): `content_unavailable` (`post_http_404`).
 - **Erro do link** (`content_unavailable`, `profile_private`, `profile_not_found`, `unsupported_media`,
   `invalid_input`, ou resposta sem nenhuma mídia): o link fica `failed` com o código e a mensagem, e o runner segue
   para o próximo. Não muda o estado dos outros links nem pausa nada.
@@ -132,8 +147,11 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   visível, nova tentativa automática a cada 6 h (máx. 4) e "Retomar" (`resume-listing`). Link resolvido zera o
   backoff e as tentativas.
 - **Recusa em espera** (`access_refused` em lote por link; UM bloqueio por lote, compartilhado pelo runner e pela
-  renovação de URL). A recusa é da consulta, não do link, e a consulta de publicação isolada ainda não foi
-  verificada no Instagram real; repetir sozinho só mandaria mais requisições recusadas.
+  renovação de URL). A recusa é da consulta, não do link; repetir sozinho só mandaria mais requisições recusadas.
+  No documento público, `access_refused` é qualquer redirect (login, challenge, checkpoint, consent, home ou outro,
+  inclusive `/p/<código>/` -> `/reel/<código>/`: redirect nunca é seguido) e 401/403. Como a requisição é anônima,
+  nenhum desses casos vira `session_expired`, `request_auth_failed` ou `checkpoint_required`: a sessão do dono não
+  é tocada.
   - **Estado** (persistente, sem coluna nova): `batches.error_code = 'access_refused'` num lote `import_mode =
     'links'` (`BatchRepository.links_hold` / `arm_links_hold` / `clear_links_hold`; a MESMA função é consultada
     pelos dois caminhos). Por que este campo: já é o que o lote parado por recusa gravava e a API/presenters
@@ -191,7 +209,8 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
     renovação recusada não consegue armar a espera entre as duas (a gravação a apagaria). Nada ali consulta o
     Instagram nem adquire o portão; a espera pela trava é interrompida pelo encerramento do app.
   - A listagem por perfil (`_refresh_page`, `_handle_listing_error`) e os outros códigos (`content_unavailable`,
-    `rate_limited`, `network_error`, raiz nula, mídia que sumiu) não mudam. Dois lotes por link são isolados.
+    `rate_limited`, `network_error`, publicação inexistente, mídia que sumiu) não mudam. Dois lotes por link são
+    isolados.
   - **Cancelamento durante o fim do trecho**: o fim do trecho espera a trava do lote, que pode durar uma
     renovação em voo; ao obtê-la o runner RELÊ o lote e, se ele foi cancelado (ou saiu de `listing`), não grava
     nada (lote cancelado segue o encerramento de cancelado de `_after_chunk`). Defesa em profundidade, para
@@ -227,15 +246,16 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   `status` de 100 a 599 e `size` de 0 a 10^12, só `int` exato (nem `bool` nem subclasse); content-type só da
   lista fixa (`text/html`, `application/json`, `text/javascript`, `application/x-javascript`, `text/plain`,
   `application/octet-stream`, `image/jpeg`, `image/png`, `image/webp`, `video/mp4`); `path` só quando é um dos
-  paths fixos do provider web (`/`, `/graphql/query`, `/web/search/topsearch/`). Todo texto tem de ser `str` exato
+  paths fixos do provider web (`/`, `/graphql/query`, `/web/search/topsearch/` e os tokens `/p/` e `/reel/` do
+  documento público de uma publicação, já sem o shortcode). Todo texto tem de ser `str` exato
   (subclasse é omitida). Valor fora do formato é omitido, nunca truncado; a única normalização é a do
   content-type, que perde parâmetros (`; charset=...`), espaços em volta e maiúsculas antes da comparação com a
   lista (o que sai é sempre o valor da lista). O `stage` do erro tem precedência sobre `diagnostic["stage"]`.
   Nenhum valor aceito contém espaço ou quebra de linha, e o resultado ainda passa por `redact`. `location_path`,
   query, corpo, cookies, tokens, shortcode e ids nunca entram. O link aparece pela posição no lote. Exemplo:
   `Lote 7: consulta por link recusada (access_refused); aguardando ação manual, sem nova tentativa automática
-  [stage=graphql status=302 redirect=redirect_home detail=redirect_home content_type=text/html size=0
-  path=/graphql/query]`. No lote por link recusado o mesmo resumo vai no fim de `error_message` (sem coluna nova),
+  [stage=post_document status=302 redirect=redirect_login detail=redirect_login size=0 path=/reel/]`. No lote por
+  link recusado o mesmo resumo vai no fim de `error_message` (sem coluna nova),
   e também no `error_message` do link que vira `failed` na 2a recusa (`errors.message_with_diagnostic`). O texto
   final respeita o teto de 500 caracteres de `safe_message`: se não couber, o diagnóstico perde campos INTEIROS do
   fim (nunca um valor cortado ao meio) e, se nem o primeiro couber, a mensagem vai sem sufixo.
@@ -247,9 +267,10 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   publicação) é erro DO LINK já na 1a vez. Nunca marcam o link como falho: `session_missing`, `session_invalid`,
   `session_expired`, `checkpoint_required`, `rate_limited`, `action_blocked`, `request_auth_failed`,
   `network_error`, `timeout` e qualquer erro retryable.
-- **Disjuntor de links falhos seguidos** (`batches.link_fail_streak`, `LINK_FAIL_BREAKER = 3`): a consulta de
-  publicação isolada ainda não foi verificada no Instagram real; se ela estiver errada, todo link viraria
-  `content_unavailable` e o lote gastaria uma requisição por link marcando tudo como falho. Por isso 3 links
+- **Disjuntor de links falhos seguidos** (`batches.link_fail_streak`, `LINK_FAIL_BREAKER = 3`): a leitura do
+  documento público só foi verificada no Instagram real para um Reel; se o formato mudar (ou estiver errado para
+  foto/carrossel), todo link viraria `contract_changed`/`post_envelope_missing` ou `content_unavailable` e o lote
+  gastaria uma requisição por link marcando tudo como falho. Por isso 3 links
   SEGUIDOS falhos (sem nenhum resolvido entre eles; o contador é persistido e vale entre trechos) com links ainda
   pendentes param o trecho e deixam o lote em `needs_attention` com `error_code = links_failing`. O contador zera
   quando um link resolve, quando o disjuntor dispara e no "Retomar"; a retomada (manual ou a automática de 6 h,
@@ -269,7 +290,9 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
   item em voo em outro lote -> `duplicate_in_flight`. A consulta do link acontece mesmo assim (é ela que diz quais
   mídias a publicação tem).
 - **Link de download expirado** (`pipeline._download_after_expired_post`): job de lote por link não tem página de
-  listagem; a renovação chama `resolve_post(shortcode)` UMA vez por publicação (trava em memória por app, lote e
+  listagem; a renovação chama `resolve_post(shortcode, path_kind=...)` UMA vez por publicação (no provider web, o
+  mesmo GET anônimo do documento público; `path_kind` vem da `source_url` do job, que o normalizador monta com
+  `/reel/` quando a publicação é Reel; sem `note_auth_success`; trava em memória por app, lote e
   shortcode; intervalo mínimo `REFRESH_MIN_INTERVAL` por publicação via `media_url_refreshed_at`), grava as URLs
   novas de todos os jobs abertos da publicação no lote e tenta o download uma vez. Durante pausa do Instagram o job
   volta a `pending` sem consumir tentativa. Mídia ausente da resposta, ou URL nova também recusada ->
@@ -284,7 +307,8 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
 - **Log**: só id do lote e contagens; shortcode, link colado e URL de mídia nunca são registrados.
 - Testes: `backend/tests/test_import_links.py`, `test_import_links_runner.py`, `test_import_links_refused.py`,
   `test_import_links_refused_diag.py`, `test_import_links_mismatch.py`, `test_import_links_refresh_refused.py`,
-  `test_import_links_hold.py`, `test_gallerydl_post_mismatch.py`.
+  `test_import_links_hold.py`, `test_import_links_public_document.py`, `test_gallerydl_post_mismatch.py`; leitura
+  do documento: `test_web_post_document.py`, `test_web_provider_post.py`.
 
 ## 0. Meta de escala (REVISÃO, prevalece sobre o resto deste documento)
 

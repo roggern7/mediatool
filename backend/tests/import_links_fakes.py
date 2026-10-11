@@ -41,11 +41,13 @@ def fresh_url(item: RemoteMedia) -> str:
 @dataclass
 class LinksDownloader(FakeInstagramDownloader):
     """`posts[shortcode]` = mídias da publicação; `errors[shortcode]` = erros a levantar, um por chamada, em ordem
-    (depois deles a publicação responde normal). `calls` = shortcode de cada `resolve_post`, em ordem."""
+    (depois deles a publicação responde normal). `calls` = shortcode de cada `resolve_post`, em ordem; `path_kinds` =
+    o `path_kind` recebido em cada uma."""
 
     posts: dict[str, list[RemoteMedia]] = field(default_factory=dict)
     errors: dict[str, list[Exception]] = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
+    path_kinds: list[str | None] = field(default_factory=list)
     on_resolve: Callable[[str], None] | None = None
     # Renovação de URL: `expired` = media_url recusadas pelo "CDN"; a 2a consulta da publicação em diante devolve
     # URLs novas (`fresh_url`), menos as chaves "shortcode:índice" em `missing`.
@@ -53,8 +55,9 @@ class LinksDownloader(FakeInstagramDownloader):
     missing: set[str] = field(default_factory=set)
     download_urls: dict[str, list[str]] = field(default_factory=dict)
 
-    def resolve_post(self, shortcode: str, *, cancel=None) -> list[RemoteMedia]:
+    def resolve_post(self, shortcode: str, *, cancel=None, path_kind=None) -> list[RemoteMedia]:
         self.calls.append(shortcode)
+        self.path_kinds.append(path_kind)
         if self.on_resolve is not None:
             self.on_resolve(shortcode)
         errors = self.errors.get(shortcode)

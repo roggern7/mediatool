@@ -10,7 +10,7 @@ import pytest
 from app.core.logging import register_secret
 from app.integrations.instagram.downloader import InstagramError
 from app.integrations.instagram.session import InstagramSession
-from app.integrations.instagram.web.errors import InstagramWebError, classify_response
+from app.integrations.instagram.web.errors import InstagramWebError, classify_public_document, classify_response
 from app.integrations.instagram.web.http import InstagramWebHttp, WebResponse
 
 FAKE_SESSIONID = "FAKE_SESSIONID_ERR_0123456789"
@@ -240,3 +240,53 @@ def test_no_secret_in_error_or_diagnostic():
         assert value not in dump
     assert err.diagnostic["set_cookie_names"] == ["csrftoken"]
     assert err.diagnostic["path"] == "/api/test/"
+
+
+# --------------------------------------------------------------------------- documento público (GET anônimo)
+
+
+def _doc(status: int = 200, *, content_type: str = "text/html; charset=utf-8", location: str | None = None,
+         text: str = "<html></html>", sessionid_deleted: bool = False) -> WebResponse:
+    return WebResponse(status=status, location_path=location, content_type=content_type, elapsed_ms=5,
+                       set_cookie_names=["sessionid"] if sessionid_deleted else [],
+                       sessionid_deleted=sessionid_deleted, text=text, path="/reel/")
+
+
+def test_public_document_ok_is_none_even_with_sessionid_deleted():
+    assert classify_public_document(_doc()) is None
+    assert classify_public_document(_doc(sessionid_deleted=True)) is None
+
+
+@pytest.mark.parametrize("resp, code, detail", [
+    (_doc(302, location="/accounts/login/"), "access_refused", "redirect_login"),
+    (_doc(302, location="/challenge/FAKE/"), "access_refused", "redirect_challenge"),
+    (_doc(302, location="/checkpoint/FAKE/"), "access_refused", "redirect_checkpoint"),
+    (_doc(302, location="/privacy/checks/"), "access_refused", "redirect_consent"),
+    (_doc(302, location="/"), "access_refused", "redirect_home"),
+    (_doc(301, location="/reel/FAKECODE001/"), "access_refused", "redirect_other"),
+    (_doc(302), "access_refused", "redirect_other"),
+    (_doc(401), "access_refused", "http_401"),
+    (_doc(403, sessionid_deleted=True), "access_refused", "http_403"),
+    (_doc(404), "content_unavailable", "post_http_404"),
+    (_doc(429), "rate_limited", "http_429"),
+    (_doc(400, content_type="application/json", text='{"message": "Please wait a few minutes"}'), "rate_limited",
+     "please_wait"),
+    (_doc(502), "network_error", "http_502"),
+    (_doc(418), "contract_changed", "http_418"),
+    (_doc(200, content_type="application/json", text='{"require_login": true}'), "contract_changed",
+     "document_not_html"),
+])
+def test_public_document_never_yields_a_session_code(resp, code, detail):
+    err = classify_public_document(resp)
+    assert (err.code, err.diagnostic["detail"], err.stage) == (code, detail, "post_document")
+    assert err.retryable is (code in ("rate_limited", "network_error"))
+    assert err.code not in ("session_missing", "session_invalid", "session_expired", "request_auth_failed",
+                            "checkpoint_required", "action_blocked")
+    assert "location_path" not in err.diagnostic and "sessionid_deleted" not in err.diagnostic
+    assert "FAKECODE001" not in str(err.diagnostic)
+
+
+def test_public_document_html_body_is_never_scanned():
+    body = "<html>please wait a few minutes checkpoint_required login_required feedback_required</html>"
+    assert classify_public_document(_doc(text=body)) is None
+    assert classify_public_document(_doc(404, text=body)).code == "content_unavailable"

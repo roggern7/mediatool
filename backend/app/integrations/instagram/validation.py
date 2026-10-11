@@ -143,3 +143,12 @@ def parse_post_link(value: str) -> tuple[str, str]:
     except ValueError:
         raise ValueError("código da publicação inválido") from None
     return code, f"https://www.instagram.com/{_POST_PATH_KINDS[segments[0].lower()]}/{code}/"
+
+
+def post_path_kind(url: str) -> str | None:
+    """"p" ou "reel" a partir de uma URL de publicação já normalizada (parse_post_link); None se não for uma."""
+    try:
+        _, normalized = parse_post_link(url)
+    except ValueError:
+        return None
+    return urlsplit(normalized).path.split("/")[1]

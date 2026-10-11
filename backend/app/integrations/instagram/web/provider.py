@@ -68,6 +68,13 @@ def _default_http(session: InstagramSession, config: Any, transport: Any, gate: 
     return InstagramWebHttp(session, config or WebHttpConfig(), transport=transport, gate=gate)
 
 
+def _default_public_http(config: Any, transport: Any, gate: Any = None) -> Any:
+    """Cliente ANÔNIMO (sem cookies do dono) para o documento público de uma publicação."""
+    from app.integrations.instagram.web.http import InstagramWebHttp, WebHttpConfig
+
+    return InstagramWebHttp.anonymous(config or WebHttpConfig(), transport=transport, gate=gate)
+
+
 def _default_bootstrap(http: Any) -> Any:
     from app.integrations.instagram.web.bootstrap import WebBootstrap
 
@@ -190,7 +197,19 @@ class _Ops:
         return "_Ops(<redacted>)"
 
 
+POST_DOCUMENT_STAGE = "post_document"
+POST_PATH_KINDS = ("p", "reel")
+_MSG_POST_ENVELOPE_MISSING = ("O Instagram abriu a página da publicação, mas sem os dados dela no formato que o "
+                              "Media Tool conhece. Nada foi importado deste link.")
+_MSG_POST_GATED = ("A publicação exige login ou está restrita. O Media Tool não usa a sessão salva para abrir "
+                   "publicações por link.")
+
+
 class InstagramWebDownloader(InstagramDownloader):
+    # `resolve_post` lê o documento público sem a sessão do dono: uma publicação entregue NÃO prova a sessão (quem
+    # chama não registra sucesso de autenticação).
+    resolve_post_authenticated: bool = False
+
     def __init__(
         self,
         session_provider: InstagramSessionProvider,
@@ -210,6 +229,7 @@ class InstagramWebDownloader(InstagramDownloader):
         max_pages: int | None = None,
         request_gate: Any = None,
         bootstrap_cache: WebStateCache | None = None,
+        public_http_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._provider = session_provider
         self._max_download_bytes = int(max_download_bytes)
@@ -220,6 +240,9 @@ class InstagramWebDownloader(InstagramDownloader):
         # Portão global (seção 8): injetado no cliente HTTP, que ocupa uma vaga por requisição ao instagram.com.
         self._http_factory = http_factory or (
             lambda session: _default_http(session, http_config, transport, request_gate))
+        # Cliente anônimo de `resolve_post` (jar vazio; mesmo portão): nenhum cookie da sessão salva viaja nele.
+        self._public_http_factory = public_http_factory or (
+            lambda: _default_public_http(http_config, transport, request_gate))
         self._bootstrap_factory = bootstrap_factory or _default_bootstrap
         self._gate = request_gate
         # WebState compartilhado entre trechos de listagem e renovações (seção 9, M2); None = 1 bootstrap por operação.
@@ -293,13 +316,26 @@ class InstagramWebDownloader(InstagramDownloader):
         # ``limit=None`` ("Todos"): até o fim real do perfil, sem teto de quantidade nem de páginas.
         return self._iter_media(username, content, limit, cancel, resume, on_checkpoint)
 
-    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None) -> list[RemoteMedia]:
-        """Bootstrap (cache do app) + 1 POST da consulta de post isolado. A consulta NÃO foi verificada no
-        Instagram real (queries.POST_BY_SHORTCODE; doc_id e campo raiz trocáveis por setting/env).
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
+                     path_kind: str | None = None) -> list[RemoteMedia]:
+        """UM GET ANÔNIMO do documento público da publicação (``/p/<código>/`` ou ``/reel/<código>/``, conforme
+        ``path_kind``, que vem do link de quem chama) + leitura do envelope embutido (web/post_document.py). Não usa
+        a sessão do dono: o cliente é criado sem cookies e descartado ao fim. Redirect nunca é seguido.
+
+        VERIFICADO no Instagram real (2026-10-10, sem login): UM Reel público em ``/reel/<código>/``.
+        NÃO VERIFICADO: foto, carrossel, o caminho ``/p/``, publicação restrita (forma de ``gating_ruling``), qual
+        ``type`` de ``video_versions`` é a melhor qualidade (as versões vêm sem largura/altura; fica a primeira com
+        URL https), o host do CDN das URLs sem login (fora de ``.cdninstagram.com``/``.fbcdn.net`` o download falha
+        com ``invalid_url``) e a qualidade de foto sem login (a capa do Reel veio com no máximo 640 px de largura).
 
         Devolve TODAS as mídias da publicação (carrossel inteiro, na ordem), sem filtro de conteúdo, com
         ``listing_ref=None`` e ``source_profile`` = dono da publicação ("" se ausente). Cada post conta como uma
-        página no teto global por hora. Cancelado antes do POST -> lista vazia (quem chama confere o cancelamento).
+        página no teto global por hora. Cancelado antes do GET -> lista vazia (quem chama confere o cancelamento).
+        ``path_kind`` fora de "p"/"reel" -> ``invalid_input`` sem requisição (nunca há tipo padrão).
+        Erros do documento (stage ``post_document``): redirect/401/403 -> ``access_refused``; 429 ->
+        ``rate_limited``; 404 -> ``content_unavailable``; documento sem o envelope -> ``contract_changed`` com detail
+        ``post_envelope_missing``; publicação restrita -> ``content_unavailable`` com ``post_gated_logged_out``.
+        Nunca levanta código de sessão (``session_*``, ``request_auth_failed``, ``checkpoint_required``).
         Sem mídia: só tipo não suportado -> ``unsupported_media``; objeto sem código de publicação ->
         ``contract_changed``; demais (itens sem URL utilizável) -> ``content_unavailable``.
         Resposta cujo shortcode não é EXATAMENTE o pedido (outra publicação, ou só maiúsculas diferentes) ->
@@ -308,15 +344,19 @@ class InstagramWebDownloader(InstagramDownloader):
             shortcode = validate_shortcode(shortcode)
         except ValueError as exc:
             raise InstagramError("invalid_input", str(exc)) from None
-        from app.integrations.instagram.web.errors import InstagramWebError
+        if path_kind not in POST_PATH_KINDS:
+            raise InstagramError("invalid_input", "Tipo do link da publicação desconhecido (esperado /p/ ou /reel/).")
+        from app.integrations.instagram.web.errors import InstagramWebError, classify_public_document
         from app.integrations.instagram.web.normalize import NormalizeStats, normalize_post, post_code
+        from app.integrations.instagram.web.post_document import MAX_DOCUMENT_BYTES, parse_post_document
 
         if cancel is not None and cancel.is_set():
             return []
-        with self._ops(cancel, shared=True) as ops:
-            ops.bootstrap.get()
-            if cancel is not None and cancel.is_set():
-                return []
+        safe_path = f"/{path_kind}/"   # token fixo para log/diagnóstico: o path real carrega o shortcode
+        http = self._public_http_factory()
+        if cancel is not None and hasattr(http, "cancel"):
+            http.cancel = cancel   # a espera pela vaga no portão respeita o cancelamento da operação
+        try:
             wait_page = getattr(self._gate, "wait_listing_page", None)
             if wait_page is not None:
                 per_hour = page_rate_limit(self._env)
@@ -324,9 +364,39 @@ class InstagramWebDownloader(InstagramDownloader):
                     wait_page(cancel, max_per_hour=per_hour)
                     if cancel is not None and cancel.is_set():
                         return []
-            root = ops.graphql.post_by_shortcode(shortcode)
-        answered = post_code(root)
-        if answered is not None and answered != shortcode:
+            try:
+                resp = http.get_document(f"/{path_kind}/{shortcode}/", max_bytes=MAX_DOCUMENT_BYTES,
+                                         diagnostic_path=safe_path)
+            except InstagramWebError as exc:
+                if exc.diagnostic.get("detail") == "document_too_large":
+                    exc.stage = POST_DOCUMENT_STAGE
+                raise
+            error = classify_public_document(resp, stage=POST_DOCUMENT_STAGE)
+            if error is not None:
+                error.diagnostic["path"] = safe_path
+                raise error
+            root, parse = parse_post_document(resp.text, shortcode)
+            del resp
+        finally:
+            _close_http(http)
+        log.info("Publicação (documento público): outcome=%s scripts=%d envelopes=%d preloader_observado=%s "
+                 "typename=%s", parse.outcome, parse.scripts, parse.envelopes, parse.preloader_observed,
+                 parse.typename or "-")
+        mismatch = parse.outcome == "mismatch"
+        if parse.outcome in ("no_scripts", "envelope_missing"):
+            raise InstagramWebError(
+                "contract_changed", _MSG_POST_ENVELOPE_MISSING, stage=POST_DOCUMENT_STAGE,
+                diagnostic={"detail": "post_envelope_missing", "path": safe_path, "scripts": parse.scripts,
+                            "envelopes": parse.envelopes})
+        if parse.outcome == "gated":
+            # Forma NÃO verificada no real: `gating_ruling` não nulo ou a mídia ausente no envelope do shortcode.
+            raise InstagramWebError(
+                "content_unavailable", _MSG_POST_GATED, stage=POST_DOCUMENT_STAGE,
+                diagnostic={"detail": "post_gated_logged_out", "path": safe_path})
+        if not mismatch:
+            answered = post_code(root)
+            mismatch = answered is not None and answered != shortcode   # defesa dupla (já conferido na leitura)
+        if mismatch:
             # Resposta de OUTRA publicação (comparação exata, diferenciando maiúsculas): nunca vira mídia nem renova
             # URL. Resposta sem shortcode nenhum segue para normalize_post, que não devolve mídia (abaixo:
             # `post_shape_unknown`). Nenhum dos dois shortcodes vai para o log nem para o diagnóstico.

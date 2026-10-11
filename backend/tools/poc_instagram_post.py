@@ -1,20 +1,22 @@
-"""POC da consulta de post isolado do provider web do Instagram: SÓ resolução (sem banco, sem download).
+"""POC do documento público de UMA publicação do Instagram: SÓ leitura (sem banco, sem download, SEM sessão).
 
 Uso: ``.venv\\Scripts\\python.exe backend\\tools\\poc_instagram_post.py --url <link da publicação>``
 
-A consulta de post (queries.POST_BY_SHORTCODE) NÃO foi verificada no Instagram real: esta POC existe para o dono
-verificá-la, e só deve ser rodada com autorização dele. Tráfego: 1 GET do documento + 1 POST GraphQL, nada mais.
-Usa a sessão salva (LocalInstagramSessionProvider) e o InstagramWebDownloader real, retries 0 e sem re-bootstrap.
-Para no primeiro erro, imprimindo só code/message/stage/detail seguros, o diagnóstico HTTP seguro quando houver
-(status, redirect, content_type, size) e os NOMES das chaves da resposta (para ajustar doc_id/campo raiz). Conta TODAS as requisições (método, path sem query, status) e confirma 0 requisições ao
-CDN. Recusa rodar se o app estiver escutando na porta configurada. Relatório JSON no stdout sem ids, cookies,
-tokens, shortcode ou URLs. O override de doc_id gravado no banco (setting) não é lido; vale o env/.env
-(MEDIA_TOOL_IG_DOC_<NAME>, MEDIA_TOOL_IG_ROOT_<NAME>) ou o valor embutido.
+A importação por link lê a publicação do documento público (web/post_document.py), aberto por um cliente ANÔNIMO.
+Isso foi verificado no Instagram real só para UM Reel público (2026-10-10): esta POC existe para o dono conferir os
+casos NÃO verificados (foto, carrossel, caminho ``/p/``, publicação restrita, redirect), e só deve ser rodada com
+autorização dele. Tráfego: UM GET do documento da publicação, nada mais: sem cookies, sem a sessão salva, retries 0,
+sem seguir redirect e sem nenhuma requisição ao CDN. Usa o InstagramWebDownloader real (mesma classificação de erros
+do app). Para no primeiro erro. Conta TODAS as requisições (método, tipo do caminho, status) e recusa rodar se o app
+estiver escutando na porta configurada. Relatório JSON no stdout só com status, tipo de redirect, content-type,
+tamanho, o resumo da leitura (contagens) e o resumo das mídias (quantidade, tipos, maior largura/altura, se as
+versões de vídeo trazem tamanho): nunca URL, HTML, shortcode, ids, cookies ou tokens.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import re
 import socket
@@ -33,27 +35,19 @@ if str(BACKEND_DIR) not in sys.path:
 from app.core.config import Settings, load_settings  # noqa: E402
 from app.core.logging import configure_logging  # noqa: E402
 from app.integrations.instagram.downloader import InstagramError, RemoteMedia  # noqa: E402
-from app.integrations.instagram.session import LocalInstagramSessionProvider  # noqa: E402
-from app.integrations.instagram.validation import parse_post_link  # noqa: E402
-from app.integrations.instagram.web.bootstrap import WebBootstrap  # noqa: E402
-from app.integrations.instagram.web.errors import InstagramWebError  # noqa: E402
-from app.integrations.instagram.web.graphql import InstagramWebGraphQL  # noqa: E402
+from app.integrations.instagram.validation import parse_post_link, post_path_kind  # noqa: E402
+from app.integrations.instagram.web.errors import InstagramWebError, redirect_kind  # noqa: E402
+from app.integrations.instagram.web.http import InstagramWebHttp  # noqa: E402
+from app.integrations.instagram.web.post_document import OBSERVED_AT, parse_post_document  # noqa: E402
 from app.integrations.instagram.web.provider import InstagramWebDownloader  # noqa: E402
-from app.integrations.instagram.web.queries import POST_BY_SHORTCODE, resolve_spec  # noqa: E402
 from app.jobs.errors import safe_diagnostic, safe_message  # noqa: E402
 from app.services.cdn_downloader import ALLOWED_HOST_SUFFIXES, DownloadError, validate_cdn_url  # noqa: E402
 
 INSTAGRAM_HOSTS = ("instagram.com", "www.instagram.com")
 _DETAIL_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-# Nome de chave/campo/tipo seguro para o relatório (nunca valores da resposta).
-_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
-_MAX_KEYS = 60
-
-
-def _keys(value: object) -> list[str] | None:
-    if not isinstance(value, (Mapping, list)):
-        return None
-    return sorted(k for k in value if isinstance(k, str) and _KEY_RE.match(k))[:_MAX_KEYS]
+_CONTENT_TYPE_RE = re.compile(r"^[a-z]{1,20}/[a-z0-9.+-]{1,40}$")
+_PRODUCT_TYPE_RE = re.compile(r"^[a-z_]{1,40}$")
+_MAX_LISTED = 20
 
 
 def safe_error(exc: BaseException) -> dict[str, Any]:
@@ -78,11 +72,6 @@ def safe_error(exc: BaseException) -> dict[str, Any]:
             error[key] = int(value)
         elif key in ("redirect", "content_type") and value:
             error[key] = value
-    # Nomes das chaves da resposta que falhou (ex.: `data_keys` mostra o campo raiz que o Instagram devolveu).
-    for name in ("top_keys", "data_keys"):
-        keys = _keys(diagnostic.get(name))
-        if keys is not None:
-            error[name] = keys
     return error
 
 
@@ -108,7 +97,8 @@ class _CountingTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         entry: dict[str, Any] = {"method": request.method, "host": (request.url.host or "").lower(),
-                                 "path": request.url.path, "status": None}
+                                 "path": request.url.path, "status": None,
+                                 "cookie_sent": "cookie" in request.headers}
         self._log.append(entry)
         response = self._inner.handle_request(request)
         entry["status"] = response.status_code
@@ -118,64 +108,77 @@ class _CountingTransport(httpx.BaseTransport):
         self._inner.close()
 
 
-def _token_rejected() -> InstagramWebError:
-    return InstagramWebError(
-        "session_invalid", "O Instagram não aceitou a sessão salva para consultar a publicação. A POC não "
-        "refaz o bootstrap (sem nova tentativa).", stage="graphql", diagnostic={"detail": "web_token_rejected"})
+class _NoSession:
+    """A POC não usa a sessão salva: qualquer leitura dela é erro de programação."""
+
+    def get(self) -> Any:
+        raise RuntimeError("a POC do documento público não lê a sessão salva")
 
 
-class _NoRetryBootstrap:
-    """WebBootstrap sem re-bootstrap: o pedido de refazer (token recusado) vira erro na hora, sem nova requisição
-    e antes do aviso de re-bootstrap no log."""
+class _RecordingHttp:
+    """Cliente anônimo real que guarda a última resposta do documento para o relatório (só em memória)."""
 
-    def __init__(self, inner: WebBootstrap) -> None:
+    def __init__(self, inner: InstagramWebHttp) -> None:
         self._inner = inner
+        self.cancel = None
+        self.last: Any = None
 
-    def get(self, *, force: bool = False):
-        if force:
-            raise _token_rejected()
-        return self._inner.get()
+    def get_document(self, path: str, **kwargs: Any) -> Any:
+        self.last = self._inner.get_document(path, **kwargs)
+        return self.last
 
-    def invalidate(self) -> None:
-        raise _token_rejected()
-
-
-def response_shape(root: Mapping) -> dict[str, Any]:
-    """Forma da raiz da resposta: só NOMES de chaves e de tipo, e contagens; nunca valores."""
-    shape: dict[str, Any] = {"root_keys": _keys(root)}
-    items = root.get("items")
-    if isinstance(items, list):
-        shape["format"] = "v1_items"
-        shape["items_count"] = len(items)
-        first = next((i for i in items if isinstance(i, Mapping)), None)
-        shape["item_keys"] = _keys(first)
-        return shape
-    media_type = root.get("media_type")
-    if isinstance(media_type, int) and not isinstance(media_type, bool):
-        shape["format"] = "v1_node"
-        return shape
-    shape["format"] = "legacy"
-    typename = root.get("__typename")
-    shape["typename"] = typename if isinstance(typename, str) and _KEY_RE.match(typename) else None
-    sidecar = root.get("edge_sidecar_to_children")
-    edges = sidecar.get("edges") if isinstance(sidecar, Mapping) else None
-    if isinstance(edges, list):
-        shape["children_count"] = len(edges)
-        child = next((e.get("node") for e in edges if isinstance(e, Mapping) and isinstance(e.get("node"), Mapping)),
-                     None)
-        shape["child_keys"] = _keys(child)
-    return shape
+    def close(self) -> None:
+        self._inner.close()
 
 
-class _ShapeGraphQL(InstagramWebGraphQL):
-    """GraphQL real que só anota a forma (nomes de chaves) da raiz do post para o relatório."""
+def document_summary(resp: Any) -> dict[str, Any]:
+    """Só status, tipo de redirect, content-type (sem parâmetros) e tamanho; nunca `Location` nem corpo."""
+    content_type = (resp.content_type or "").split(";", 1)[0].strip().lower()
+    return {"status": resp.status,
+            "redirect_kind": redirect_kind(resp.location_path) if 300 <= resp.status < 400 else None,
+            "content_type": content_type if _CONTENT_TYPE_RE.match(content_type) else None,
+            "size": len(resp.text or "")}
 
-    shape_sink: dict[str, Any]
 
-    def post_by_shortcode(self, shortcode: str) -> dict:
-        root = super().post_by_shortcode(shortcode)
-        self.shape_sink["shape"] = response_shape(root)
-        return root
+def _dimension(entries: object, key: str) -> int | None:
+    values = [e.get(key) for e in entries if isinstance(e, Mapping)] if isinstance(entries, list) else []
+    values = [v for v in values if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 100000]
+    return max(values) if values else None
+
+
+def _media_shape(item: Mapping) -> dict[str, Any]:
+    versions = item.get("image_versions2")
+    candidates = versions.get("candidates") if isinstance(versions, Mapping) else None
+    videos = item.get("video_versions")
+    video_list = [v for v in videos if isinstance(v, Mapping)] if isinstance(videos, list) else []
+    types = [v.get("type") for v in video_list]
+    media_type = item.get("media_type")
+    return {
+        "media_type": media_type if isinstance(media_type, int) and not isinstance(media_type, bool) else None,
+        "image_candidates": len(candidates) if isinstance(candidates, list) else 0,
+        "max_image_width": _dimension(candidates, "width"),
+        "max_image_height": _dimension(candidates, "height"),
+        "video_versions": len(video_list),
+        "video_versions_have_size": bool(video_list) and all(
+            _dimension([v], "width") and _dimension([v], "height") for v in video_list),
+        "video_version_types": [t for t in types if isinstance(t, int) and not isinstance(t, bool)
+                                and 0 <= t < 10000][:_MAX_LISTED],
+    }
+
+
+def node_summary(node: Mapping) -> dict[str, Any]:
+    """Forma do nó da mídia: só tipos numéricos, contagens e dimensões; nunca valores de URL, id ou texto."""
+    product_type = node.get("product_type")
+    summary = _media_shape(node)
+    summary["product_type"] = product_type if isinstance(product_type, str) and _PRODUCT_TYPE_RE.match(
+        product_type) else None
+    for key in ("original_width", "original_height"):
+        summary[key] = _dimension([node], key)
+    children = node.get("carousel_media")
+    if isinstance(children, list):
+        summary["carousel_children"] = len(children)
+        summary["children"] = [_media_shape(c) for c in children if isinstance(c, Mapping)][:_MAX_LISTED]
+    return summary
 
 
 def _item(item: RemoteMedia, shortcode: str) -> dict[str, Any]:
@@ -190,24 +193,21 @@ def _item(item: RemoteMedia, shortcode: str) -> dict[str, Any]:
     except ValueError:
         host = ""
     return {"media_type": item.media_type, "is_reel": item.is_reel, "source_media_index": item.source_media_index,
-            "taken_at": item.taken_at, "cdn_url_valid": valid, "cdn_domain_suffix": _cdn_suffix(host),
-            "shortcode_matches": item.source_post_id == shortcode, "owner_present": bool(item.source_profile)}
+            "width": item.width, "height": item.height, "taken_at": item.taken_at, "cdn_url_valid": valid,
+            "cdn_domain_suffix": _cdn_suffix(host), "shortcode_matches": item.source_post_id == shortcode,
+            "owner_present": bool(item.source_profile), "thumbnail_present": bool(item.thumbnail_url)}
 
 
 def run(
     args: argparse.Namespace,
     *,
     settings: Settings,
-    session_provider: Any = None,
     transport: httpx.BaseTransport | None = None,
     is_app_running: Callable[[Settings], bool] = app_running,
 ) -> tuple[int, dict[str, Any]]:
-    """Exit code 0 ok, 1 erro (link inválido ou falha na resolução), 2 pré-condição (app aberto), 130 interrompido
+    """Exit code 0 ok, 1 erro (link inválido ou falha na leitura), 2 pré-condição (app aberto), 130 interrompido
     (Ctrl+C)."""
-    spec = resolve_spec(POST_BY_SHORTCODE, {}, settings.env)
-    # O doc_id não é segredo; nome/raiz efetivos ajudam a conferir qual consulta foi testada.
-    report: dict[str, Any] = {"query": {"name": spec.name, "doc_id": spec.doc_id, "root_field": spec.root_field,
-                                        "observed_at": spec.observed_at}}
+    report: dict[str, Any] = {"source": "public_document", "verified_at": OBSERVED_AT, "session_used": False}
     if is_app_running(settings):
         report["outcome"] = "app_running"
         report["error"] = {"code": "app_running", "message": (
@@ -221,50 +221,54 @@ def run(
         report["error"] = {"code": "invalid_input", "message": str(exc), "stage": None, "detail": None}
         report["requests"] = []
         return 1, report
-    report["link_kind"] = "reel" if "/reel/" in normalized else "p"
+    kind = post_path_kind(normalized)
+    report["link_kind"] = kind
+    document_path = f"/{kind}/{shortcode}/"
 
     raw: list[dict[str, Any]] = []
     items: list[dict[str, Any]] = []
     cdn_calls: list[int] = []
-    sink: dict[str, Any] = {}
 
     def cdn_guard(*_args: Any, **_kwargs: Any) -> Any:
         cdn_calls.append(1)
         raise RuntimeError("download desativado na POC de post")
 
-    def graphql_factory(http: Any, bootstrap: Any) -> InstagramWebGraphQL:
-        graphql = _ShapeGraphQL(http, bootstrap, env=settings.env)
-        graphql.shape_sink = sink
-        return graphql
-
     counting = _CountingTransport(transport or httpx.HTTPTransport(retries=0, trust_env=False), raw)
-    downloader = InstagramWebDownloader(
-        session_provider or LocalInstagramSessionProvider(settings.secrets_dir, env=settings.env),
-        cdn_downloader=cdn_guard,
-        env=settings.env,
-        transport=counting,
-        bootstrap_factory=lambda http: _NoRetryBootstrap(WebBootstrap(http)),
-        graphql_factory=graphql_factory,
-    )
+    recorder = _RecordingHttp(InstagramWebHttp.anonymous(transport=counting))
+    downloader = InstagramWebDownloader(_NoSession(), cdn_downloader=cdn_guard, env=settings.env,
+                                        public_http_factory=lambda: recorder)
     error: dict[str, Any] | None = None
     try:
         configure_logging(settings.log_dir)
-        items = [_item(media, shortcode) for media in downloader.resolve_post(shortcode)]
+        items = [_item(media, shortcode) for media in downloader.resolve_post(shortcode, path_kind=kind)]
     except KeyboardInterrupt:
         error = {"code": "interrupted", "message": "POC interrompida pelo usuário (Ctrl+C).", "stage": None,
                  "detail": None}
     except Exception as exc:  # noqa: BLE001 - qualquer erro para a POC com dados seguros
         error = safe_error(exc)
 
+    resp = recorder.last
+    parse_report: dict[str, Any] | None = None
+    node_report: dict[str, Any] | None = None
+    if resp is not None and 200 <= resp.status < 300:
+        node, parse = parse_post_document(resp.text, shortcode)
+        parse_report = dataclasses.asdict(parse)
+        node_report = node_summary(node) if node is not None else None
     instagram = [r for r in raw if r["host"] in INSTAGRAM_HOSTS]
     cdn = [r for r in raw if _cdn_suffix(r["host"])]
     report.update({
-        "requests": [{"method": r["method"], "path": r["path"], "status": r["status"]} for r in instagram],
+        # O path real carrega o shortcode: no relatório vai só o tipo do caminho.
+        "requests": [{"method": r["method"], "path": f"/{kind}/" if r["path"] == document_path else "<outro>",
+                      "status": r["status"]} for r in instagram],
         "instagram_requests": len(instagram),
         "cdn_requests": len(cdn) + len(cdn_calls),
         "other_requests": len(raw) - len(instagram) - len(cdn),
-        "response_shape": sink.get("shape"),
+        "cookies_sent": sum(1 for r in raw if r["cookie_sent"]),
+        "document": document_summary(resp) if resp is not None else None,
+        "parse": parse_report,
+        "node": node_report,
         "media_count": len(items),
+        "media_types": sorted({item["media_type"] for item in items}),
         "items": items,
     })
     if error is not None:
@@ -276,7 +280,7 @@ def run(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="POC da consulta de post isolado do Instagram (só resolução).")
+    parser = argparse.ArgumentParser(description="POC do documento público de uma publicação do Instagram.")
     parser.add_argument("--url", required=True, help="link da publicação (/p/, /reel/ ou /reels/)")
     return parser.parse_args(argv)
 

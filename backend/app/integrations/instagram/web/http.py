@@ -191,6 +191,13 @@ class InstagramWebHttp:
             headers={"User-Agent": config.user_agent},
         )
 
+    @classmethod
+    def anonymous(cls, config: WebHttpConfig = WebHttpConfig(), *, transport: httpx.BaseTransport | None = None,
+                  gate: object | None = None) -> InstagramWebHttp:
+        """Cliente SEM cookies do dono (jar vazio): nenhuma sessão salva viaja nas requisições dele. Usado para o
+        documento público de uma publicação; descartado ao fim da operação."""
+        return cls(InstagramSession({}), config, transport=transport, gate=gate)
+
     def __repr__(self) -> str:
         return "InstagramWebHttp(<redacted>)"
 
@@ -244,9 +251,14 @@ class InstagramWebHttp:
 
     # ----- requisições
 
-    def get_document(self, path: str, *, referer: str | None = None) -> WebResponse:
+    def get_document(self, path: str, *, referer: str | None = None, max_bytes: int | None = None,
+                     diagnostic_path: str | None = None) -> WebResponse:
+        """``max_bytes``: teto do corpo (None = sem teto, como o bootstrap); acima dele, ``contract_changed`` com
+        detail ``document_too_large``. ``diagnostic_path``: token fixo que substitui o path real no log, nos
+        diagnósticos e em ``WebResponse.path`` (para path que carrega o shortcode de uma publicação)."""
         validate_path(path)
-        return self._send("GET", path, headers=self._document_headers(_referer_url(referer)))
+        return self._send("GET", path, headers=self._document_headers(_referer_url(referer)), max_bytes=max_bytes,
+                          diagnostic_path=diagnostic_path)
 
     def get_api(self, path: str, params: Mapping[str, str] | None = None, *,
                 referer: str | None = None) -> WebResponse:
@@ -283,11 +295,13 @@ class InstagramWebHttp:
     # ----- núcleo
 
     def _send(self, method: str, path: str, *, headers: Mapping[str, str],
-              params: Mapping[str, str] | None = None, data: Mapping[str, str] | None = None) -> WebResponse:
+              params: Mapping[str, str] | None = None, data: Mapping[str, str] | None = None,
+              max_bytes: int | None = None, diagnostic_path: str | None = None) -> WebResponse:
         url = httpx.URL(self.BASE + path)
         if url.scheme != "https" or url.host != _HOST:  # defesa extra; validate_path já garante
             raise ValueError("path inválido: host fora do permitido")
-        safe_path = urlsplit(path).path
+        safe_path = diagnostic_path if diagnostic_path is not None else urlsplit(path).path
+        too_large = False
         request = self._client.build_request(method, url, params=params, data=data, headers=headers)
         timeout = self._config.timeout
         # GateCancelled (code "cancelled") sobe como está se a operação for cancelada enquanto espera a vez.
@@ -300,7 +314,12 @@ class InstagramWebHttp:
                     chunks: list[bytes] = []
                     # Prazo total checado entre chunks; um chunk parado é limitado pelo read timeout do httpx
                     # (mesmo valor), então o pior caso fica perto de 2x o timeout configurado.
+                    received = 0
                     for chunk in response.iter_bytes():
+                        received += len(chunk)
+                        if max_bytes is not None and received > max_bytes:
+                            too_large = True   # para de acumular; o corpo é descartado
+                            break
                         chunks.append(chunk)
                         if time.monotonic() - start > timeout:
                             raise httpx.ReadTimeout("prazo total excedido")
@@ -318,8 +337,17 @@ class InstagramWebHttp:
                 ) from None
             elapsed_ms = int((time.monotonic() - start) * 1000)
 
+        if too_large:
+            del chunks
+            raise InstagramWebError(
+                "contract_changed", "O Instagram mudou a forma de responder e o Media Tool precisa ser atualizado.",
+                stage="http", diagnostic={"detail": "document_too_large", "method": method, "path": safe_path})
         body = b"".join(chunks)
-        text = body.decode(response.charset_encoding or "utf-8", errors="replace")
+        try:
+            text = body.decode(response.charset_encoding or "utf-8", errors="replace")
+        except LookupError:
+            # charset desconhecido no Content-Type: lê como UTF-8 em vez de estourar como erro interno
+            text = body.decode("utf-8", errors="replace")
         set_cookie_names: list[str] = []
         sessionid_deleted = False
         for header in response.headers.get_list("set-cookie"):

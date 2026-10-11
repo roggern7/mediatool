@@ -51,6 +51,7 @@ from app.integrations.instagram.downloader import (
     ListingCheckpoint,
     RemoteMedia,
 )
+from app.integrations.instagram.validation import post_path_kind
 from app.jobs.errors import JobCancelled, message_with_diagnostic, safe_diagnostic, safe_message
 from app.jobs.pipeline import LINKS_HOLD_DONE_MESSAGE, instagram_paused, links_query_lock
 from app.services import disk
@@ -93,7 +94,8 @@ LINK_ERROR_CODES = frozenset({
     "content_unavailable", "profile_private", "profile_not_found", "unsupported_media", "invalid_input",
 })
 # Detail de `contract_changed` que é erro de UMA publicação: formato desconhecido e resposta de OUTRA publicação.
-LINK_CONTRACT_DETAILS = frozenset({"post_shape_unknown", "post_mismatch"})
+# `post_envelope_missing`: o documento público da publicação veio sem o envelope conhecido.
+LINK_CONTRACT_DETAILS = frozenset({"post_shape_unknown", "post_mismatch", "post_envelope_missing"})
 # Defesa do runner (vale para qualquer provider): a resposta trouxe mídia de uma publicação que não é a pedida.
 LINK_MISMATCH_MESSAGE = (
     "O Instagram respondeu com outra publicação, diferente da pedida. Nada foi importado deste link."
@@ -820,7 +822,9 @@ class ImportRunner:
                         chunk.stop = "refused_hold"
                         return
                     try:
-                        items = downloader.resolve_post(link["shortcode"], cancel=cancel)
+                        # O tipo do caminho (/p/ ou /reel/) vem do link colado; o provider nunca escolhe sozinho.
+                        items = downloader.resolve_post(link["shortcode"], cancel=cancel,
+                                                        path_kind=post_path_kind(link["url"]))
                     except InstagramError as exc:
                         if exc.code == LINKS_REFUSED_CODE:
                             # Vale mesmo com o trecho cancelado/encerrando durante a consulta: a recusa aconteceu.
@@ -871,8 +875,10 @@ class ImportRunner:
                 batches.sync_found(batch_id)
             chunk.created += created
             chunk.pages_ok += 1
-            if self.ctx.worker is not None:
-                self.ctx.worker.note_auth_success()  # publicação entregue: resposta autenticada com sucesso
+            if self.ctx.worker is not None and getattr(downloader, "resolve_post_authenticated", True):
+                # Publicação entregue por consulta autenticada. O documento público (provider web) é lido SEM a
+                # sessão do dono e não prova nada sobre ela.
+                self.ctx.worker.note_auth_success()
             if created:
                 self.ctx.wake_worker()
 

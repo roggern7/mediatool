@@ -244,3 +244,48 @@ def classify_response(resp: WebResponse, *, stage: str) -> InstagramWebError | N
 
     # 9. qualquer outro status (ex.: 400, 404) não previsto pelo contrato da consulta
     return err("contract_changed", _MSG_CONTRACT_CHANGED, f"http_{status}")
+
+
+_MSG_POST_NOT_FOUND = "A publicação não existe mais ou não está disponível."
+
+
+def classify_public_document(resp: WebResponse, *, stage: str = "post_document") -> InstagramWebError | None:
+    """Resposta de um GET ANÔNIMO de documento (sem cookies do dono): nenhum código de sessão é possível aqui.
+
+    ``None`` = documento HTML utilizável. Nunca devolve ``session_*``, ``request_auth_failed``,
+    ``checkpoint_required`` nem ``action_blocked``: não há conta nem sessão nesta requisição. Redirect NUNCA é
+    seguido: qualquer 3xx é ``access_refused`` (detail = tipo do destino; o caminho do ``Location`` não entra no
+    diagnóstico, pode carregar o shortcode). O corpo HTML nunca é varrido.
+
+    Verificado no real (2026-10-10, Reel público): só o 200 HTML sem redirect. As demais linhas (3xx, 401/403, 404,
+    429, 5xx) NÃO foram observadas neste caminho: seguem o comportamento HTTP padrão e falham de forma segura."""
+    status = resp.status
+    html = _is_html(resp.content_type)
+    diag = _base_diagnostic(resp, stage)
+    diag.pop("sessionid_deleted", None)   # sem sessão nesta requisição: o sinal não significa nada aqui
+
+    def err(code: str, message: str, detail: str, *, retryable: bool = False) -> InstagramWebError:
+        return InstagramWebError(code, message, retryable=retryable, stage=stage,
+                                 diagnostic={**diag, "detail": detail})
+
+    if 300 <= status < 400:
+        kind = redirect_kind(resp.location_path)
+        diag["redirect"] = kind
+        return err("access_refused", _MSG_ACCESS_REFUSED, kind)
+    if status == 429:
+        return err("rate_limited", "O Instagram limitou os acessos por enquanto. Tente de novo mais tarde.",
+                   "http_429", retryable=True)
+    # Corpo que não é HTML: busca textual limitada (sem devolver nada do texto).
+    if not html and "please wait a few minutes" in (resp.text or "")[:8192].lower():
+        return err("rate_limited", "O Instagram pediu para aguardar alguns minutos. Tente de novo mais tarde.",
+                   "please_wait", retryable=True)
+    if status in (401, 403):
+        return err("access_refused", _MSG_ACCESS_REFUSED, f"http_{status}")
+    if status == 404:
+        return err("content_unavailable", _MSG_POST_NOT_FOUND, "post_http_404")
+    if status >= 500:
+        return err("network_error", "O Instagram está com problemas para responder agora. Tente de novo mais tarde.",
+                   f"http_{status}", retryable=True)
+    if 200 <= status < 300:
+        return None if html else err("contract_changed", _MSG_CONTRACT_CHANGED, "document_not_html")
+    return err("contract_changed", _MSG_CONTRACT_CHANGED, f"http_{status}")

@@ -341,3 +341,88 @@ def test_account_id_reads_ds_user_id_from_jar_and_registers_secret():
     finally:
         with_id.close()
         without.close()
+
+
+# --------------------------------------------------------------------------- cliente anônimo e documento da publicação
+
+
+def test_anonymous_client_has_an_empty_jar_and_sends_no_cookie():
+    rec = Recorder(html_ok)
+    http = InstagramWebHttp.anonymous(transport=httpx.MockTransport(rec))
+    try:
+        assert list(http._client.cookies.jar) == []
+        resp = http.get_document("/reel/FAKECODE001/")
+        assert resp.status == 200 and http.csrftoken() is None and http.account_id() is None
+    finally:
+        http.close()
+    [request] = rec.requests
+    assert "cookie" not in request.headers and request.headers["sec-fetch-site"] == "none"
+    assert "x-csrftoken" not in request.headers and "referer" not in request.headers
+
+
+def test_anonymous_client_uses_the_gate_and_the_config():
+    slots: list[object] = []
+
+    class Gate:
+        def slot(self, cancel=None):
+            from contextlib import nullcontext
+
+            slots.append(cancel)
+            return nullcontext()
+
+    rec = Recorder(html_ok)
+    http = InstagramWebHttp.anonymous(WebHttpConfig(user_agent="FAKE-UA/1.0"), transport=httpx.MockTransport(rec),
+                                      gate=Gate())
+    try:
+        http.get_document("/p/FAKECODE001/")
+    finally:
+        http.close()
+    assert slots == [None] and rec.requests[0].headers["user-agent"] == "FAKE-UA/1.0"
+
+
+def test_diagnostic_path_replaces_the_real_path_in_response_log_and_errors(caplog):
+    caplog.set_level(logging.DEBUG, logger="media_tool.instagram.web.http")
+    http, rec = make_http(html_ok)
+    try:
+        resp = http.get_document("/reel/FAKECODE001/", diagnostic_path="/reel/")
+    finally:
+        http.close()
+    assert resp.path == "/reel/" and rec.requests[0].url.path == "/reel/FAKECODE001/"
+    assert "instagram web GET /reel/ -> 200" in caplog.text and "FAKECODE001" not in caplog.text
+
+    def broken(request):
+        raise httpx.ConnectError("falha FAKE")
+
+    http, _ = make_http(broken)
+    try:
+        with pytest.raises(InstagramWebError) as info:
+            http.get_document("/reel/FAKECODE001/", diagnostic_path="/reel/")
+    finally:
+        http.close()
+    assert info.value.diagnostic["path"] == "/reel/" and "FAKECODE001" not in str(info.value.diagnostic)
+
+
+def test_max_bytes_stops_reading_and_raises_contract_changed():
+    def big(request):
+        return httpx.Response(200, content=b"x" * 5000, headers={"content-type": "text/html"})
+
+    http, _ = make_http(big)
+    try:
+        assert len(http.get_document("/", max_bytes=5000).text) == 5000, "no teto exato ainda passa"
+        assert len(http.get_document("/").text) == 5000, "sem teto por padrão (bootstrap)"
+        with pytest.raises(InstagramWebError) as info:
+            http.get_document("/p/FAKECODE001/", max_bytes=4999, diagnostic_path="/p/")
+    finally:
+        http.close()
+    error = info.value
+    assert (error.code, error.retryable, error.stage) == ("contract_changed", False, "http")
+    assert error.diagnostic == {"detail": "document_too_large", "method": "GET", "path": "/p/"}
+
+
+def test_unknown_charset_is_read_as_utf8_instead_of_crashing():
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content="<html>olá</html>".encode(),
+                              headers={"content-type": "text/html; charset=nope-8"})
+
+    http, _ = make_http(responder)
+    assert http.get_document("/").text == "<html>olá</html>"

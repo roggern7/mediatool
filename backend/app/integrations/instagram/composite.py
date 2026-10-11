@@ -37,6 +37,7 @@ FALLBACK_CODES: frozenset[str] = frozenset({"contract_changed", "unsupported_med
 # (has_next_page=true sem cursor junto com `errors`); o erro sobe visível, sem requisições novas pelo gallery-dl.
 # Vale para TODO fim anômalo da paginação (LISTING_ANOMALY_DETAILS): o erro do web fica visível e o lote segue a
 # regra de `needs_attention`; o gallery-dl nunca "conclui" no lugar dele.
+# A publicação por link não passa por aqui: `resolve_post` nunca faz fallback (ver o método).
 NO_FALLBACK_DETAILS: frozenset[str] = frozenset({"cursor_missing_with_errors"}) | LISTING_ANOMALY_DETAILS
 
 
@@ -78,7 +79,7 @@ class CompositeInstagramDownloader(InstagramDownloader):
         try:
             return call(self.primary)
         except InstagramError as exc:
-            if exc.code not in FALLBACK_CODES:
+            if exc.code not in FALLBACK_CODES or _no_fallback(exc):
                 raise
             log.warning("Instagram: provider web falhou em %s com %s; usando gallery-dl (fallback único desta "
                         "operação)", operation, exc.code)
@@ -94,10 +95,22 @@ class CompositeInstagramDownloader(InstagramDownloader):
     def get_profile(self, username: str) -> ProfileInfo:
         return self._call("get_profile", lambda d: d.get_profile(username))
 
-    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None) -> list[RemoteMedia]:
-        # cancel só é repassado quando informado (providers antigos não o conhecem).
+    @property
+    def resolve_post_authenticated(self) -> bool:
+        """O provider que atende `resolve_post` nesta estratégia consulta com a sessão do dono?"""
+        source = self.fallback if self.strategy == "gallery_dl" else self.primary
+        return bool(getattr(source, "resolve_post_authenticated", True))
+
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
+                     path_kind: str | None = None) -> list[RemoteMedia]:
+        # cancel/path_kind só são repassados quando informados (providers antigos não os conhecem).
         extra: dict = {} if cancel is None else {"cancel": cancel}
-        return self._call("resolve_post", lambda d: d.resolve_post(shortcode, **extra))
+        if path_kind is not None:
+            extra["path_kind"] = path_kind
+        # Em `auto` não há fallback: NENHUMA falha do documento público (lido sem sessão) vira uma segunda consulta
+        # pelo gallery-dl com a sessão do dono. Só a estratégia `gallery_dl` explícita usa o legado.
+        source = self.fallback if self.strategy == "gallery_dl" else self.primary
+        return source.resolve_post(shortcode, **extra)
 
     def download(
         self,

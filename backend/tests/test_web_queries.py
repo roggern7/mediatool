@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
+import pytest
+
+from app.integrations.instagram.web import queries
 from app.integrations.instagram.web.queries import (
     KNOWN_QUERIES,
-    POST_BY_SHORTCODE,
     PROFILE_POSTS,
     QuerySpec,
-    post_variables,
     profile_posts_variables,
     resolve_spec,
 )
@@ -29,45 +31,56 @@ def test_profile_posts_spec_matches_contract():
     assert KNOWN_QUERIES == ("PolarisProfilePostsQuery", "PolarisPostActionLoadPostQueryQuery")
 
 
-# --------------------------------------------------------------------------- consulta de post (NÃO verificada)
+# --------------------------------------------------------------------------- consulta de post (REMOVIDA)
 
+POST_NAME = "PolarisPostActionLoadPostQueryQuery"
 POST_DOC_ENV = "MEDIA_TOOL_IG_DOC_POLARISPOSTACTIONLOADPOSTQUERYQUERY"
 POST_ROOT_ENV = "MEDIA_TOOL_IG_ROOT_POLARISPOSTACTIONLOADPOSTQUERYQUERY"
 
 
-def test_post_spec_is_marked_unverified():
-    assert POST_BY_SHORTCODE == QuerySpec("PolarisPostActionLoadPostQueryQuery", "8845758582119845",
-                                          "xdt_shortcode_media", "unverified", {})
+def test_post_query_is_gone_and_only_its_name_is_kept_for_saved_settings():
+    assert queries.DISABLED_QUERY_NAMES == (POST_NAME,)
+    assert not hasattr(queries, "POST_BY_SHORTCODE") and not hasattr(queries, "post_variables")
+    source = Path(queries.__file__).read_text(encoding="utf-8")
+    assert "8845758582119845" not in source and "xdt_shortcode_media" not in source
 
 
-def test_post_variables():
-    variables = post_variables(POST_BY_SHORTCODE, "FAKEPOSTIMG1")
-    assert variables == {"shortcode": "FAKEPOSTIMG1", "fetch_tagged_user_count": None, "hoisted_comment_id": None,
-                         "hoisted_reply_id": None}
+@pytest.mark.parametrize("overrides, env", [
+    ({"polarispostactionloadpostqueryquery": "777777"}, {}),
+    ({}, {POST_DOC_ENV: "888888"}),
+    ({}, {POST_ROOT_ENV: "xdt_api__v1__media__shortcode__web_info"}),
+])
+def test_saved_override_for_the_disabled_query_is_ignored_with_one_safe_warning(caplog, monkeypatch, overrides, env):
+    monkeypatch.setattr(queries, "_disabled_override_logged", False)
+    caplog.set_level(logging.WARNING)
+    # o override da consulta desativada não vaza para a consulta de perfil nem conta como nome desconhecido
+    assert resolve_spec(PROFILE_POSTS, overrides, env) is PROFILE_POSTS
+    assert resolve_spec(PROFILE_POSTS, overrides, env) is PROFILE_POSTS
+    assert caplog.text.count("override para consulta desativada ignorado") == 1, "uma vez por processo"
+    assert "desconhecido" not in caplog.text
+    for value in ("777777", "888888", "xdt_api__v1__media__shortcode__web_info", POST_NAME):
+        assert value not in caplog.text
 
 
-def test_post_doc_id_override_by_setting_and_env():
-    assert resolve_spec(POST_BY_SHORTCODE, {}, {}) is POST_BY_SHORTCODE
-    assert resolve_spec(POST_BY_SHORTCODE, {"polarispostactionloadpostqueryquery": "777777"}, {}).doc_id == "777777"
-    assert resolve_spec(POST_BY_SHORTCODE, {}, {POST_DOC_ENV: "888888"}).doc_id == "888888"
-    # o override de uma consulta não vaza para a outra
-    assert resolve_spec(PROFILE_POSTS, {"PolarisPostActionLoadPostQueryQuery": "777777"},
-                        {POST_DOC_ENV: "888888"}) is PROFILE_POSTS
+def test_no_warning_without_an_override_for_the_disabled_query(caplog, monkeypatch):
+    monkeypatch.setattr(queries, "_disabled_override_logged", False)
+    caplog.set_level(logging.WARNING)
+    assert resolve_spec(PROFILE_POSTS, {"PolarisProfilePostsQuery": "66666"}, {ENV_KEY: "22222"}).doc_id == "66666"
+    assert "desativada" not in caplog.text
 
 
-def test_root_field_override_by_env_only_for_that_query():
-    env = {POST_ROOT_ENV: " xdt_api__v1__media__shortcode__web_info ", POST_DOC_ENV: "999999"}
-    spec = resolve_spec(POST_BY_SHORTCODE, {}, env)
-    assert spec.root_field == "xdt_api__v1__media__shortcode__web_info" and spec.doc_id == "999999"
-    assert spec.name == POST_BY_SHORTCODE.name
-    assert resolve_spec(PROFILE_POSTS, {}, env) is PROFILE_POSTS
+def test_root_field_override_by_env():
+    root_env = "MEDIA_TOOL_IG_ROOT_POLARISPROFILEPOSTSQUERY"
+    spec = resolve_spec(PROFILE_POSTS, {}, {root_env: " xdt_fake_root_field ", ENV_KEY: "999999"})
+    assert spec.root_field == "xdt_fake_root_field" and spec.doc_id == "999999" and spec.name == PROFILE_POSTS.name
 
 
 def test_invalid_root_field_override_ignored_with_safe_warning(caplog):
     caplog.set_level(logging.WARNING)
+    root_env = "MEDIA_TOOL_IG_ROOT_POLARISPROFILEPOSTSQUERY"
     for bad in ("FAKE Root-Value;1", "Xdt_Upper", "q7", "x" * 121, "raiz\nnova", "ráiz_falsa"):
         caplog.clear()
-        assert resolve_spec(POST_BY_SHORTCODE, {}, {POST_ROOT_ENV: bad}) is POST_BY_SHORTCODE
+        assert resolve_spec(PROFILE_POSTS, {}, {root_env: bad}) is PROFILE_POSTS
         assert "campo raiz inválido" in caplog.text and bad not in caplog.text
 
 

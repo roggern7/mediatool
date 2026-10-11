@@ -3,6 +3,7 @@ import pytest
 from app.integrations.instagram.validation import (
     parse_post_link,
     parse_profile_input,
+    post_path_kind,
     validate_instagram_url,
     validate_shortcode,
 )
@@ -186,3 +187,19 @@ def test_parse_post_link_messages_do_not_echo_input():
 
 def test_parse_post_link_same_code_in_p_and_reel_is_same_shortcode():
     assert parse_post_link(P)[0] == parse_post_link(R)[0] == parse_post_link(R.replace("/reel/", "/reels/"))[0]
+
+
+@pytest.mark.parametrize("url, kind", [
+    ("https://www.instagram.com/p/ABCDE12345/", "p"),
+    ("https://www.instagram.com/reel/ABCDE12345/", "reel"),
+    ("https://www.instagram.com/reels/ABCDE12345/?igsh=FAKE", "reel"),
+    ("instagram.com/dono_fake/p/ABCDE12345", "p"),
+    ("https://www.instagram.com/dono_fake/", None),
+    ("https://www.instagram.com/tv/ABCDE12345/", None),
+    ("https://evil.example.com/reel/ABCDE12345/", None),
+    ("ABCDE12345", None),
+    ("", None),
+    (None, None),
+])
+def test_post_path_kind(url, kind):
+    assert post_path_kind(url) == kind

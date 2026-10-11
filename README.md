@@ -413,8 +413,10 @@ seção 8.3), consultado um link por vez. Link repetido é removido; link que fa
 fica marcado com o motivo e os outros seguem. O lote aparece em **Importações recentes** e aceita **Cancelar**,
 **Tentar falhas novamente**, **Baixar ZIP** e **Exportar para pasta** como os demais.
 
-Ressalva: a consulta de publicação isolada ainda NÃO foi verificada no Instagram real; a validação depende de uma
-prova com 1 link autorizada pelo dono (`scripts\poc-instagram-post.ps1`). Como proteção, se 3 links seguidos
+Cada link é aberto como a página pública da publicação, sem usar a sessão salva. Ressalva: isso foi verificado no
+Instagram real só para um Reel público (2026-10-10); foto, carrossel e publicação restrita ainda dependem de uma
+prova autorizada pelo dono (`scripts\poc-instagram-post.ps1`), e uma publicação que exige login não é importada.
+Como proteção, se 3 links seguidos
 falharem o lote para e pede atenção (`links_failing`) em vez de gastar uma consulta por link; **Retomar** continua
 pelos próximos.
 

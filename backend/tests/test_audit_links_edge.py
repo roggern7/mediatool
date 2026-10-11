@@ -79,7 +79,7 @@ def test_different_posts_with_identical_bytes_share_one_original_pergunta(harnes
 def test_owner_absent_in_the_response_keeps_the_media_without_profile(harness_factory, base_media, audit_env):
     h, sim = make_app(harness_factory, base_media, audit_env)
     root = sim.add("image", P)
-    del root["owner"]
+    del root["user"]
     batch = create_links(h, [link(P)])
     h.run_all()
     [row] = link_rows(h, batch["id"])
@@ -105,7 +105,7 @@ def test_wrong_post_answer_that_hits_an_existing_media_does_not_resolve_the_requ
     assert h.ctx.db.scalar("SELECT COUNT(*) FROM media WHERE source_post_id = ?", (P,)) == 0
     assert h.ctx.jobs.for_batch(batch["id"]) == [], "nenhum job criado a partir da resposta trocada"
     with pytest.raises(Exception) as raised:
-        sim.downloader.resolve_post(P)
+        sim.downloader.resolve_post(P, path_kind="p")
     assert (raised.value.code, raised.value.diagnostic) == ("contract_changed", {"detail": "post_mismatch"})
 
 

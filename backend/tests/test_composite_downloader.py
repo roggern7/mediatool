@@ -123,13 +123,35 @@ def test_resolve_post_forwards_cancel_only_when_given(strategy, used):
 
 
 @pytest.mark.parametrize("code", sorted(FALLBACK_CODES))
-def test_auto_resolve_post_fallback_keeps_cancel(code):
+def test_auto_resolve_post_never_falls_back(code):
+    """Em `auto`, nem os códigos de fallback levam a publicação por link ao gallery-dl (sessão do dono)."""
     import threading
 
     web, gallery = Recording("web", error=web_error(code)), Recording("gallery")
     cancel = threading.Event()
-    assert CompositeInstagramDownloader(web, gallery, strategy="auto").resolve_post("ABCDE1", cancel=cancel) == []
-    assert web.resolve_kwargs == gallery.resolve_kwargs == {"cancel": cancel}
+    with pytest.raises(InstagramError) as info:
+        CompositeInstagramDownloader(web, gallery, strategy="auto").resolve_post("ABCDE1", cancel=cancel)
+    assert info.value.code == code and web.resolve_kwargs == {"cancel": cancel} and gallery.calls == []
+
+
+def test_resolve_post_forwards_path_kind_only_when_given():
+    web, gallery = Recording("web"), Recording("gallery")
+    dl = CompositeInstagramDownloader(web, gallery, strategy="web")
+    assert dl.resolve_post("ABCDE1", path_kind="reel") == [] and web.resolve_kwargs == {"path_kind": "reel"}
+    assert dl.resolve_post("ABCDE1", path_kind=None) == [] and web.resolve_kwargs == {}
+
+
+@pytest.mark.parametrize("code, detail", [
+    ("contract_changed", "post_envelope_missing"), ("contract_changed", "post_mismatch"),
+    ("content_unavailable", "post_gated_logged_out"),
+])
+def test_auto_public_document_failures_never_reach_the_gallery_dl(code, detail):
+    """A falha do documento público (lido sem sessão) não vira uma segunda consulta com a sessão do dono."""
+    error = InstagramWebError(code, f"FAKE {code}", stage="post_document", diagnostic={"detail": detail})
+    web, gallery = Recording("web", error=error), Recording("gallery")
+    with pytest.raises(InstagramError) as info:
+        CompositeInstagramDownloader(web, gallery, strategy="auto").resolve_post("ABCDE1", path_kind="p")
+    assert info.value is error and web.calls == ["resolve_post"] and gallery.calls == []
 
 
 @pytest.mark.parametrize("code", ["content_unavailable", "profile_private", "rate_limited", "invalid_input"])
@@ -146,10 +168,11 @@ def test_auto_falls_back_once_on_contract_codes(tmp_path, code, caplog):
     gallery = Recording("gallery", items=[remote("ABCDE1")])
     dl = CompositeInstagramDownloader(web, gallery, strategy="auto")
     profile, items, path, posts = run_all_ops(dl, tmp_path)
-    assert profile.username == "perfil_teste" and len(items) == 1 and Path(path).is_file() and posts == []
+    # a publicação por link é a exceção: o erro do web sobe, sem consulta pelo gallery-dl
+    assert profile.username == "perfil_teste" and len(items) == 1 and Path(path).is_file() and posts == code
     assert web.calls == ["get_profile", "iter_profile_media", "download", "resolve_post"]
-    assert gallery.calls == ["get_profile", "iter_profile_media", "download", "resolve_post"]
-    assert sum("fallback" in r.getMessage() for r in caplog.records) == 4
+    assert gallery.calls == ["get_profile", "iter_profile_media", "download"]
+    assert sum("fallback" in r.getMessage() for r in caplog.records) == 3
 
 
 @pytest.mark.parametrize("code", NO_FALLBACK_CODES)

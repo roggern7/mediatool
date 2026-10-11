@@ -7,9 +7,15 @@ import httpx
 
 from app.integrations.instagram.downloader import InstagramError
 from app.integrations.instagram.web.errors import InstagramWebError
-from audit_links_helpers import audit_env, base_media, check_invariants, make_app, storage_leftovers  # noqa: F401
+from audit_links_helpers import (  # noqa: F401 - fixtures
+    audit_env,
+    base_media,
+    check_invariants,
+    document,
+    make_app,
+    storage_leftovers,
+)
 from import_links_fakes import create_links, link, link_rows, listing_state
-from test_web_graphql import resp
 
 A, B, C, D, E, P = "AAAAAaaaa11", "BBBBBbbbb22", "CCCCCcccc33", "DDDDDdddd44", "EEEEEeeee55", "PPPPPpppp66"
 
@@ -131,12 +137,11 @@ def test_renewal_access_refused_and_content_unavailable(harness_factory, base_me
     sim.add("carousel", C)
     sim.add("image", P)
     sim.cdn.expired = {"oh=FAKE_OH"}
-    # 2a consulta de C (a renovação): recusada; 2a consulta de P: raiz nula (publicação apagada)
+    # 2a consulta de C (a renovação): recusada; 2a consulta de P: 404 (publicação apagada)
     batch = create_links(h, [link(C), link(P)])
     h.run_imports()
-    sim.http.script[C] = [InstagramWebError("access_refused", "FAKE recusado", stage="graphql",
-                                            diagnostic={"detail": "http_403"})]
-    sim.http.script[P] = [resp(200, '{"data": {"xdt_shortcode_media": null}}')]
+    sim.http.script[C] = [document(403, "<html>Forbidden</html>")]
+    sim.http.script[P] = [document(404, "<html>Página não encontrada</html>")]
     h.run_jobs()
     jobs = jobs_of(h, batch)
     by_post = {}
@@ -150,7 +155,7 @@ def test_renewal_access_refused_and_content_unavailable(harness_factory, base_me
     assert {(j["status"], j["error_code"]) for j in by_post[C]} == {("failed", "access_refused")}, "os 4 irmãos repetem o código sem nova consulta"
     assert media_count(h) == 0 and storage_leftovers(h) == []
     check_invariants(h)
-    # Ação do dono: as renovações voltam. C responde e baixa; P vem com raiz nula (publicação apagada).
+    # Ação do dono: as renovações voltam. C responde e baixa; P vem com 404 (publicação apagada).
     assert h.client.post(f"/api/batches/{batch['id']}/retry-failed").status_code == 200
     h.run_jobs()
     by_post = {}
@@ -170,8 +175,7 @@ def test_post_removed_between_listing_and_download_is_content_unavailable(harnes
     sim.cdn.expired = {"oh=FAKE_OH"}
     batch = create_links(h, [link(C)])
     h.run_imports()
-    trimmed = dict(root)
-    trimmed["edge_sidecar_to_children"] = {"edges": root["edge_sidecar_to_children"]["edges"][:2]}
+    trimmed = {**root, "carousel_media": root["carousel_media"][:2], "carousel_media_count": 2}
     sim.http.roots[C] = trimmed
     h.run_jobs()
     states = {j["source_media_index"]: j["status"] for j in jobs_of(h, batch)}
@@ -183,7 +187,7 @@ def test_post_removed_between_listing_and_download_is_content_unavailable(harnes
 # --------------------------------------------------------------------------- disjuntor e repetição de erro
 
 
-def test_three_null_links_in_a_row_trip_the_breaker_and_resume_continues(harness_factory, base_media, audit_env):
+def test_three_missing_links_in_a_row_trip_the_breaker_and_resume_continues(harness_factory, base_media, audit_env):
     h, sim = make_app(harness_factory, base_media, audit_env)
     for code in (A, B, C):
         sim.http.roots[code] = None
@@ -207,7 +211,8 @@ def test_three_null_links_in_a_row_trip_the_breaker_and_resume_continues(harness
 def test_access_refused_twice_on_the_same_link_fails_it_and_keeps_the_batch_stopped(harness_factory, base_media, audit_env):
     h, sim = make_app(harness_factory, base_media, audit_env)
     sim.add("image", B)
-    refusal = lambda: InstagramWebError("access_refused", "FAKE", stage="graphql", diagnostic={"detail": "http_403"})  # noqa: E731
+    refusal = lambda: InstagramWebError("access_refused", "FAKE", stage="post_document",  # noqa: E731
+                                        diagnostic={"detail": "http_403"})
     sim.http.script[A] = [refusal(), refusal()]
     batch = create_links(h, [link(A), link(B)])
     h.run_all()
@@ -233,7 +238,7 @@ def test_rate_limit_in_the_middle_pauses_the_batch_and_the_resume_finishes_every
     h, sim = make_app(harness_factory, base_media, audit_env)
     for code, kind in ((A, "carousel"), (B, "image"), (C, "image")):
         sim.add(kind, code)
-    sim.http.script[B] = [resp(429, "", content_type="text/html")]
+    sim.http.script[B] = [document(429)]
     batch = create_links(h, [link(A), link(B), link(C)])
     h.run_imports()
     paused = h.batch(batch["id"])

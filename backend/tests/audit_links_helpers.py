@@ -1,11 +1,10 @@
-"""Auditoria da importação por link (QA): pilha REAL do Instagram web (provider -> GraphQL -> normalize_post ->
-cdn_download) com transportes simulados e mídias sintéticas reais (JPEG/MP4 do ffmpeg). Nenhuma rede: o cliente HTTP
-do GraphQL é um roteiro em memória, o cliente HTTP do CDN é um ``httpx.MockTransport`` e conexões não-loopback são
-bloqueadas. Só valores FAKE."""
+"""Auditoria da importação por link (QA): pilha REAL do Instagram web (provider -> documento público ->
+normalize_post -> cdn_download) com transportes simulados e mídias sintéticas reais (JPEG/MP4 do ffmpeg). Nenhuma
+rede: o cliente HTTP do documento da publicação é um roteiro em memória, o cliente HTTP do CDN é um
+``httpx.MockTransport`` e conexões não-loopback são bloqueadas. Só valores FAKE."""
 
 from __future__ import annotations
 
-import json
 import socket
 import subprocess
 import threading
@@ -17,42 +16,33 @@ import httpx
 import pytest
 from media_processor import sha256_file
 
-from app.integrations.instagram.web.graphql import InstagramWebGraphQL
+from app.integrations.instagram.web.http import WebResponse
 from app.integrations.instagram.web.provider import InstagramWebDownloader
 from app.services import cdn_downloader
 from media_fakes import FakeInstagramDownloader
-from test_web_graphql import FakeBootstrap as GqlBootstrap
-from test_web_graphql import resp
+from post_document_fixtures import media_node, post_page
 from test_web_provider import FakeProvider
 
-FIXTURES = Path(__file__).parent / "fixtures" / "instagram_web" / "graphql"
-POST_ROOT = "xdt_shortcode_media"
 OWNER = "dono_fake"
 
-_KINDS = {  # tipo -> (fixture, shortcode da fixture)
-    "image": ("post_image.json", "FAKEPOSTIMG1"),
-    "reel": ("post_video_reel.json", "FAKEPOSTREEL"),
-    "carousel": ("post_carousel_mixed.json", "FAKEPOSTCAR1"),
-    "v1": ("post_v1_items.json", "FAKEPOSTV1A1"),
-}
+# tipo da auditoria -> (tipo da fixture, product_type). "video" = vídeo que não é Reel.
+_KINDS = {"image": ("photo", None), "reel": ("video", "clips"), "video": ("video", "feed"),
+          "carousel": ("carousel", None)}
 
 
 def make_root(kind: str, code: str, owner: str = "Dono_Fake") -> dict:
-    """Raiz de publicação a partir das fixtures, com shortcode, dono e URLs de mídia ÚNICOS (o código vai no caminho
-    da URL, para dois posts nunca compartilharem arquivo)."""
-    if kind == "video":   # vídeo que não é Reel
-        root = make_root("reel", code, owner)
-        root["product_type"] = "feed"
-        return root
-    name, original = _KINDS[kind]
-    text = (FIXTURES / name).read_text(encoding="utf-8")
-    text = text.replace(original, code).replace("Dono_Fake", owner)
-    text = text.replace("/v/t51.fake/", f"/v/t51.fake/{code}/").replace("/v/t50.fake/", f"/v/t50.fake/{code}/")
-    return json.loads(text)[ "data"][POST_ROOT]
+    """Nó da mídia (formato v1 do envelope do documento público) com shortcode, dono e URLs de mídia ÚNICOS (o
+    código vai no caminho da URL, para dois posts nunca compartilharem arquivo). Só o Reel segue a forma observada
+    no real; foto, vídeo comum e carrossel são hipótese (post_document_fixtures)."""
+    fixture_kind, product_type = _KINDS[kind]
+    return media_node(fixture_kind, code, owner, product_type=product_type)
 
 
-def payload(root, *, field: str = POST_ROOT) -> str:
-    return json.dumps({"data": {field: root}})
+def document(status: int = 200, text: str = "", *, content_type: str = "text/html; charset=utf-8",
+             location: str | None = None) -> WebResponse:
+    """Resposta do GET do documento de uma publicação (path já como token fixo, como o cliente real devolve)."""
+    return WebResponse(status=status, location_path=location, content_type=content_type, elapsed_ms=5,
+                       set_cookie_names=[], sessionid_deleted=False, text=text, path="/p/")
 
 
 # --------------------------------------------------------------------------- mídias sintéticas
@@ -126,42 +116,42 @@ class CdnSim:
         return [h.split("?")[0] for h in self.hits]
 
 
-# --------------------------------------------------------------------------- GraphQL simulado
+# --------------------------------------------------------------------------- documento da publicação simulado
 
 
 class ScriptedHttp:
-    """Cliente HTTP do GraphQL em memória: responde a consulta de post pelo shortcode das ``variables``.
+    """Cliente HTTP ANÔNIMO em memória: responde o documento público da publicação pelo shortcode do path.
 
-    ``roots[shortcode]`` = raiz (dict), ``None`` (raiz nula) ou ``str`` (corpo cru). ``script[shortcode]`` = fila de
-    respostas/erros consumida antes (``WebResponse`` | ``Exception`` | callable(shortcode)). A partir da 2a consulta
-    do mesmo shortcode as URLs de mídia trocam ``FAKE_OH`` por ``FRESH<n>`` (renovação)."""
+    ``roots[shortcode]`` = nó da mídia (dict, embrulhado no envelope com o shortcode pedido), ``None`` (publicação
+    inexistente: 404) ou ``str`` (corpo HTML cru). ``script[shortcode]`` = fila de respostas/erros consumida antes
+    (``WebResponse`` | ``Exception`` | callable(shortcode)). A partir da 2a consulta do mesmo shortcode as URLs de
+    mídia trocam ``FAKE_OH`` por ``FRESH<n>`` (renovação). ``paths`` = path pedido em cada consulta."""
+
+    cancel = None   # o provider grava aqui o cancelamento da operação
 
     def __init__(self):
         self.roots: dict[str, object] = {}
         self.script: dict[str, list] = {}
         self.calls: list[str] = []
+        self.paths: list[str] = []
         self.counts: Counter[str] = Counter()
         self.in_flight = 0
         self.max_in_flight = 0
         self.on_call: Callable[[str], None] | None = None
-        self.answer_with: dict[str, str] = {}   # shortcode pedido -> shortcode da raiz a devolver (resposta trocada)
+        self.answer_with: dict[str, str] = {}   # shortcode pedido -> shortcode do nó a devolver (resposta trocada)
         self._lock = threading.Lock()
-
-    def csrftoken(self):
-        return "FAKE_CSRF_TOKEN_0001"
-
-    def account_id(self):
-        return None
 
     def close(self):
         pass
 
-    def post_form(self, path, form, headers):
-        shortcode = json.loads(form["variables"])["shortcode"]
+    def get_document(self, path, *, referer=None, max_bytes=None, diagnostic_path=None):
+        kind, shortcode = path.strip("/").split("/")
+        assert kind in ("p", "reel") and diagnostic_path == f"/{kind}/", path
         with self._lock:
             self.in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self.in_flight)
             self.calls.append(shortcode)
+            self.paths.append(path)
             self.counts[shortcode] += 1
             n = self.counts[shortcode]
         try:
@@ -175,12 +165,15 @@ class ScriptedHttp:
                 return item(shortcode) if callable(item) else item
             key = self.answer_with.get(shortcode, shortcode)
             root = self.roots.get(key)
+            if root is None:
+                return document(404, "<html>Página não encontrada</html>")
             if isinstance(root, str):
-                return resp(200, root)
-            text = payload(root)
+                return document(200, root)
+            # O envelope leva o shortcode da chave (na resposta trocada, o da OUTRA publicação).
+            text = post_page(root, code=key, noise=4)
             if n > 1:
                 text = text.replace("FAKE_OH", f"FRESH{n}")
-            return resp(200, text)
+            return document(200, text)
         finally:
             with self._lock:
                 self.in_flight -= 1
@@ -202,17 +195,20 @@ class HybridWebDownloader(InstagramWebDownloader):
         return self.profile_fake.refresh_page(profile, ref, cancel=cancel)
 
 
+def _no_session_client(session):
+    raise AssertionError("a importação por link não deve criar cliente HTTP com a sessão do dono")
+
+
 class WebSim:
-    """Downloader real (``InstagramWebDownloader``) sobre ``ScriptedHttp`` + ``CdnSim``."""
+    """Downloader real (``InstagramWebDownloader``) sobre ``ScriptedHttp`` + ``CdnSim``. O cliente das publicações é
+    o anônimo (``public_http_factory``); nenhum cliente com a sessão é criado para links."""
 
     def __init__(self, base: dict[str, bytes], *, max_download_bytes: int = 50 * 1024 * 1024):
         self.http = ScriptedHttp()
         self.cdn = CdnSim(base)
-        self.bootstrap = GqlBootstrap()
         self.downloader = HybridWebDownloader(
-            FakeProvider(True), max_download_bytes=max_download_bytes, http_factory=lambda session: self.http,
-            bootstrap_factory=lambda http: self.bootstrap,
-            graphql_factory=lambda http, bootstrap: InstagramWebGraphQL(self.http, bootstrap, page_delay=(0, 0)),
+            FakeProvider(True), max_download_bytes=max_download_bytes, public_http_factory=lambda: self.http,
+            http_factory=_no_session_client,
         )
         self.profile = FakeInstagramDownloader(refreshable=True)
         self.downloader.profile_fake = self.profile

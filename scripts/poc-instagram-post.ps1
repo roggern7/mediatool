@@ -1,7 +1,7 @@
-﻿# POC da consulta de post isolado do provider web do Instagram: SÓ resolução (sem banco, sem download).
-# ATENÇÃO: a consulta de post NÃO foi verificada no Instagram real; rode só com autorização do dono.
-# Tráfego: 1 GET do documento + 1 POST GraphQL. Usa a sessão salva, para no primeiro erro (sem nova tentativa) e
-# imprime um relatório JSON sem segredos (requisições, forma da resposta, quantidade de mídias, itens).
+﻿# POC do documento público de UMA publicação do Instagram: SÓ leitura (sem banco, sem download, SEM sessão).
+# ATENÇÃO: verificado no Instagram real só para um Reel público (2026-10-10); rode só com autorização do dono.
+# Tráfego: 1 GET anônimo do documento da publicação (sem cookies, sem seguir redirect). Para no primeiro erro (sem
+# nova tentativa) e imprime um relatório JSON sem segredos (requisição, status, leitura do documento, mídias).
 # Feche o Media Tool antes (scripts\stop.ps1): a POC recusa rodar com o app escutando na porta.
 # Uso: .\scripts\poc-instagram-post.ps1 -Url https://www.instagram.com/p/<codigo>/
 param(

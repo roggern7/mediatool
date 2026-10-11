@@ -1,6 +1,7 @@
 """Nó do PolarisProfilePostsQuery -> RemoteMedia (contrato INSTAGRAM_WEB_CONTRACT.md, web/normalize.py).
 
-Também a raiz da consulta de post isolado (``normalize_post``), cujo formato NÃO foi verificado no Instagram real.
+Também o nó de UMA publicação (``normalize_post``): hoje o do documento público (web/post_document.py), que chega
+no formato v1 (verificado no real para um Reel em 2026-10-10). O formato GraphQL "legado" nunca foi verificado.
 """
 
 from __future__ import annotations
@@ -216,7 +217,7 @@ def normalize_node(node: Mapping, *, profile: str, from_reels: bool = False,
     return result
 
 
-# --------------------------------------------------------------------------- post isolado (consulta NÃO verificada)
+# --------------------------------------------------------------------------- post isolado
 
 # `__typename` do formato GraphQL "legado" (com ou sem o prefixo XDT) -> media_type v1.
 _LEGACY_TYPES = {"GraphImage": MEDIA_IMAGE, "GraphVideo": MEDIA_VIDEO, "GraphSidecar": MEDIA_CAROUSEL}
@@ -286,10 +287,11 @@ def _post_owner(node: Mapping) -> str:
 
 
 def normalize_post(root: Mapping, *, stats: NormalizeStats | None = None) -> list[RemoteMedia]:
-    """Raiz da consulta de UM post -> todas as mídias dele (carrossel inteiro, na ordem), sem filtro de conteúdo.
+    """Nó de UM post -> todas as mídias dele (carrossel inteiro, na ordem), sem filtro de conteúdo.
 
-    Aceita os dois formatos plausíveis (a consulta não foi verificada no Instagram real): v1 (`{"items": [nó]}` ou
-    um nó direto com `media_type` numérico) e GraphQL "legado" (convertido por ``legacy_to_v1``). `source_profile`
+    Aceita v1 (`{"items": [nó]}` ou um nó direto com `media_type` numérico; é o formato do documento público,
+    verificado no real para um Reel) e GraphQL "legado" (convertido por ``legacy_to_v1``; NÃO verificado no real e
+    nunca observado no documento público, mas ainda aceito se vier). `source_profile`
     é o dono da publicação. Lista vazia quando nada utilizável veio; ``stats`` diz por quê."""
     node: object = root
     items = root.get("items")

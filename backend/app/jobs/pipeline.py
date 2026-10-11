@@ -24,6 +24,7 @@ from media_processor import FFmpegNotFoundError, InvalidMediaError, ProcessingOp
 from app.db.connection import parse_utc, utc_now
 from app.db.repositories.common import canonical_json
 from app.integrations.instagram.downloader import InstagramError, ListingRef, RemoteMedia
+from app.integrations.instagram.validation import post_path_kind
 from app.jobs.errors import Failure, JobCancelled, JobFailure, classify, is_cancellation
 from app.services.instagram_gate import InstagramPaused
 from app.services.storage import has_media_signature, mime_for, normalize_extension
@@ -695,7 +696,9 @@ class JobExecutor:
         Erros sobem com a classificação normal (pausa etc.), sem nova tentativa aqui."""
         job = self.job
         try:
-            items = downloader.resolve_post(shortcode, cancel=self.cancel)
+            # O tipo do caminho (/p/ ou /reel/) vem da URL de origem gravada no job.
+            items = downloader.resolve_post(shortcode, cancel=self.cancel,
+                                            path_kind=post_path_kind(job.get("source_url") or ""))
             if any(item.source_post_id != shortcode for item in items):
                 # Resposta de OUTRA publicação (comparação exata): nenhum job recebe URL dela. O provider web já
                 # recusa antes (`post_mismatch`); isto cobre os demais. Conta como renovação falha (abaixo).
@@ -724,7 +727,10 @@ class JobExecutor:
             raise
         self.ctx.jobs.record_refresh(job["batch_id"], position, ok=True, code=None, at=utc_now())
         self._check_cancel()
-        self.worker.note_auth_success()  # publicação entregue: resposta autenticada com sucesso (seção 7)
+        if getattr(downloader, "resolve_post_authenticated", True):
+            # Publicação entregue por consulta autenticada (seção 7). O documento público (provider web) é lido
+            # SEM a sessão do dono e não prova nada sobre ela.
+            self.worker.note_auth_success()
         now = utc_now()
         urls = [
             (item.source_post_id, int(item.source_media_index or 0), item.media_url, item.thumbnail_url)

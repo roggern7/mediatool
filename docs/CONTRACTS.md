@@ -147,7 +147,11 @@ class InstagramDownloader(ABC):
     def get_profile(self, username: str) -> ProfileInfo
     def iter_profile_media(self, username: str, content: ContentType, limit: int | None, *,
                            cancel: threading.Event | None = None) -> Iterator[RemoteMedia]
-    def resolve_post(self, shortcode: str) -> list[RemoteMedia]          # renova URLs expiradas
+    resolve_post_authenticated: bool = True     # False no provider web (documento público, sem sessão)
+    def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
+                     path_kind: str | None = None) -> list[RemoteMedia]
+        # todas as mídias da publicação; renova URLs expiradas. path_kind: "p" | "reel" (tipo do link de quem chama;
+        # obrigatório no provider web, ignorado no gallery-dl)
     def download(self, item: RemoteMedia, dest_dir: Path, *, cancel=None, progress=None) -> Path  # em dest_dir (temp)
 class GalleryDlInstagramDownloader(InstagramDownloader):
     def __init__(self, session_provider: InstagramSessionProvider, *, python_executable: str = sys.executable,
@@ -202,7 +206,8 @@ precedência de `doc_id`, teste de sessão): [INSTAGRAM_WEB_CONTRACT.md](INSTAGR
 (`settings_service.instagram_provider`): setting `instagram_provider` > env `MEDIA_TOOL_INSTAGRAM_PROVIDER` (ambiente ou
 `.env`) > `web`. `web` (padrão): só o provider web, sem fallback. `gallery_dl`: só o legado. `auto` (opcional): web,
 com fallback ao gallery-dl SOMENTE em `contract_changed` ou `unsupported_media`, uma vez por operação, com log (na
-listagem, só antes do primeiro item); nunca em 429, checkpoint, restrição, sessão, rede ou timeout. O teste de sessão
+listagem, só antes do primeiro item); nunca em 429, checkpoint, restrição, sessão, rede ou timeout, e nunca em
+`resolve_post` (publicação por link: em `auto` só o web atende, sem fallback). O teste de sessão
 usa o web em `web` e `auto`, e o gallery-dl em `gallery_dl`.
 Teste de sessão do provider web: sessão presente -> 1 GET da página inicial (só tokens; o viewer do HTML não conta) ->
 consulta `count=1` do perfil público `instagram`, sem download; `valid` só se a consulta funcionou; `contract_changed`
@@ -875,9 +880,20 @@ Só no registro da exportação (`Export.error_code`, com `status: "failed"`): `
 
 Contrato para o frontend. Regras de execução: `docs/BATCH_ROBUSTNESS.md`, seção 0.2.
 
-**Ressalva**: a consulta de publicação isolada ainda NÃO foi verificada no Instagram real; a validação depende de uma
-prova com 1 link autorizada pelo dono (`scripts\poc-instagram-post.ps1`). Tudo aqui foi testado só offline, com
-respostas falsas. Por isso existem as proteções abaixo (disjuntor `links_failing` e link que repete erro).
+**Como a publicação é consultada**: no método web, cada link é UM `GET` **anônimo** do documento público da
+publicação (`/p/<código>/` ou `/reel/<código>/`, conforme o link colado), sem nenhum cookie da sessão do dono e sem
+seguir redirect; os dados vêm embutidos no HTML (`docs/INSTAGRAM_WEB_CONTRACT.md`, "Documento público da
+publicação"). A consulta por POST GraphQL que existia antes foi removida. A criação do lote continua exigindo sessão
+configurada (409 `session_missing`), como antes.
+
+**Ressalva**: isso foi verificado no Instagram real só para UM Reel público sem login (2026-10-10). NÃO foram
+verificados: foto, carrossel, o caminho `/p/`, publicação restrita/privada, a melhor versão de vídeo (as versões
+vêm sem largura/altura; fica a primeira) e a qualidade de foto sem login (a capa do Reel veio com no máximo 640 px
+de largura; uma foto pode vir abaixo de 1080 px). O restante foi testado só offline, com respostas falsas; a prova
+desses casos depende de uma execução autorizada pelo dono (`scripts\poc-instagram-post.ps1`). Por isso existem as
+proteções abaixo (disjuntor `links_failing` e link que repete erro). Publicação que exige login não é importada: o
+link falha com `content_unavailable` ("A publicação exige login ou está restrita. O Media Tool não usa a sessão salva
+para abrir publicações por link.").
 
 O usuário cola um ou vários links de publicações (um por linha) e o app baixa TODAS as mídias de cada publicação
 (foto, Reel, vídeo, carrossel inteiro). Vários links formam UM lote comum (`Batch` com `import_mode: "links"`,
@@ -959,7 +975,8 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
   `internal_error`; nova tentativa automática a cada 6 h, no máximo 4, e botão **Retomar** =
   `POST /api/batches/{id}/resume-listing`). Nesses estados o link da vez continua `pending` e nenhum outro é pedido.
 - Consulta recusada (`error_code: "access_refused"`) e a **recusa em espera** do lote: qualquer `access_refused`
-  numa consulta de publicação do lote (na resolução de um link OU na renovação de um link de download vencido)
+  numa consulta de publicação do lote (na resolução de um link OU na renovação de um link de download vencido;
+  no documento público: qualquer redirect, inclusive para a tela de login, e HTTP 401/403)
   arma UMA espera para o lote inteiro, gravada no próprio lote (`error_code: "access_refused"`; sem campo novo).
   Enquanto ela vale, o Media Tool não faz NENHUMA consulta ao Instagram por esse lote: o próximo link não é pedido e
   nenhum link de download é renovado; não há nova tentativa automática (nem a de 6 h, nem no reinício do app, nem
@@ -973,7 +990,7 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
     `pending`. `error_message` quando a recusa foi na resolução de um link: "O Instagram recusou a consulta desta
     publicação. Isso não indica sessão inválida. Não haverá nova tentativa automática: use "Retomar importação"
     para tentar de novo (uma consulta por vez) ou cancele o lote.", seguida, quando o erro trouxe diagnóstico, de
-    ` (diagnóstico: stage=graphql status=403 detail=http_403 ...)`. Quando foi numa renovação: "O Instagram recusou
+    ` (diagnóstico: stage=post_document status=403 detail=http_403 ...)`. Quando foi numa renovação: "O Instagram recusou
     a renovação de um link de download deste lote. Isso não indica sessão inválida. Não haverá nova tentativa
     automática: use "Retomar importação" para tentar de novo (uma consulta por vez) ou cancele o lote.".
   - Cada **Retomar importação** faz UMA consulta; recusado pela 2a vez, o MESMO link vira `failed` com
@@ -1009,7 +1026,8 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
   `application/json`, `text/javascript`, `application/x-javascript`, `text/plain`, `application/octet-stream`,
   `image/jpeg`, `image/png`, `image/webp`, `video/mp4`; parâmetros como `; charset=...` e maiúsculas são
   descartados antes da comparação), `size` (inteiro de 0 a 10^12) e `path` (só `/`,
-  `/graphql/query`, `/web/search/topsearch/`). Valor fora disso é omitido, nunca truncado. `error_message` com o
+  `/graphql/query`, `/web/search/topsearch/`, `/p/`, `/reel/`; os dois últimos são o tipo do link, nunca o
+  código da publicação). Valor fora disso é omitido, nunca truncado. `error_message` com o
   sufixo nunca passa de 500 caracteres: se não couber, o diagnóstico perde campos inteiros do fim (nenhum valor
   cortado ao meio) e, se nem o primeiro couber, a mensagem vai sem sufixo.
 - Resposta de OUTRA publicação: o shortcode que a resposta declara tem de ser EXATAMENTE o pedido (maiúsculas e
@@ -1019,6 +1037,12 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
   na renovação de link de download (todos os itens da resposta são conferidos; inclusive na renovação interna
   do provider `gallery-dl`): o job falha com `contract_changed` e nenhum job recebe URL de outra publicação. Resposta sem shortcode nenhum continua como antes: não gera mídia e o link vira `failed` com
   `contract_changed` (detalhe `post_shape_unknown`).
+- Página da publicação sem os dados no formato conhecido (detalhe `post_envelope_missing`): o link vira `failed` com
+  `error_code: "contract_changed"` e `error_message` "O Instagram abriu a página da publicação, mas sem os dados
+  dela no formato que o Media Tool conhece. Nada foi importado deste link."; o lote segue para o próximo link (3
+  seguidos param o lote com `links_failing`). Publicação restrita (detalhe `post_gated_logged_out`) e inexistente
+  (HTTP 404, detalhe `post_http_404`): link `failed` com `error_code: "content_unavailable"`; não armam a recusa em
+  espera.
 - Limitações conhecidas da recusa em espera: (i) se o aplicativo é encerrado DURANTE a consulta de um link
   (requisição enviada, resposta ainda não recebida), o resultado é desconhecido e o link continua `pending`: ele é
   consultado de novo no próximo início (o índice único dos jobs descarta mídias repetidas); o mesmo vale para uma
