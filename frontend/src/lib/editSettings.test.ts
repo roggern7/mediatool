@@ -12,6 +12,8 @@ import {
   pickerQueryKey,
   predictedDuration,
   snapSpeed,
+  parseSpeedInput,
+  formatSpeedPreset,
   startLabel,
   toEditRequest,
   validateEditForm,
@@ -61,9 +63,10 @@ describe("editSettings: padrões e validação", () => {
     expect(isNoChange(form({ outputType: "auto", durationMode: "15" }))).toBe(false);
   });
 
-  it("snapSpeed prende à faixa e ao passo de 0,05", () => {
-    expect(snapSpeed(1.234)).toBe(1.25);
-    expect(snapSpeed(1.07)).toBe(1.05);
+  it("snapSpeed prende à faixa e ao passo de 0,01", () => {
+    expect(snapSpeed(1.234)).toBe(1.23);
+    expect(snapSpeed(1.07)).toBe(1.07);
+    expect(snapSpeed(1.0749)).toBe(1.07);
     expect(snapSpeed(0.5)).toBe(1);
     expect(snapSpeed(2)).toBe(1.5);
     expect(snapSpeed(Number.NaN)).toBe(1);
@@ -133,5 +136,26 @@ describe("exportação das versões editadas", () => {
     expect("AUTO_EXPORT_UNAVAILABLE" in editSettings).toBe(false);
     expect(editSettings.EXPORT_AFTER_HINT).toBe("Ao terminar, baixe o ZIP das versões editadas no painel do lote.");
     expect(editSettings.AUTO_SAVE_TEXT).toContain("versões editadas são salvas automaticamente");
+  });
+});
+
+
+describe("velocidade digitada e atalhos", () => {
+  it("formatSpeedPreset é curto", () => {
+    expect(formatSpeedPreset(1)).toBe("1x");
+    expect(formatSpeedPreset(1.05)).toBe("1,05x");
+    expect(formatSpeedPreset(1.1)).toBe("1,1x");
+  });
+  it("parseSpeedInput aceita vírgula, ponto e sufixo x", () => {
+    expect(parseSpeedInput("1,07")).toBe(1.07);
+    expect(parseSpeedInput(" 1.2 ")).toBe(1.2);
+    expect(parseSpeedInput("1,15x")).toBe(1.15);
+    expect(parseSpeedInput("1")).toBe(1);
+  });
+  it("parseSpeedInput recusa vazio, texto e fora da faixa", () => {
+    expect(parseSpeedInput("")).toBeNull();
+    expect(parseSpeedInput("abc")).toBeNull();
+    expect(parseSpeedInput("0,9")).toBeNull();
+    expect(parseSpeedInput("1,6")).toBeNull();
   });
 });
