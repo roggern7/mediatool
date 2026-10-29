@@ -361,7 +361,7 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET | /api/exports/{id}/download | `token` | arquivo `.zip` (seção 8.2, Baixar ZIP) |
 | POST | /api/exports/{id}/cancel | | `Export` |
 | POST | /api/exports/{id}/open | | `{ok}` |
-| GET | /api/jobs | `status` csv, `batch_id`, `ids` csv, `limit`, `offset` | `{items, total, counts}` |
+| GET | /api/jobs | `status` csv, `batch_id`, `ids` csv, `limit`, `offset`, `before_id`, `created_from`, `created_to` | `{items, total, counts, next_before_id}` (período abaixo da tabela) |
 | GET | /api/jobs/{id} | | `Job` |
 | POST | /api/jobs/{id}/cancel | | `Job` |
 | POST | /api/jobs/{id}/retry | | `Job` |
@@ -372,6 +372,9 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | DELETE | /api/settings/instagram/session | | `InstagramStatus` |
 | DELETE | /api/settings/instagram/pause | | `InstagramStatus` (libera a pausa do Instagram manualmente) |
 | POST | /api/settings/instagram/session/test | | `InstagramStatus` com `last_test` atualizado; prazo 40 s no backend; 409 `session_test_in_progress` se já houver um teste em andamento |
+
+**Fila: período (`GET /api/jobs`).** `created_from` e `created_to` (opcionais, ISO 8601 COM fuso, ex.: `2026-10-28T03:00:00.000Z` ou `2026-10-28T00:00:00-03:00`; até 64 caracteres) filtram `created_from <= created_at < created_to` (início inclusivo, fim exclusivo). O backend converte cada limite para UTC no formato de `jobs.created_at` (milissegundos, `Z`; fração abaixo do milissegundo arredonda para cima) e compara como texto. Sem fuso, data inválida, fora do intervalo representável ou `created_from` depois de `created_to` = 422 `validation_error`; vazio = ausente; início igual ao fim = lista vazia. O período vale para `items`, `total` e `counts` (os chips de status) e combina com `status`, `batch_id` e `ids`; a paginação keyset (`before_id`/`next_before_id`) segue igual dentro do período. Sem índice novo: a contagem lê as linhas do filtro (medido com 100 mil jobs: cerca de 45 ms por consulta; 10 mil: cerca de 3 ms; a retenção apaga jobs encerrados há mais de 30 dias).
+A página Fila mostra o período (Hoje, Ontem, Últimos 7 dias, Últimos 30 dias, Tudo, Personalizado com data inicial e final inclusivas) no fuso local do computador: manda o início do dia local e o início do dia seguinte em UTC (`toISOString`). "Últimos N dias" inclui hoje. Padrão "Hoje" na Fila geral (o último período escolhido ali fica no `localStorage`, chave `media-tool.queue.period`); aberta pelo link de um lote (`?lote=`), começa em "Tudo". A lista (ordem id DESC) ganha um separador antes dos jobs de cada dia local: "Hoje", "Ontem" ou `dd/mm/aaaa`.
 
 ```ts
 PresetParams = { metadata_cleanup: bool, trim_start: number /*0..30*/, mirror: bool, speed: number /*0.5..2*/,

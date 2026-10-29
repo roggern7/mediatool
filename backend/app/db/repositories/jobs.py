@@ -220,8 +220,13 @@ class JobRepository:
         limit: int = 100,
         offset: int = 0,
         before_id: int | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
     ) -> tuple[list[dict[str, Any]], int, dict[str, int], int | None]:
         """Jobs em ordem id DESC. `before_id` (keyset): só ids menores; `next_before_id` é None no fim.
+
+        `created_from`/`created_to`: período `created_from <= created_at < created_to`, no formato de `utc_now`
+        (comparação de texto); valem também para `total` e `counts`.
 
         `total` e `counts` ignoram o keyset (valem para o filtro inteiro) e saem de uma única agregação por status
         (com `batch_id`, coberta por ix_jobs_batch_status_id). A página vem de (batch_id, id) ou, com um status só,
@@ -234,6 +239,12 @@ class JobRepository:
         if ids:
             base.append(f"id IN ({placeholders(len(ids))})")
             params.extend(ids)
+        if created_from is not None:
+            base.append("created_at >= ?")
+            params.append(created_from)
+        if created_to is not None:
+            base.append("created_at < ?")
+            params.append(created_to)
         base_where = f"WHERE {' AND '.join(base)}" if base else ""
         counts = {status: 0 for status in JOB_STATUSES}
         for row in self.db.fetchall(f"SELECT status, COUNT(*) AS n FROM jobs {base_where} GROUP BY status", tuple(params)):

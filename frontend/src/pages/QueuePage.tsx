@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { api, messageOf } from "../api/client";
 import { describeErrorCode } from "../api/errors";
-import type { Batch, Job, JobStatus } from "../api/types";
+import type { Batch, Job, JobStatus, JobsPage } from "../api/types";
 import { BatchNotice } from "../components/BatchNotice";
 import { listingDroppedSuffix } from "../lib/batchState";
 import { Empty, ErrorLine, Pill, ProgressBar, SkeletonRows, Spinner, Thumb } from "../components/ui";
@@ -37,6 +37,16 @@ import {
   stackFor,
 } from "../lib/keyset";
 import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
+import {
+  PERIODS,
+  type PeriodChoice,
+  activePeriod,
+  groupByDay,
+  loadQueuePeriod,
+  periodQuery,
+  periodRange,
+  saveQueuePeriod,
+} from "../lib/queuePeriod";
 import { navigate, ROUTES, useSearch } from "../lib/router";
 import { useQuery } from "../lib/useQuery";
 import { useToast } from "../lib/toast";
@@ -59,6 +69,8 @@ const FAST_POLL_MS = POLL_STEPS_MS[0];
 
 const ACTIVE_STATUSES: JobStatus[] = ["pending", "downloading", "downloaded", "processing"];
 
+const EMPTY_PAGE: JobsPage = { items: [], total: 0, counts: {}, next_before_id: null };
+
 function origin(job: Job): string {
   const parts: string[] = [];
   if (job.source_profile) parts.push(`@${job.source_profile}`);
@@ -73,19 +85,32 @@ export function QueuePage() {
   const [pager, setPager] = useState<Pager>({ scope: "", stack: FIRST_PAGE });
   const [pollMs, setPollMs] = useState<number>(FAST_POLL_MS);
   const [busyId, setBusyId] = useState<number | null>(null);
+  // Período da Fila geral (lembrado); no link de um lote começa em "Tudo".
+  const [generalPeriod, setGeneralPeriod] = useState<PeriodChoice>(() => loadQueuePeriod());
+  const [batchPeriod, setBatchPeriod] = useState<{ batchId: number; choice: PeriodChoice } | null>(null);
 
+  const period = activePeriod(batchId, generalPeriod, batchPeriod);
+  // Recalculado a cada renderização (o polling renderiza de novo): "Hoje" vira o dia sozinho à meia-noite.
+  const now = new Date();
+  const range = periodRange(period, now);
+  const rangeQuery = range.ok ? periodQuery(range.range) : null;
   const statuses = FILTERS.find((f) => f.id === filter)?.statuses ?? [];
-  const scope = `${batchId ?? "all"}:${filter}`;
+  const scope = `${batchId ?? "all"}:${filter}:${
+    rangeQuery ? `${rangeQuery.created_from ?? ""}~${rangeQuery.created_to ?? ""}` : "invalid"
+  }`;
   const stack = stackFor(pager, scope);
   const cursor = currentCursor(stack);
   const jobs = useQuery(
     `jobs:${scope}:${JSON.stringify(cursor)}`,
     async () => {
+      // Período personalizado inválido: nada a buscar (a mensagem aparece no lugar da lista).
+      if (rangeQuery === null) return EMPTY_PAGE;
       const page = await api.listJobs({
         status: statuses,
         batch_id: batchId ?? undefined,
         limit: PAGE_SIZE,
         ...cursorQuery(cursor),
+        ...rangeQuery,
       });
       const activeByCounts = ACTIVE_STATUSES.some((s) => (page.counts[s] ?? 0) > 0);
       const activeByItems = page.items.some((j) => !TERMINAL_JOB.has(j.status));
@@ -131,6 +156,17 @@ export function QueuePage() {
     setPager({ scope, stack: nextStack });
     setPollMs(FAST_POLL_MS);
   };
+  const changePeriod = (next: PeriodChoice) => {
+    if (batchId === null) {
+      setGeneralPeriod(next);
+      saveQueuePeriod(next);
+    } else {
+      setBatchPeriod({ batchId, choice: next });
+    }
+    setPager({ scope: "", stack: FIRST_PAGE });
+    setPollMs(FAST_POLL_MS);
+  };
+  const columns = downloadOnly ? 9 : 10;
 
   return (
     <div className="page">
@@ -151,6 +187,44 @@ export function QueuePage() {
           onClear={() => navigate(ROUTES.queue)}
         />
       ) : null}
+
+      <div className="row" style={{ marginBottom: 10 }}>
+        <div className="seg" role="group" aria-label="Período">
+          {PERIODS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className={period.period === p.id ? "on" : ""}
+              aria-pressed={period.period === p.id}
+              onClick={() => changePeriod({ ...period, period: p.id })}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        {period.period === "custom" ? (
+          <>
+            <label className="row muted small" style={{ gap: 6 }}>
+              De
+              <input
+                type="date"
+                className={`input${range.ok ? "" : " invalid"}`}
+                value={period.from}
+                onChange={(e) => changePeriod({ ...period, from: e.target.value })}
+              />
+            </label>
+            <label className="row muted small" style={{ gap: 6 }}>
+              Até
+              <input
+                type="date"
+                className={`input${range.ok ? "" : " invalid"}`}
+                value={period.to}
+                onChange={(e) => changePeriod({ ...period, to: e.target.value })}
+              />
+            </label>
+          </>
+        ) : null}
+      </div>
 
       <div className="tabs" role="tablist">
         {FILTERS.map((f) => (
@@ -181,7 +255,9 @@ export function QueuePage() {
         ))}
       </div>
 
-      {jobs.data === undefined ? (
+      {!range.ok ? (
+        <Empty title={range.message} />
+      ) : jobs.data === undefined ? (
         jobs.error ? (
           <ErrorLine message={jobs.error} onRetry={jobs.reload} />
         ) : (
@@ -192,7 +268,9 @@ export function QueuePage() {
           title={
             filter !== "all"
               ? "Nenhum job neste filtro"
-              : batchId !== null
+              : period.period !== "all"
+                ? "Nenhum job neste período"
+                : batchId !== null
                 ? "Nenhum job nesta importação"
                 : "Fila vazia"
           }
@@ -217,99 +295,110 @@ export function QueuePage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((job) => {
-                  const terminal = TERMINAL_JOB.has(job.status);
-                  const canRetry = job.status === "failed" || job.status === "cancelled";
-                  return (
-                    <tr key={job.id}>
-                      <td>
-                        <Thumb src={job.thumbnail_url} mediaType={job.media_type} size={34} />
-                      </td>
-                      <td className="cell-trunc" title={origin(job)}>
-                        <div className="truncate">{origin(job)}</div>
-                        <div className="dim small truncate">
-                          {jobKindLabel(job.kind)} · {formatDateTime(job.created_at)}
-                        </div>
-                      </td>
-                      {downloadOnly ? null : (
-                        <td className="muted cell-trunc" style={{ maxWidth: 140 }} title={job.preset_name ?? undefined}>
-                          {job.preset_name ?? "-"}
-                        </td>
-                      )}
-                      <td>
-                        <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
-                          <Pill tone={jobTone(job.status)}>{JOB_STATUS_LABEL[job.status]}</Pill>
-                          {showDuplicate(job) ? (
-                            <span
-                              className="tag"
-                              title={
-                                job.duplicate_reason === "sha256"
-                                  ? "Arquivo idêntico já existe na biblioteca"
-                                  : "Mídia já importada antes"
-                              }
-                            >
-                              Duplicado
-                            </span>
-                          ) : null}
-                        </div>
-                      </td>
-                      <td className="muted nowrap">
-                        {job.stage ? JOB_STAGE_LABEL[job.stage] : "-"}
-                        {job.stage === "waiting_retry" && job.next_attempt_at ? (
-                          <div className="dim small">às {formatDateTime(job.next_attempt_at)}</div>
-                        ) : null}
-                      </td>
-                      <td className="nowrap">
-                        {job.progress !== null && !terminal ? (
-                          <>
-                            <ProgressBar value={job.progress} inline />
-                            <span className="muted small">{formatPercent(job.progress)}</span>
-                          </>
-                        ) : (
-                          <span className="dim">-</span>
-                        )}
-                      </td>
-                      <td className="muted nowrap">{formatDuration(job.elapsed_seconds)}</td>
-                      <td className="muted">
-                        {job.attempts}/{job.max_attempts}
-                      </td>
-                      <td className="cell-trunc">
-                        {job.error_code || job.error_message ? (
-                          <span
-                            className="tone-err small"
-                            title={describeErrorCode(job.error_code, job.error_message)}
-                          >
-                            {describeErrorCode(job.error_code, job.error_message)}
-                          </span>
-                        ) : (
-                          <span className="dim">-</span>
-                        )}
-                      </td>
-                      <td className="actions">
-                        {!terminal ? (
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-ghost"
-                            disabled={busyId === job.id}
-                            onClick={() => void act(job, "cancel")}
-                          >
-                            Cancelar
-                          </button>
-                        ) : null}
-                        {canRetry ? (
-                          <button
-                            type="button"
-                            className="btn btn-sm"
-                            disabled={busyId === job.id}
-                            onClick={() => void act(job, "retry")}
-                          >
-                            Tentar novamente
-                          </button>
-                        ) : null}
-                      </td>
+                {groupByDay(items, now).map((day) => (
+                  <Fragment key={`${day.key}:${day.items[0]?.id}`}>
+                    <tr className="day-row">
+                      <td colSpan={columns}>{day.label}</td>
                     </tr>
-                  );
-                })}
+                    {day.items.map((job) => {
+                      const terminal = TERMINAL_JOB.has(job.status);
+                      const canRetry = job.status === "failed" || job.status === "cancelled";
+                      return (
+                        <tr key={job.id}>
+                          <td>
+                            <Thumb src={job.thumbnail_url} mediaType={job.media_type} size={34} />
+                          </td>
+                          <td className="cell-trunc" title={origin(job)}>
+                            <div className="truncate">{origin(job)}</div>
+                            <div className="dim small truncate">
+                              {jobKindLabel(job.kind)} · {formatDateTime(job.created_at)}
+                            </div>
+                          </td>
+                          {downloadOnly ? null : (
+                            <td
+                              className="muted cell-trunc"
+                              style={{ maxWidth: 140 }}
+                              title={job.preset_name ?? undefined}
+                            >
+                              {job.preset_name ?? "-"}
+                            </td>
+                          )}
+                          <td>
+                            <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                              <Pill tone={jobTone(job.status)}>{JOB_STATUS_LABEL[job.status]}</Pill>
+                              {showDuplicate(job) ? (
+                                <span
+                                  className="tag"
+                                  title={
+                                    job.duplicate_reason === "sha256"
+                                      ? "Arquivo idêntico já existe na biblioteca"
+                                      : "Mídia já importada antes"
+                                  }
+                                >
+                                  Duplicado
+                                </span>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td className="muted nowrap">
+                            {job.stage ? JOB_STAGE_LABEL[job.stage] : "-"}
+                            {job.stage === "waiting_retry" && job.next_attempt_at ? (
+                              <div className="dim small">às {formatDateTime(job.next_attempt_at)}</div>
+                            ) : null}
+                          </td>
+                          <td className="nowrap">
+                            {job.progress !== null && !terminal ? (
+                              <>
+                                <ProgressBar value={job.progress} inline />
+                                <span className="muted small">{formatPercent(job.progress)}</span>
+                              </>
+                            ) : (
+                              <span className="dim">-</span>
+                            )}
+                          </td>
+                          <td className="muted nowrap">{formatDuration(job.elapsed_seconds)}</td>
+                          <td className="muted">
+                            {job.attempts}/{job.max_attempts}
+                          </td>
+                          <td className="cell-trunc">
+                            {job.error_code || job.error_message ? (
+                              <span
+                                className="tone-err small"
+                                title={describeErrorCode(job.error_code, job.error_message)}
+                              >
+                                {describeErrorCode(job.error_code, job.error_message)}
+                              </span>
+                            ) : (
+                              <span className="dim">-</span>
+                            )}
+                          </td>
+                          <td className="actions">
+                            {!terminal ? (
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-ghost"
+                                disabled={busyId === job.id}
+                                onClick={() => void act(job, "cancel")}
+                              >
+                                Cancelar
+                              </button>
+                            ) : null}
+                            {canRetry ? (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                disabled={busyId === job.id}
+                                onClick={() => void act(job, "retry")}
+                              >
+                                Tentar novamente
+                              </button>
+                            ) : null}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
+                ))}
               </tbody>
             </table>
           </div>
