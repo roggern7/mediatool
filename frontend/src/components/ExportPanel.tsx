@@ -210,7 +210,8 @@ export function ImportExportBar({
   contentChoice?: boolean;
 }) {
   const hintId = useId();
-  const [content, setContent] = useState<ExportContent>("originals");
+  // Importação com edição/processamento: o padrão é exportar as versões editadas (o motivo de ter processado).
+  const [content, setContent] = useState<ExportContent>(contentChoice ? "edited" : "originals");
   const flow = useExportFlow({
     resumeFor: source.kind === "batch" ? { batchId: source.id } : { groupId: source.id },
     onFinished: onChanged,
