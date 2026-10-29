@@ -38,7 +38,7 @@ documento explica como as peças se encaixam.
 | `app.core.config` | `Settings` a partir de ambiente > `.env` > padrões; o `.env` não é copiado para `os.environ`. |
 | `app.core.logging` | Logging com filtro global que redige segredos conhecidos e padrões de `sessionid`/cookies. |
 | `app.core.security` | Headers de segurança e CSP, validação de Host, guarda de mutações (Origin + `X-Media-Tool-Client`), CORS (só em modo dev), `safe_join`/`ensure_within`. |
-| `app.api.limits` | Limite de 1 MB no corpo das requisições. |
+| `app.api.limits` | Limite de 1 MB no corpo das requisições (exceto o upload de vídeo local, com teto próprio). |
 | `app.services.settings_service` | Settings editáveis pelo painel, incluindo a validação dos caminhos do FFmpeg/ffprobe, a estratégia `instagram_provider` (setting > env `MEDIA_TOOL_INSTAGRAM_PROVIDER` > `web`), os overrides `instagram_web_doc_ids` e o registro do último teste de sessão. |
 | `app.db` | Conexão SQLite (WAL, `foreign_keys=ON`), migrations numeradas em `app\db\migrations`, repositórios. |
 | `app.schemas` | Modelos Pydantic de entrada e saída da API. |
@@ -157,6 +157,14 @@ Contrato completo em `docs/BATCH_ROBUSTNESS.md`; aqui só o resumo:
    descartado e o job é ligado à mídia existente com `duplicate_reason=sha256`.
 3. **Processamento:** se a mídia já tem rendition do mesmo preset com os mesmos params, o job termina `completed`
    com `stage=skipped`; senão o original existente é processado.
+4. **Upload de vídeo local** (`POST /api/library/uploads`, `services/upload_service.py`): mesma regra por conteúdo;
+   SHA-256 já existente devolve a mídia existente (`duplicate: true`). Vídeo novo vira `media` com
+   `source_platform = 'local'` (sem perfil, URL nem post) e original promovido como no download. O corpo é lido em
+   streaming para `temp/upload-<uuid>/`, apagado sempre (e na partida, se sobrar de uma queda); ffprobe obrigatório e
+   só vídeos MP4/MOV/WebM/MKV (extensão pelo container real; nome com extensão de outra família, ex.: MKV chamado
+   `.mp4`, é recusado). A integridade é conferida decodificando do quadro-chave anterior aos últimos 3 s até o fim
+   (arquivo truncado ou corrompido nesse trecho é recusado; prazo de 120 s, estourado -> `integrity_timeout`); teto
+   `max_download_bytes`; no máximo 2 envios simultâneos.
 
 ## 5.1 Exportar para pasta
 
@@ -187,8 +195,12 @@ ExportRunner (thread própria, 1 por vez) --> página de 500 mídias por keyset 
 - **Cancelamento e falhas:** cooperativo entre arquivos e entre blocos; o temporário é removido e o que já foi copiado
   fica. No startup, exportação `running` vira `failed`/`interrupted` e nada é apagado por padrão de nome (a exportação só remove temporários que a própria execução criou; um `.mtpart` pode sobrar). Destino comparado por identidade de arquivo, não só por texto.
 - **Retenção x lote inteiro:** a retenção de 30 dias apaga jobs antigos (seção 4.1). Antes de apagar, na mesma transação,
-  `purge_finished_before` copia os pares (lote, mídia) dos ingests concluídos para `batch_media` (migration 0013, com
-  backfill). A exportação lê `jobs concluídos ∪ batch_media`, então um lote antigo continua completo.
+  `purge_finished_before` copia os pares (lote, mídia) dos ingests e process concluídos para `batch_media` (migration
+  0013, com backfill). A exportação lê `jobs concluídos ∪ batch_media`, então um lote antigo continua completo.
+- **Versões editadas/processadas:** `content` no pedido (`originals` padrão, `edited`, `both`; guardado em
+  `exports.selection`, sem migração). O executor percorre itens (original e/ou renditions de cada mídia da página;
+  `ExportItem` com caminho e SHA-256 do próprio arquivo) em vez de mídias; lote/grupo levam só as renditions com o
+  preset e os params do lote, a Biblioteca todas. Nome com marca da versão (`_editado_15s_1.5x`), pasta/ZIP planos.
 - **Baixar ZIP:** mesma exportação com `mode = 'zip'`: o executor grava um `.zip` plano (STORED, ZIP64, entradas em
   blocos de 1 MiB) em `<data>\exports-tmp` (`app.services.export_zip`), depois de conferir o espaço livre; o painel
   baixa por `GET /api/exports/{id}/download?token=`. Pronto vale 24 h (1 h após o primeiro download); vencidos, parciais
@@ -204,6 +216,15 @@ temporário e renomeia; o original nunca é tocado. Vídeo: libx264 (crf ~20), y
 houver áudio, `+faststart`, sem metadados/capítulos, `setpts`/`atempo` para velocidade, corte com A/V sincronizados.
 Imagem: JPEG de alta qualidade (PNG continua PNG), hflip, sem EXIF, orientação aplicada. O resultado vai para
 `storage\processed\<yyyy>\<mm>\<media_id>_<job_id>_<sha8>.<ext>` e vira uma linha em `renditions`.
+
+Edição de vídeos (`POST /api/edits`, `services/edit_service.py`): reaproveita a mesma fila. O lote é `source =
+"library"` com `preset_id = NULL` e `preset_name = "Edição"`; cada vídeo vira um job `process` com os params da edição
+(`speed` 1,0 a 1,5, `max_duration` = limite + 0,03 s, `sharpen`, `audio_sync_start` (início do áudio também escalado
+pela velocidade), `reencode` conforme o tipo de saída, sem limpeza de
+metadados, espelho, corte inicial nem `auto_adjust`). A saída é uma rendition comum (`preset_id = NULL`), com a mesma
+dedupe por mídia + preset + params (`find_rendition` usa `preset_id IS ?`). No processor, `max_duration` corta na linha
+do tempo de saída (depois da velocidade) e a duração final é conferida no probe de saída com tolerância de um quadro
+no vídeo e 25 ms no áudio; fora dela o job falha e o temporário é apagado. Nenhuma migração.
 
 ## 7. Retry, cancelamento e recuperação
 
@@ -261,7 +282,8 @@ do último teste (`ok`, `code`, `message`, `username`, `tested_at`). Datas em IS
 - **Modo dev:** a lista permitida é só a do próprio backend (`http://127.0.0.1:<porta>`, `http://localhost:<porta>`).
   Com `MEDIA_TOOL_DEV=1` (`Settings.dev_mode`) entram também `http://127.0.0.1:5173` e `http://localhost:5173`, com
   CORS para essas origens; sem ele não há CORS. O `start.ps1 -Dev` define a variável só no processo do backend.
-- **Limites e headers:** corpo de requisição até 1 MB (`app.api.limits`, 413 `payload_too_large`);
+- **Limites e headers:** corpo de requisição até 1 MB (`app.api.limits`, 413 `payload_too_large`), exceto
+  `/api/library/uploads` (só esse caminho exato), lido em streaming com teto `max_download_bytes`;
   Content-Security-Policy `default-src 'self'` com `script-src 'self'`, `object-src 'none'`, `base-uri 'none'`,
   `frame-ancestors 'none'`, `form-action 'self'` e imagens só locais ou da CDN do Instagram (`/docs` e
   `/openapi.json` ficam sem CSP por causa do Swagger); `nosniff`, `no-referrer`, `X-Frame-Options: DENY`.

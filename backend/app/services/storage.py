@@ -23,13 +23,14 @@ from pathlib import Path, PurePosixPath
 logger = logging.getLogger("media_tool.storage")
 
 ORIGINAL_EXTENSIONS = frozenset(
-    {".mp4", ".mov", ".m4v", ".webm", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".h264"}
+    {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif", ".h264"}
 )
 MIME_TYPES = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
     ".mov": "video/quicktime",
     ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",

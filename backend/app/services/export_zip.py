@@ -85,10 +85,13 @@ def safe_zip_dir(settings: Settings, *, create: bool = False) -> Path | None:
     return folder
 
 
-def new_zip_fields(kind: str, *, now: datetime | None = None) -> dict[str, str]:
-    """Nome interno aleatório, nome de download (ASCII) e token de download da exportação."""
+def new_zip_fields(kind: str, *, now: datetime | None = None, content: str = "originals",
+                   edit_batch: bool = False) -> dict[str, str]:
+    """Nome interno aleatório, nome de download (ASCII) e token de download da exportação. Só versões editadas:
+    `editados-...`; lote de Edição com originais (ou os dois): `edicao-...`."""
     moment = now or datetime.now()
-    prefix = _NAME_PREFIX.get(kind, "importacao")
+    prefix = ("editados" if content == "edited" else "edicao" if edit_batch
+              else _NAME_PREFIX.get(kind, "importacao"))
     return {
         "zip_path": f"export-{secrets.token_hex(8)}.zip",
         "zip_name": f"{prefix}-{moment:%Y-%m-%d-%H%M}.zip",

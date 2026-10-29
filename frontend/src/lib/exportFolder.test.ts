@@ -9,8 +9,12 @@ import {
   ZIP_EXPIRED_TEXT,
   ZIP_SPACE_NOTE,
   batchExportOffer,
+  CONTENT_LABEL,
+  ORIGINALS_NOTE,
   buildExportRequest,
   createSingleFlight,
+  exportContentNote,
+  zipSpaceNote,
   exportActions,
   exportPartialText,
   runExclusive,
@@ -554,5 +558,51 @@ describe("concluída com parte das mídias não copiadas", () => {
     expect(exportPartialText(job({ status: "completed", failed: 0, error_message: reason }))).toBeNull();
     expect(exportPartialText(job({ status: "completed", failed: 2, error_message: null }))).toBeNull();
     expect(exportPartialText(job({ status: "failed", failed: 2, error_message: reason }))).toBeNull();
+  });
+});
+
+describe("conteúdo da exportação (originais, versões editadas ou os dois)", () => {
+  const source = { kind: "batch" as const, id: 3 };
+
+  it("sem conteúdo ou com originais o corpo não tem a chave (igual ao de antes)", () => {
+    expect(buildExportRequest(source, { kind: "zip" })).toEqual({ source, destination: { zip: true } });
+    const originals = buildExportRequest(source, { kind: "zip" }, "originals");
+    expect(originals).toEqual({ source, destination: { zip: true } });
+    expect("content" in originals).toBe(false);
+  });
+
+  it("versões editadas e os dois vão no corpo", () => {
+    expect(buildExportRequest(source, { kind: "zip" }, "edited")).toEqual({
+      source,
+      destination: { zip: true },
+      content: "edited",
+    });
+    expect(buildExportRequest(source, { kind: "token", token: "tok" }, "both")).toEqual({
+      source,
+      destination: { token: "tok" },
+      content: "both",
+    });
+  });
+
+  it("rótulos deixam claro que a Biblioteca leva edições e processadas", () => {
+    expect(CONTENT_LABEL).toEqual({
+      originals: "Originais",
+      edited: "Versões editadas e processadas",
+      both: "Originais e versões",
+    });
+    expect(exportContentNote("originals")).toBe(ORIGINALS_NOTE);
+    expect(exportContentNote("edited")).toBe("A exportação copia: versões editadas e processadas.");
+  });
+});
+
+describe("nota do ZIP em preparação conforme o conteúdo", () => {
+  it("originais mantêm o texto de sempre; versões e os dois não falam em originais só", () => {
+    expect(zipSpaceNote()).toBe(ZIP_SPACE_NOTE);
+    expect(zipSpaceNote("originals")).toBe(ZIP_SPACE_NOTE);
+    expect(zipSpaceNote("edited")).toBe(
+      "O ZIP leva as versões editadas. O navegador vai precisar do mesmo espaço de novo na pasta de Downloads.",
+    );
+    expect(zipSpaceNote("both")).toMatch(/^O ZIP leva os originais e as versões\. /);
+    expect(zipSpaceNote("edited")).not.toContain("arquivos originais");
   });
 });

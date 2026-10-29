@@ -3,6 +3,7 @@
 
 import type {
   Batch,
+  ExportContent,
   ExportDestination,
   ExportJob,
   ExportRequest,
@@ -125,6 +126,16 @@ export function exportPartialText(
 
 export const ZIP_SPACE_NOTE =
   "O ZIP leva os arquivos originais. O navegador vai precisar do mesmo espaço de novo na pasta de Downloads.";
+const ZIP_CONTENT_TEXT: Record<ExportContent, string> = {
+  originals: "O ZIP leva os arquivos originais.",
+  edited: "O ZIP leva as versões editadas.",
+  both: "O ZIP leva os originais e as versões.",
+};
+
+/** Nota do ZIP em preparação conforme o conteúdo (originais: a nota de sempre). */
+export function zipSpaceNote(content: ExportContent = "originals"): string {
+  return `${ZIP_CONTENT_TEXT[content]} O navegador vai precisar do mesmo espaço de novo na pasta de Downloads.`;
+}
 export const ZIP_EXPIRED_TEXT = "Este ZIP já foi removido do computador. Use “Baixar ZIP” para preparar de novo.";
 
 const sizeFmt1 = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -213,10 +224,26 @@ export function zipDownloadUrl(job: Pick<ExportJob, "mode" | "status" | "zip_rea
   return job.download_url || null;
 }
 
-/** Corpo de POST /api/exports. O destino é o token do seletor, a pasta padrão ou o ZIP; nunca um caminho. */
+/** Opções do conteúdo da exportação (Biblioteca e importação com preset). */
+export const CONTENT_LABEL: Record<ExportContent, string> = {
+  originals: "Originais",
+  edited: "Versões editadas e processadas",
+  both: "Originais e versões",
+};
+
+/** Nota do que a exportação copia, conforme o conteúdo (originais: a nota de sempre). */
+export function exportContentNote(content: ExportContent): string {
+  return content === "originals" ? ORIGINALS_NOTE : `A exportação copia: ${CONTENT_LABEL[content].toLowerCase()}.`;
+}
+
+/**
+ * Corpo de POST /api/exports. O destino é o token do seletor, a pasta padrão ou o ZIP; nunca um caminho. `content`
+ * só entra no corpo quando não é "originals" (o pedido de originais continua igual ao de antes).
+ */
 export function buildExportRequest(
   source: ExportSource,
   destination: { kind: "token"; token: string } | { kind: "default" } | { kind: "zip" },
+  content: ExportContent = "originals",
 ): ExportRequest {
   const dest: ExportDestination =
     destination.kind === "token"
@@ -224,7 +251,7 @@ export function buildExportRequest(
       : destination.kind === "zip"
         ? { zip: true }
         : { default: true };
-  return { source, destination: dest };
+  return content === "originals" ? { source, destination: dest } : { source, destination: dest, content };
 }
 
 /** Mensagem de exportação cancelada ou com falha; null nos outros estados. Deixa claro que a Biblioteca está intacta. */

@@ -8,6 +8,7 @@ from app.schemas.common import PositiveId, SafeText, StrictModel
 
 ExportStatus = Literal["pending", "running", "completed", "cancelled", "failed", "expired"]
 ExportMode = Literal["folder", "zip"]
+ExportContent = Literal["originals", "edited", "both"]
 
 
 class BatchSource(StrictModel):
@@ -62,6 +63,8 @@ class ZipDestination(StrictModel):
 class ExportRequest(StrictModel):
     source: Annotated[BatchSource | GroupSource | LibrarySource, Field(discriminator="kind")]
     destination: TokenDestination | DefaultDestination | ZipDestination
+    # O que exportar: originais (padrão), versões editadas/processadas, ou os dois.
+    content: ExportContent = "originals"
 
 
 class PickFolderOut(BaseModel):
@@ -86,7 +89,7 @@ class ExportOut(BaseModel):
     skipped_existing: int
     # Gravados com outro nome (` (2)`, ` (3)`...) porque havia um arquivo DIFERENTE com o mesmo nome.
     renamed: int
-    # Original ausente no storage.
+    # Arquivo (original ou versão editada) ausente no storage.
     missing: int
     failed: int
     error_code: str | None
@@ -95,6 +98,7 @@ class ExportOut(BaseModel):
     started_at: str | None
     finished_at: str | None
     mode: ExportMode = "folder"
+    content: ExportContent = "originals"
     # Só em mode = "zip". `download_url` (com o token de download) e `zip_bytes` só com o ZIP pronto.
     zip_name: str | None = None
     zip_bytes: int | None = None

@@ -17,3 +17,4 @@ packages = ["media_processor"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: testes lentos com FFmpeg real"]

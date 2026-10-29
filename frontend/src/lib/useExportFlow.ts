@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { ApiError, api, messageOf } from "../api/client";
-import type { ExportJob, ExportSource } from "../api/types";
+import type { ExportContent, ExportJob, ExportSource } from "../api/types";
 import {
   EXPORT_POLL_MS,
   ZIP_READY_POLL_MS,
@@ -29,7 +29,7 @@ export interface ExportFlow {
   /** Exporta o pedido que esbarrou no seletor indisponível para a pasta padrão criada pelo servidor. */
   startInDefaultFolder: () => Promise<void>;
   /** `zip`: Baixar ZIP; `pick`: seletor nativo pelo backend; `default`: pasta padrão criada pelo servidor. */
-  start: (source: ExportSource, mode: "pick" | "default" | "zip") => Promise<void>;
+  start: (source: ExportSource, mode: "pick" | "default" | "zip", content?: ExportContent) => Promise<void>;
   cancel: () => Promise<void>;
   open: (exportId: number) => Promise<void>;
   dismiss: () => void;
@@ -51,7 +51,9 @@ export function useExportFlow(opts: {
   const [exportId, setExportId] = useState<number | null>(null);
   const [created, setCreated] = useState<ExportJob | null>(null);
   const [pollMs, setPollMs] = useState<number | null>(null);
-  const [fallback, setFallback] = useState<{ source: ExportSource; message: string } | null>(null);
+  const [fallback, setFallback] = useState<{ source: ExportSource; content: ExportContent; message: string } | null>(
+    null,
+  );
   // ZIP pedido NESTA tela: quando ficar pronto, o download começa sozinho (uma vez).
   const autoDownload = useRef<number | null>(null);
   // Pedido em andamento: barra o segundo clique no mesmo instante, antes de o botão aparecer desabilitado.
@@ -103,18 +105,18 @@ export function useExportFlow(opts: {
   const loaded = query.data && query.data.id === exportId ? query.data : null;
   const current = loaded ?? (created && created.id === exportId ? created : null);
 
-  async function start(source: ExportSource, mode: "pick" | "default" | "zip") {
+  async function start(source: ExportSource, mode: "pick" | "default" | "zip", content: ExportContent = "originals") {
     if (picking || starting || !inFlight.current.tryEnter()) return;
     setStarting(mode !== "pick");
     setFallback(null);
     try {
-      let request = buildExportRequest(source, { kind: mode === "zip" ? "zip" : "default" });
+      let request = buildExportRequest(source, { kind: mode === "zip" ? "zip" : "default" }, content);
       if (mode === "pick") {
         setPicking(true);
         const picked = await api.pickExportFolder();
         setPicking(false);
         if (picked.cancelled || !picked.token) return; // diálogo cancelado: não é erro
-        request = buildExportRequest(source, { kind: "token", token: picked.token });
+        request = buildExportRequest(source, { kind: "token", token: picked.token }, content);
       }
       setStarting(true);
       const job = await api.createExport(request);
@@ -130,7 +132,7 @@ export function useExportFlow(opts: {
         setExportId(runningId);
         setPollMs(EXPORT_POLL_MS);
       } else if (err instanceof ApiError && err.code === "picker_unavailable") {
-        setFallback({ source, message: err.message });
+        setFallback({ source, content, message: err.message });
       } else {
         toast.push("err", messageOf(err));
       }
@@ -142,7 +144,7 @@ export function useExportFlow(opts: {
   }
 
   async function startInDefaultFolder() {
-    if (fallback) await start(fallback.source, "default");
+    if (fallback) await start(fallback.source, "default", fallback.content);
   }
 
   async function cancel() {

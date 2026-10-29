@@ -13,6 +13,7 @@ OPTIONAL_RANGES = {
     "trim_end": (0.0, 30.0),
     "pitch_shift": (-3.0, 3.0),
     "grain": (0.0, 4.0),
+    "max_duration": (0.0, 86400.0),
 }
 
 
@@ -32,9 +33,16 @@ class ProcessingOptions:
     trim_end: float = 0.0  # segundos cortados do final (ignorado em vídeos curtos e em imagens)
     pitch_shift: float = 0.0  # % de tom do áudio
     grain: float = 0.0  # intensidade da granulação
+    # Duração alvo da saída em segundos (0 = desligado): corta na linha do tempo de saída, depois da velocidade.
+    # Vídeo cuja saída natural já cabe no alvo não é cortado nem prolongado.
+    max_duration: float = 0.0
+    sharpen: bool = False  # nitidez leve (cas) só na luma
+    # Com velocidade, escala também o início do áudio (o atempo mantém o PTS inicial): áudio que começa depois do
+    # vídeo continua sincronizado. Desligado = comando idêntico ao de antes (presets).
+    audio_sync_start: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("metadata_cleanup", "mirror", "auto_adjust", "reencode"):
+        for name in ("metadata_cleanup", "mirror", "auto_adjust", "reencode", "sharpen", "audio_sync_start"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} deve ser booleano")
         for name in ("trim_start", "speed", *OPTIONAL_RANGES):

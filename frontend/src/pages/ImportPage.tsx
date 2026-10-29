@@ -800,6 +800,7 @@ function BatchPanel({
         note={exportOffer.note}
         lastExport={batch.last_export}
         libraryPath={libraryPathForProfile(batch.source_profile)}
+        contentChoice={batch.process}
         onChanged={() => {
           query.reload();
           onChanged();

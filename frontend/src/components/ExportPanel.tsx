@@ -1,12 +1,12 @@
-import { useId } from "react";
-import type { ExportJob, ExportSource, LastExport } from "../api/types";
+import { useId, useState } from "react";
+import type { ExportContent, ExportJob, ExportSource, LastExport } from "../api/types";
 import {
+  CONTENT_LABEL,
   DEFAULT_FOLDER_BUTTON,
-  ORIGINALS_NOTE,
   PICKING_TEXT,
   ZIP_AUTO_DOWNLOAD_TEXT,
-  ZIP_SPACE_NOTE,
   exportActions,
+  exportContentNote,
   exportEndedText,
   exportExtrasText,
   exportFraction,
@@ -19,6 +19,7 @@ import {
   zipDownloadUrl,
   zipPreparingText,
   zipReadyText,
+  zipSpaceNote,
 } from "../lib/exportFolder";
 import { navigate } from "../lib/router";
 import { type ExportFlow, useExportFlow } from "../lib/useExportFlow";
@@ -35,7 +36,7 @@ function ZipStatus({ flow, job }: { flow: ExportFlow; job: ExportJob }) {
             <ProgressBar value={exportFraction(job)} />
           </div>
           <div className="muted small" style={{ marginTop: 5 }}>
-            {ZIP_SPACE_NOTE}
+            {zipSpaceNote(job.content ?? "originals")}
           </div>
         </div>
         <button type="button" className="btn btn-sm" disabled={flow.cancelling} onClick={() => void flow.cancel()}>
@@ -115,7 +116,7 @@ export function ExportStatus({ flow }: { flow: ExportFlow }) {
             <ProgressBar value={exportFraction(job)} />
           </div>
           <div className="muted small" style={{ marginTop: 5 }}>
-            {ORIGINALS_NOTE}
+            {exportContentNote(job.content ?? "originals")}
           </div>
         </div>
         <button type="button" className="btn btn-sm" disabled={flow.cancelling} onClick={() => void flow.cancel()}>
@@ -151,6 +152,39 @@ export function ExportStatus({ flow }: { flow: ExportFlow }) {
   );
 }
 
+/** Escolha do que exportar (originais, versões ou os dois); o valor vai no `content` do pedido. */
+export function ExportContentSelect({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: ExportContent;
+  onChange: (content: ExportContent) => void;
+  disabled?: boolean;
+}) {
+  const id = useId();
+  return (
+    <span className="row small" style={{ gap: 6 }}>
+      <label htmlFor={id} className="muted">
+        Conteúdo
+      </label>
+      <select
+        id={id}
+        className="select"
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value as ExportContent)}
+      >
+        {(Object.keys(CONTENT_LABEL) as ExportContent[]).map((option) => (
+          <option key={option} value={option}>
+            {CONTENT_LABEL[option]}
+          </option>
+        ))}
+      </select>
+    </span>
+  );
+}
+
 /**
  * Ações de uma importação terminada (lote avulso ou grupo): Ver na Biblioteca, Exportar para pasta (seletor nativo
  * pelo backend), Usar pasta padrão e Abrir pasta (da última exportação concluída).
@@ -162,6 +196,7 @@ export function ImportExportBar({
   lastExport,
   libraryPath,
   onChanged,
+  contentChoice = false,
 }: {
   source: ExportSource & { kind: "batch" | "group" };
   /** "Exportar para pasta" é oferecido (batchExportOffer / groupExportOffer). */
@@ -171,8 +206,11 @@ export function ImportExportBar({
   lastExport: LastExport | null | undefined;
   libraryPath: string;
   onChanged?: () => void;
+  /** Importação com processamento: oferece exportar as versões processadas (ou originais e versões). */
+  contentChoice?: boolean;
 }) {
   const hintId = useId();
+  const [content, setContent] = useState<ExportContent>("originals");
   const flow = useExportFlow({
     resumeFor: source.kind === "batch" ? { batchId: source.id } : { groupId: source.id },
     onFinished: onChanged,
@@ -188,12 +226,15 @@ export function ImportExportBar({
         </button>
         {actions.showExport ? (
           <>
+            {contentChoice ? (
+              <ExportContentSelect value={content} onChange={setContent} disabled={!actions.canExport} />
+            ) : null}
             <button
               type="button"
               className="btn btn-sm btn-primary"
               disabled={!actions.canExport}
               title="Prepara um arquivo .zip com todas as mídias desta importação e inicia o download"
-              onClick={() => void flow.start(source, "zip")}
+              onClick={() => void flow.start(source, "zip", content)}
             >
               Baixar ZIP
             </button>
@@ -201,8 +242,8 @@ export function ImportExportBar({
               type="button"
               className="btn btn-sm"
               disabled={!actions.canExport}
-              title={ORIGINALS_NOTE}
-              onClick={() => void flow.start(source, "pick")}
+              title={exportContentNote(content)}
+              onClick={() => void flow.start(source, "pick", content)}
             >
               Exportar para pasta
             </button>
@@ -222,7 +263,7 @@ export function ImportExportBar({
               className="link-btn small"
               disabled={!actions.canExport}
               title="Cria uma pasta nova em Documentos\Media Tool\Exports e exporta para ela"
-              onClick={() => void flow.start(source, "default")}
+              onClick={() => void flow.start(source, "default", content)}
             >
               Usar pasta padrão
             </button>

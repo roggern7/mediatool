@@ -11,20 +11,46 @@ from app.db.repositories.media import MediaRepository
 
 COUNT_COLUMNS = ("copied", "skipped_existing", "renamed", "missing", "failed")
 OPEN_EXPORT_STATUSES = ("pending", "running")
-# Mídias de um lote: toda mídia ligada a um job de ingest CONCLUÍDO (inclusive duplicatas, que apontam para a mídia
-# que já existia na Biblioteca) UNIDA à relação durável `batch_media` (pares guardados antes de a retenção apagar os
-# jobs antigos). A união já elimina repetição: cada mídia uma vez.
+# Mídias de um lote: toda mídia ligada a um job de ingest ou de process CONCLUÍDO (inclusive duplicatas, que apontam
+# para a mídia que já existia na Biblioteca; process = lote de Edição/processamento da Biblioteca) UNIDA à relação
+# durável `batch_media` (pares guardados antes de a retenção apagar os jobs antigos). A união já elimina repetição:
+# cada mídia uma vez.
 _BATCH_MEDIA = (
-    "SELECT j.media_id FROM jobs j WHERE j.batch_id = ? AND j.kind = 'ingest' AND j.status = 'completed'"
-    " AND j.media_id IS NOT NULL"
+    "SELECT j.media_id FROM jobs j WHERE j.batch_id = ? AND j.kind IN ('ingest', 'process')"
+    " AND j.status = 'completed' AND j.media_id IS NOT NULL"
     " UNION SELECT bm.media_id FROM batch_media bm WHERE bm.batch_id = ?"
 )
 _GROUP_MEDIA = (
-    "SELECT j.media_id FROM jobs j JOIN batches b ON b.id = j.batch_id WHERE b.group_id = ? AND j.kind = 'ingest'"
-    " AND j.status = 'completed' AND j.media_id IS NOT NULL"
+    "SELECT j.media_id FROM jobs j JOIN batches b ON b.id = j.batch_id WHERE b.group_id = ?"
+    " AND j.kind IN ('ingest', 'process') AND j.status = 'completed' AND j.media_id IS NOT NULL"
     " UNION SELECT bm.media_id FROM batch_media bm JOIN batches b ON b.id = bm.batch_id WHERE b.group_id = ?"
 )
 _ITEMS = "SELECT i.media_id FROM export_items i WHERE i.export_id = ?"
+# Versões (renditions) de um lote: as das mídias do lote geradas com o MESMO preset e os MESMOS params do lote (as
+# saídas daquele lote, inclusive as reaproveitadas de um job anterior); uma por mídia, a de MENOR id, a mesma que
+# `MediaRepository.find_rendition` devolve e que o job reaproveitado aponta. No grupo, a mesma regra em cada lote
+# filho (`b` é o lote filho na subconsulta correlacionada).
+_BATCH_RENDITIONS = (
+    "SELECT MIN(r.id) FROM renditions r JOIN batches b ON b.id = ? WHERE r.preset_id IS b.preset_id"
+    f" AND r.params = b.params AND r.media_id IN ({_BATCH_MEDIA}) GROUP BY r.media_id"
+)
+_CHILD_MEDIA = (
+    "SELECT j.media_id FROM jobs j WHERE j.batch_id = b.id AND j.kind IN ('ingest', 'process')"
+    " AND j.status = 'completed' AND j.media_id IS NOT NULL"
+    " UNION SELECT bm.media_id FROM batch_media bm WHERE bm.batch_id = b.id"
+)
+_GROUP_RENDITIONS = (
+    "SELECT MIN(r.id) FROM renditions r JOIN batches b ON b.group_id = ? WHERE r.preset_id IS b.preset_id"
+    f" AND r.params = b.params AND r.media_id IN ({_CHILD_MEDIA}) GROUP BY b.id, r.media_id"
+)
+EXPORT_CONTENTS = ("originals", "edited", "both")
+
+
+def export_content(export: dict[str, Any]) -> str:
+    """O que a exportação leva: `originals` (padrão; registros antigos não têm a chave), `edited` ou `both`. Fica no
+    JSON `selection` (sem migração)."""
+    content = (export.get("selection") or {}).get("content")
+    return content if content in EXPORT_CONTENTS else "originals"
 
 
 def decode_export(row) -> dict[str, Any] | None:
@@ -59,17 +85,44 @@ class ExportRepository:
             return where, [*params, int(selection.get("max_id") or 0), export["id"]]
         return f"WHERE m.id IN ({_ITEMS})", [export["id"]]
 
-    def sum_bytes(self, export: dict[str, Any]) -> int:
-        """Soma de `file_size` das mídias da exportação (consulta agregada; a lista não é carregada)."""
+    def _rendition_ids(self, export: dict[str, Any]) -> tuple[str, list[Any]]:
+        """Subconsulta com os ids das versões (renditions) da exportação; SQL fixo, valores em parâmetros. Lote e
+        grupo: só as saídas do próprio lote. Biblioteca: todas as versões das mídias selecionadas."""
+        kind = export["kind"]
+        if kind == "batch":
+            return _BATCH_RENDITIONS, [export["batch_id"], export["batch_id"], export["batch_id"]]
+        if kind == "group":
+            return _GROUP_RENDITIONS, [export["group_id"]]
         where, params = self._where(export)
-        return int(self.db.scalar(f"SELECT COALESCE(SUM(m.file_size), 0) FROM media m {where}", tuple(params)))
+        return f"SELECT r.id FROM renditions r WHERE r.media_id IN (SELECT m.id FROM media m {where})", params
+
+    def _media_scalar(self, export: dict[str, Any], expression: str) -> int:
+        where, params = self._where(export)
+        return int(self.db.scalar(f"SELECT {expression} FROM media m {where}", tuple(params)))
+
+    def _rendition_scalar(self, export: dict[str, Any], expression: str) -> int:
+        ids, params = self._rendition_ids(export)
+        return int(self.db.scalar(f"SELECT {expression} FROM renditions r WHERE r.id IN ({ids})", tuple(params)))
+
+    def sum_bytes(self, export: dict[str, Any]) -> int:
+        """Soma de `file_size` dos arquivos da exportação: originais e/ou versões, conforme `content` (consultas
+        agregadas; a lista não é carregada)."""
+        content = export_content(export)
+        total = self._media_scalar(export, "COALESCE(SUM(m.file_size), 0)") if content != "edited" else 0
+        if content != "originals":
+            total += self._rendition_scalar(export, "COALESCE(SUM(r.file_size), 0)")
+        return total
 
     def delete(self, export_id: int) -> None:
         self.db.execute("DELETE FROM exports WHERE id = ?", (export_id,))
 
     def count_media(self, export: dict[str, Any]) -> int:
-        where, params = self._where(export)
-        return int(self.db.scalar(f"SELECT COUNT(*) FROM media m {where}", tuple(params)))
+        """Total de arquivos da exportação: mídias (`originals`), versões (`edited`) ou os dois (`both`)."""
+        content = export_content(export)
+        total = self._media_scalar(export, "COUNT(*)") if content != "edited" else 0
+        if content != "originals":
+            total += self._rendition_scalar(export, "COUNT(*)")
+        return total
 
     def page(self, export: dict[str, Any], *, after_id: int, limit: int) -> list[dict[str, Any]]:
         """Próxima página de mídias (keyset por id crescente; cada mídia aparece uma vez)."""
@@ -78,6 +131,23 @@ class ExportRepository:
             f"SELECT m.* FROM media m {where} AND m.id > ? ORDER BY m.id LIMIT ?", (*params, after_id, limit)
         )
         return [dict(row) for row in rows]
+
+    def renditions_page(self, export: dict[str, Any], media_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Versões da exportação das mídias de UMA página (uma consulta), por mídia, em ordem de id."""
+        result: dict[int, list[dict[str, Any]]] = {}
+        if not media_ids:
+            return result
+        ids, params = self._rendition_ids(export)
+        rows = self.db.fetchall(
+            f"SELECT r.* FROM renditions r WHERE r.id IN ({ids}) AND r.media_id IN ({placeholders(len(media_ids))})"
+            " ORDER BY r.id",
+            (*params, *media_ids),
+        )
+        for row in rows:
+            rendition = dict(row)
+            rendition["params"] = load_json(rendition["params"])
+            result.setdefault(rendition["media_id"], []).append(rendition)
+        return result
 
     def carousel_posts(self, post_ids: Iterable[str]) -> set[str]:
         """Dos posts informados, os que têm mais de um item na Biblioteca (carrossel)."""

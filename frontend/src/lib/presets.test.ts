@@ -3,11 +3,14 @@ import {
   DEFAULT_PARAMS,
   OPTIONAL_ADJUSTMENTS,
   compactParams,
+  editorParams,
   forcesReencode,
   hasActiveTransforms,
   isOptionalActive,
   optionalSummary,
   optionalValue,
+  passthroughParams,
+  initialOptionalState,
   validatePreset,
 } from "./presets";
 
@@ -101,5 +104,46 @@ describe("nome do preset", () => {
   it("limita a 60 caracteres", () => {
     expect(validatePreset("a".repeat(60), DEFAULT_PARAMS)).toEqual({});
     expect(validatePreset("a".repeat(61), DEFAULT_PARAMS).name).toBeDefined();
+  });
+});
+
+describe("chaves da Edição em presets (max_duration, sharpen, audio_sync_start)", () => {
+  const edited = { ...DEFAULT_PARAMS, trim_start: 0, speed: 1, max_duration: 15.03, sharpen: true, audio_sync_start: true };
+  const flags = {
+    metadata_cleanup: edited.metadata_cleanup,
+    mirror: edited.mirror,
+    auto_adjust: edited.auto_adjust,
+    reencode: edited.reencode,
+  };
+
+  it("salvar no editor não apaga as chaves (round-trip sem perda)", () => {
+    const params = editorParams(flags, "0", "1", initialOptionalState(edited), passthroughParams(edited));
+    expect(compactParams(params)).toEqual(compactParams(edited));
+    expect(params.max_duration).toBe(15.03);
+    expect(params.sharpen).toBe(true);
+    expect(params.audio_sync_start).toBe(true);
+  });
+
+  it("preset sem as chaves continua sem elas", () => {
+    expect(passthroughParams(DEFAULT_PARAMS)).toEqual({});
+    const start = initialOptionalState(DEFAULT_PARAMS);
+    const params = editorParams(flags, "0", "1", start, passthroughParams(DEFAULT_PARAMS));
+    expect("max_duration" in params || "sharpen" in params || "audio_sync_start" in params).toBe(false);
+  });
+
+  it("aparecem no resumo", () => {
+    expect(optionalSummary(edited)).toEqual(["Duração máx. 15 s (+0,03)", "Nitidez"]);
+    expect(optionalSummary({ ...DEFAULT_PARAMS, max_duration: 12.53 })).toEqual(["Duração máx. 12,53 s"]);
+    expect(optionalSummary({ ...DEFAULT_PARAMS, max_duration: 20 })).toEqual(["Duração máx. 20 s"]);
+    expect(optionalSummary({ ...DEFAULT_PARAMS, max_duration: 0, sharpen: false, audio_sync_start: true })).toEqual([]);
+  });
+
+  it("limite de duração e nitidez forçam recodificação", () => {
+    const plain = { ...DEFAULT_PARAMS, trim_start: 0, mirror: false, speed: 1, auto_adjust: false, reencode: false };
+    expect(hasActiveTransforms(plain)).toBe(false);
+    expect(hasActiveTransforms({ ...plain, audio_sync_start: true, max_duration: 0, sharpen: false })).toBe(false);
+    expect(hasActiveTransforms({ ...plain, max_duration: 30.03 })).toBe(true);
+    expect(hasActiveTransforms({ ...plain, sharpen: true })).toBe(true);
+    expect(forcesReencode({ ...plain, sharpen: true })).toBe(true);
   });
 });

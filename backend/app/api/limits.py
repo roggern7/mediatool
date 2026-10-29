@@ -28,12 +28,19 @@ class BodySizeLimitMiddleware:
     """Rejeita com 413 corpos acima de `max_bytes`. O corpo (pequeno, por definição) é lido inteiro antes de
     chegar à aplicação, então o limite vale também para envio em streaming sem Content-Length."""
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int = MAX_BODY_BYTES) -> None:
+    def __init__(self, app: ASGIApp, *, max_bytes: int = MAX_BODY_BYTES,
+                 exempt_paths: tuple[str, ...] = ()) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        # Rotas com teto próprio e leitura em streaming (upload de vídeo local): passam sem buffer nem limite aqui.
+        # Só o caminho exato (sem barra final nem subcaminhos).
+        self.exempt_paths = frozenset(exempt_paths)
+
+    def _exempt(self, path: str) -> bool:
+        return path in self.exempt_paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] != "http" or self._exempt(scope.get("path", "")):
             await self.app(scope, receive, send)
             return
         for key, value in scope.get("headers", ()):

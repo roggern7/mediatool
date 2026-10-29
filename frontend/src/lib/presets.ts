@@ -100,6 +100,8 @@ export function hasActiveTransforms(params: PresetParams): boolean {
     params.mirror ||
     params.speed !== 1 ||
     params.auto_adjust ||
+    (params.max_duration ?? 0) > 0 ||
+    params.sharpen === true ||
     OPTIONAL_ADJUSTMENTS.some((adjustment) => isOptionalActive(params, adjustment))
   );
 }
@@ -109,6 +111,16 @@ export function forcesReencode(params: PresetParams): boolean {
 }
 
 const summaryFmt = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 2 });
+
+/**
+ * Limite de duração no resumo: a Edição grava limite + 0,03 s; quando o limite sem a margem é inteiro, mostra
+ * "15 s (+0,03)" em vez de "15,03 s"; senão o valor exato do preset.
+ */
+function durationSummary(maxDuration: number): string {
+  const base = Math.round((maxDuration - 0.03) * 1000) / 1000;
+  if (base > 0 && Number.isInteger(base)) return `Duração máx. ${summaryFmt.format(base)} s (+0,03)`;
+  return `Duração máx. ${summaryFmt.format(maxDuration)} s`;
+}
 
 /** Trechos do resumo do preset para os ajustes opcionais ligados (nenhum em presets antigos). */
 export function optionalSummary(params: PresetParams): string[] {
@@ -125,6 +137,8 @@ export function optionalSummary(params: PresetParams): string[] {
     parts.push(`Tom ${pitch > 0 ? "+" : ""}${summaryFmt.format(pitch)}%`);
   }
   if (on("grain")) parts.push("Granulação");
+  if ((params.max_duration ?? 0) > 0) parts.push(durationSummary(params.max_duration ?? 0));
+  if (params.sharpen === true) parts.push("Nitidez");
   return parts;
 }
 
@@ -153,17 +167,32 @@ export function initialOptionalState(params: PresetParams): OptionalState {
 
 export type PresetFlags = Pick<PresetParams, "metadata_cleanup" | "mirror" | "auto_adjust" | "reencode">;
 
+/** Chaves da Edição que o editor de presets não mostra, mas preserva ao salvar (sem elas o preset perderia o ajuste). */
+export type PassthroughParams = Pick<PresetParams, "max_duration" | "sharpen" | "audio_sync_start">;
+const PASSTHROUGH_KEYS = ["max_duration", "sharpen", "audio_sync_start"] as const;
+
+/** As chaves preservadas presentes no preset de origem (ausentes continuam ausentes). */
+export function passthroughParams(params: PresetParams): PassthroughParams {
+  const out: PassthroughParams = {};
+  for (const key of PASSTHROUGH_KEYS) {
+    if (params[key] !== undefined) Object.assign(out, { [key]: params[key] });
+  }
+  return out;
+}
+
 /**
  * Params do editor a partir dos campos: texto inválido vira NaN (a validação acusa) e ajuste desligado fica ausente.
- * O corpo enviado à API é `compactParams` disto.
+ * `passthrough` (chaves da Edição do preset de origem) volta intacto. O corpo enviado à API é `compactParams` disto.
  */
 export function editorParams(
   flags: PresetFlags,
   trimText: string,
   speedText: string,
   optional: OptionalState,
+  passthrough: PassthroughParams = {},
 ): PresetParams {
   const params: PresetParams = {
+    ...passthrough,
     ...flags,
     trim_start: parseDecimal(trimText) ?? Number.NaN,
     speed: parseDecimal(speedText) ?? Number.NaN,

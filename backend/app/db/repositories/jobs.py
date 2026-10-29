@@ -141,7 +141,7 @@ class JobRepository:
         *,
         media: dict[str, Any],
         batch_id: int | None,
-        preset_id: int,
+        preset_id: int | None,  # None: edição (seção 9), sem preset
         preset_name: str,
         params: dict[str, Any],
     ) -> int:
@@ -731,7 +731,7 @@ class JobRepository:
         """Apaga jobs terminais com `finished_at < cutoff`, preservando o último job de cada mídia (usado pela
         Biblioteca) e os jobs de lotes ainda abertos (listing/running). Em trechos curtos de escrita.
 
-        Antes de apagar, na mesma transação, a relação lote -> mídia dos ingests concluídos do trecho vai para
+        Antes de apagar, na mesma transação, a relação lote -> mídia dos ingests/process concluídos do trecho vai para
         `batch_media` (migration 0013): a exportação de um lote antigo continua completa depois da retenção."""
         removed = 0
         while True:
@@ -754,7 +754,7 @@ class JobRepository:
                     marks = placeholders(len(part))
                     conn.execute(
                         "INSERT OR IGNORE INTO batch_media (batch_id, media_id) SELECT batch_id, media_id FROM jobs"
-                        f" WHERE id IN ({marks}) AND kind = 'ingest' AND status = 'completed'"
+                        f" WHERE id IN ({marks}) AND kind IN ('ingest', 'process') AND status = 'completed'"
                         " AND media_id IS NOT NULL AND batch_id IS NOT NULL",
                         part,
                     )

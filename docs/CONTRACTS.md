@@ -267,7 +267,8 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
   failed, cancel_requested, error_code, error_message, created_at, started_at, finished_at)` e
   `export_items(export_id FK CASCADE, media_id, PK (export_id, media_id))` (migration 0013; seção 8.2): em `library` por
   ids, `export_items` guarda os ids escolhidos; por filtro, guarda os ids EXCLUÍDOS e `selection` guarda o filtro
-  congelado (`max_id`). Para lote e grupo nada é materializado (as mídias saem dos jobs de ingest concluídos).
+  congelado (`max_id`). Para lote e grupo nada é materializado (as mídias saem dos jobs de ingest ou process
+  concluídos, unidos a `batch_media`).
 - `batch_media(batch_id FK CASCADE, media_id FK CASCADE, PK (batch_id, media_id))` (migration 0013): relação durável
   lote -> mídia, preenchida pelo backfill da migration e pelo purge de jobs antes de apagar (seção 8.2).
 - `settings(key PK, value json, updated_at)`; `app_state(key PK, value, updated_at)` (`export_last_folder`: última pasta
@@ -342,6 +343,7 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET | /api/renditions/{id}/file | | arquivo |
 | POST | /api/media/{id}/process | `{preset_id}` | `Job` 202 |
 | POST | /api/media/process | `{media_ids, preset_id}` | `Batch` 202 |
+| POST | /api/edits | `{media_ids: id[] (1..500), settings: EditSettings}` (seção 8.4) | `Batch` 202 (`preset_id: null`, `preset_name: "Edição"`); 404 `media_not_found`; 422 `edit_requires_video`\|`edit_no_changes`\|`validation_error` |
 | DELETE | /api/renditions/{id} | | 204 |
 | DELETE | /api/media/{id} | `?delete_original=true` obrigatório | 204 |
 | POST | /api/media/{id}/open | `{target:"file"\|"folder", rendition_id?}` | `{ok}` |
@@ -624,7 +626,9 @@ o app a fila continua de onde parou, na mesma ordem.
 Camada de exportação amigável sobre a Biblioteca. O armazenamento interno (`storage\originals`, SHA-256, dedupe,
 histórico) não muda e continua sendo a fonte da verdade: exportar é COPIAR os originais para UMA pasta plana escolhida
 pelo usuário (sem subpastas; vários perfis ficam juntos). Nunca move, nunca cria hardlink/symlink/junção, nunca
-sobrescreve. Apagar a pasta exportada depois não afeta a Biblioteca. Exporta o ORIGINAL (não a versão processada).
+sobrescreve. Apagar a pasta exportada depois não afeta a Biblioteca. Por padrão exporta o ORIGINAL; com
+`content: "edited"` exporta as versões editadas/processadas (renditions) e com `content: "both"` os dois (abaixo,
+"Conteúdo").
 
 **Destino autorizado (segurança).** Nenhuma rota aceita caminho vindo do cliente. O destino só existe de duas formas:
 1. `POST /api/exports/pick-folder` (sem corpo): o BACKEND abre o diálogo nativo "Selecionar pasta" do Windows num
@@ -683,13 +687,15 @@ ExportSelection =
   | { media_ids: number[] /*sem teto de quantidade; limite real = corpo de 1 MB*/ }
   | { filter: { view?: "all"|"originals"|"processed", media_type?: "video"|"image", q?: string, profile?: string },
       exclude_ids?: number[] }                     // "todos os resultados do filtro", resolvido no servidor
-ExportRequest = { source: ExportSource, destination: { token: string } | { default: true } | { zip: true } }
+ExportRequest = { source: ExportSource, destination: { token: string } | { default: true } | { zip: true },
+  content?: "originals" | "edited" | "both" /*padrão "originals"; ausente = pedido de antes*/ }
 Export = { id, kind: "batch"|"group"|"library", batch_id|null, group_id|null, dest_path /*só exibição*/,
   status: "pending"|"running"|"completed"|"cancelled"|"failed",
   total, processed /*copied + skipped_existing + missing + failed*/,
   copied /*gravadas na pasta, inclui renamed*/, skipped_existing /*arquivo idêntico já estava na pasta*/,
-  renamed /*gravadas com outro nome por colisão*/, missing /*original ausente no storage*/, failed,
-  error_code|null, error_message|null, created_at, started_at|null, finished_at|null }
+  renamed /*gravadas com outro nome por colisão*/, missing /*arquivo (original ou versão) ausente no storage*/, failed,
+  error_code|null, error_message|null, created_at, started_at|null, finished_at|null,
+  content: "originals"|"edited"|"both" }
 LastExport = { id, dest_path, status, total, copied, skipped_existing, renamed, missing, failed, finished_at|null }
 ```
 `Batch.last_export` e `ImportGroup.last_export`: última exportação CONCLUÍDA daquele lote/grupo (ou `null`); é ela
@@ -714,7 +720,8 @@ POST /api/exports  { "source": { "kind": "library", "selection": { "filter": { "
   "created_at": "2026-10-06T12:00:00.000Z", "started_at": "2026-10-06T12:00:00.412Z", "finished_at": null }
 ```
 
-**O que entra.** `batch`: toda mídia ligada a um job de ingest CONCLUÍDO do lote, inclusive os concluídos como
+**O que entra.** `batch`: toda mídia ligada a um job de ingest ou de process CONCLUÍDO do lote (process: lote de
+Edição ou de processamento da Biblioteca; num lote de importação os dois apontam para as mesmas mídias), inclusive os concluídos como
 duplicata (`source_id` ou `sha256`), que apontam para a mídia que já existia na Biblioteca, UNIDA à relação durável
 `batch_media` (abaixo); cada mídia uma vez.
 `group`: a união de todos os filhos, cada mídia uma vez (mídia compartilhada entre perfis entra uma vez). `library`:
@@ -722,12 +729,30 @@ os ids pedidos (ids desconhecidos ou repetidos são ignorados) ou todas as mídi
 filtro é congelado no pedido (mídias importadas depois não entram). Sem nenhuma mídia: 409 `export_empty`, nada é
 criado. Não há teto numérico de ids: o limite é o corpo de 1 MB da requisição; a seleção por filtro não manda ids.
 
+**Conteúdo (`content`).** Guardado no JSON `exports.selection` (chave `content`; sem migração). `"originals"` (padrão)
+não grava nada: o registro, o total, os nomes e o ZIP são os de antes; registro antigo sem a chave = `originals`.
+`"edited"`: só as versões (renditions); `"both"`: o original de cada mídia e depois as versões dela; `total` = arquivos
+(mídias + versões). Quais versões entram: `batch` = as das mídias do lote com `renditions.preset_id IS lote.preset_id`
+e `renditions.params = lote.params` (JSON canônico dos dois lados; são as saídas daquele lote, inclusive as
+reaproveitadas de um job anterior; uma por mídia, a de MENOR id, a mesma que a dedupe do processamento
+(`find_rendition`) devolve e para a qual o job reaproveitado aponta); `group` = a mesma regra em cada filho;
+`library` = TODAS as versões das mídias selecionadas (edições e presets), em ordem de id. Uma versão é lida só pelo
+`processed_path` dela (nunca pelo original); arquivo ausente conta `missing` e a exportação segue. `edited` sem
+nenhuma versão: 409 `export_empty` ("Este lote não tem versões editadas ou processadas."; grupo/Biblioteca com texto
+equivalente); lote só de download com `both`: só os originais. A regra "uma exportação aberta por origem e modo" vale
+independentemente de `content`. A pasta e o ZIP continuam PLANOS também em `both`; cada arquivo do storage entra uma
+vez. ZIP só de versões: `editados-AAAA-MM-DD-HHMM.zip`; lote de Edição com originais ou os dois:
+`edicao-AAAA-MM-DD-HHMM.zip`. Mudança de comportamento: um lote "Processar com preset" da Biblioteca (só jobs
+`process`) antes dava 409 `export_empty` e agora exporta (os originais das mídias processadas, ou as versões com
+`content`).
+
 **Relação durável lote -> mídia (`batch_media`).** A retenção (jobs encerrados há mais de 30 dias) apaga jobs
 antigos; para a exportação continuar representando o lote inteiro meses depois, a migration 0013 cria
 `batch_media(batch_id, media_id)` com backfill dos ingests concluídos existentes, e
 `JobRepository.purge_finished_before` (a única rotina que apaga jobs) grava ali, na MESMA transação e ANTES do
 `DELETE`, os pares (lote, mídia) dos ingests concluídos do trecho que vai apagar. Pipeline, downloader e dedupe não
-foram alterados. A consulta da exportação de lote/grupo é a união `jobs concluídos do lote ∪ batch_media`, paginada
+foram alterados (a purga grava os pares de ingests E de process concluídos, então um lote de Edição antigo continua
+exportando). A consulta da exportação de lote/grupo é a união `jobs concluídos do lote ∪ batch_media`, paginada
 por keyset sobre `media.id`, sem materializar a lista. Mídia excluída da Biblioteca (ou lote apagado) sai da relação
 por `ON DELETE CASCADE`.
 
@@ -739,7 +764,15 @@ resolvido uma vez por processo (mudar a variável ou o fuso do sistema exige rei
 muda; o mtime das entradas do ZIP usa a hora local do mesmo fuso e o mtime do arquivo copiado para pasta é o
 instante da publicação; data fora do calendário representável -> nome sem data); `n` (1-based) só em item de carrossel (post com mais de um item na Biblioteca, ou item de índice
 maior que zero); sem código do post: `{perfil}_{AAAA-MM-DD}_{id da mídia}`; sem perfil: prefixo `midia`; sem perfil
-nem código: `midia_{12 primeiros caracteres do SHA-256}`. Extensão = a do original no storage. Sanitização: Unicode
+nem código: `midia_{12 primeiros caracteres do SHA-256}`. Vídeo enviado do PC (`source_platform = 'local'`): o nome
+original enviado (`original_filename`) sem a extensão, sanitizado (dois `clip.mp4` -> `clip.mp4` e `clip (2).mp4`
+pela colisão comum); sem nome enviado, a regra acima. Extensão = a do arquivo no storage (da versão, para uma
+versão). Versão editada/processada: o nome base ganha a marca da versão antes do sufixo de colisão e da extensão
+(`{nome}{marca}[ (n)].{ext}`): Edição (`preset_id` nulo E nome "Edição") = `_editado` + `_{N}s` (limite de duração
+sem a margem de 0,03 s) + `_{V}x` (velocidade diferente de 1) + `_nitido`, ex. `_editado_15s_1.5x`; preset =
+`_{nome do preset sanitizado}` (sem nome: `_processado`; vale também para preset excluído, cujo `preset_id` virou
+nulo); até 40 caracteres; o corte de 120 caracteres é no nome
+base, nunca na marca. Duas versões com a mesma marca caem na colisão comum (` (2)`). Sanitização: Unicode
 NFC; `<>:"/\|?*` e caracteres de controle viram `_`; sem ponto/espaço nas pontas; nome reservado do Windows (`CON`,
 `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, com ou sem extensão) ganha `_` na frente; nome inteiro limitado a
 120 caracteres (o corte é no nome base, nunca na extensão). O I/O usa o prefixo `\\?\` (caminhos longos).
@@ -1099,6 +1132,98 @@ forma aceita e mapa de fallback: `docs/INSTAGRAM_WEB_CONTRACT.md`, "Fluxos separ
   download. Lotes por perfil não usam fluxos separados.
 - **Download de `BaseURL` pelo app e junção NUNCA rodaram contra o CDN real; verificados só com mídias sintéticas e o manifesto real saneado.**
 
+### 8.4 Edição de vídeos
+
+`POST /api/edits` edita vídeos da Biblioteca em lote. Não há tabela nem migração nova: o lote é um lote comum
+(`source = "library"`, `process = true`, `preset_id = null`, `preset_name = "Edição"`, `params` = params da edição) e
+cada mídia vira um job `process` com `preset_id = null` e `preset_name = "Edição"`. A saída é uma rendition normal da
+mídia (`renditions.preset_id = null`, mesmo nome de arquivo `<media_id>_<job_id>_<sha8>.mp4` em `processed/AAAA/MM/`);
+o original nunca é alterado. Progresso e erros por item: `GET /api/batches/{id}` (`jobs` com `progress`, `stage`,
+`error_message`, `rendition_id`) e `GET /api/jobs?ids=` quando `jobs_truncated`.
+
+```
+EditSettings = {
+  duration_mode: "original" | "15" | "30" | "60" | "custom",
+  custom_seconds: number | null,   // > 0 e <= 7200; obrigatório só em "custom" (ignorado nos outros modos)
+  speed: number,                   // 1.0 ..= 1.5 (vídeo e áudio juntos, sincronizados)
+  sharpen: boolean,                // nitidez leve
+  output_type: "mp4" | "auto"      // "mp4": sempre recodifica (H.264 + AAC); "auto": copia os fluxos quando nada exige recodificar
+}
+```
+
+- Params gravados (validados por `PresetParams`, neutros omitidos como nos presets): `metadata_cleanup: false`,
+  `trim_start: 0`, `mirror: false`, `speed`, `auto_adjust: false`, `reencode: output_type == "mp4"`,
+  `max_duration` = limite + **0,03 s** (`EDIT_DURATION_MARGIN`, somado no backend; 15 -> 15,03) quando há limite e
+  `sharpen` quando ligado, e sempre `audio_sync_start: true`. `auto_adjust: false` preserva dimensões, SAR e rotação (metadado de exibição); a única
+  mudança de resolução possível é o recorte de 1 px em largura/altura ímpar exigido pelo yuv420p ao recodificar.
+- Erros: mídia inexistente -> 404 `media_not_found` (lista até 20 ids); mídia que não é vídeo -> 422
+  `edit_requires_video` (lista até 20 ids, nada é criado); `output_type: "auto"` com duração original, velocidade 1,0
+  e sem nitidez -> 422 `edit_no_changes` ("Nenhuma edição selecionada."). Só "MP4" sem outras edições é válido
+  (normalização para H.264/AAC). Chave extra, tipo errado (strict) ou fora da faixa -> 422 `validation_error`.
+- Ids repetidos contam uma vez. Falha de um item (ex.: duração final fora da tolerância) não interrompe o lote.
+- Dedupe: mesma mídia com os mesmos params reaproveita a rendition existente (job termina `skipped` com o
+  `rendition_id` dela, sem arquivo novo); configuração diferente gera outra rendition.
+- Duração: com limite, a saída fica em limite + 0,03 s (vídeo quantizado por quadro, ver seção 9); vídeo cuja duração
+  de saída (depois da velocidade) já cabe no limite não é cortado nem prolongado; vídeo sem áudio continua sem áudio.
+- Exportar editados: pelo fluxo da seção 8.2 com `source: {kind: "batch", id: <lote da edição>}` e
+  `content: "edited"` (ZIP `editados-...zip` ou pasta; nomes `..._editado_15s_1.5x.mp4`). Na página Editar, o painel
+  do lote encerrado com saídas oferece "Baixar ZIP dos editados" e "Exportar editados para pasta"; não há exportação
+  automática ao concluir.
+
+### 8.5 Upload de vídeo local
+
+`POST /api/library/uploads` registra na Biblioteca um vídeo enviado do computador (botão ou arrastar e soltar na
+página Editar). Multipart/form-data, **um arquivo por requisição** no campo `file`; outros campos são ignorados.
+
+```
+POST /api/library/uploads   (multipart/form-data; campo file)
+-> 200 { media: MediaOut, duplicate: boolean }
+```
+
+- Rota isenta do limite de 1 MB do corpo (só este caminho exato, sem barra final nem subcaminhos,
+  `BodySizeLimitMiddleware(exempt_paths=...)`); o teto do arquivo é `settings.max_download_bytes` (2 GB por padrão) e
+  o do corpo inteiro (partes extras, cabeçalhos e epílogo incluídos, com ou sem Content-Length) é esse teto + 256 KB.
+  Continua sujeita às proteções de mutação (Host, `X-Media-Tool-Client`, Origin permitida).
+- O corpo é lido em streaming (parser mínimo próprio, sem `python-multipart`) para
+  `temp/upload-<uuid>/upload.bin`, contando bytes; a pasta é apagada em qualquer desfecho (sucesso, erro, cliente
+  desconectado) e, se o processo cair no meio, na partida (`cleanup_orphan_temps` só preserva `job-<id>` de jobs
+  ativos). Cliente que desconecta no meio recebe (para ninguém) 400 `client_disconnected`, só com log informativo.
+- Depois do corpo: SHA-256; conteúdo já existente devolve a mídia existente com `duplicate: true` (nenhuma linha
+  nova). Senão ffprobe obrigatório, exige vídeo com stream de vídeo e dimensões; promove o original como no download
+  (`originals/AAAA/MM/<sha2>/<sha256><ext>`, sob `ingest_lock`) e insere `media` com `source_platform = "local"`,
+  `source_profile/source_url/source_post_id = null`, `taken_at = null` e `original_filename` = nome enviado saneado
+  (só o último componente, NFC, sem caracteres das categorias Unicode Cc, Cf (inclui bidi como U+202E e largura zero),
+  Cs, Co, Cn, Zl e Zp, até 255; nunca vira caminho). Thumbnail best-effort (falha só vai para o log).
+- Extensão e `mime_type` vêm do container real (ffprobe), nunca do nome enviado: MP4 -> `.mp4` (`video/mp4`); MP4
+  com marca `qt` -> `.mov` (`video/quicktime`); Matroska/WebM com VP8/VP9/AV1 e áudio Opus/Vorbis (ou sem áudio) ->
+  `.webm` (`video/webm`), senão `.mkv` (`video/x-matroska`). Qualquer outro container (GIF, AVI, TS, FLV...) ->
+  422 `unsupported_media` ("Formato não suportado. Envie vídeos MP4, MOV, WebM ou MKV."). GIF é recusado de propósito:
+  é imagem animada sem áudio; gravado como vídeo ficaria com extensão e tipo falsos.
+- Integridade (barata e determinística): depois do ffprobe, o FFmpeg do processor provider decodifica com `-v error`
+  do quadro-chave anterior aos últimos 3 s do stream de vídeo até o fim (vídeo e o primeiro áudio). Código de saída
+  diferente de 0, nenhum quadro decodificado ou qualquer erro de leitura/demux/decodificação -> 422 `invalid_media`,
+  sem nada em `originals/`. Os avisos de referência que o decodificador imprime logo depois do salto quando o ponto
+  de entrada não é um IDR (open-GOP, intra-refresh: "mmco: unref short failure", "number of reference frames ...
+  exceeds max", "Could not find ref with POC"...) e as repetições deles são ignorados. Pega arquivo truncado (com ou
+  sem faststart) e dados zerados/corrompidos no trecho decodificado; dano só antes desse trecho não é detectado.
+- Nome com extensão de vídeo conhecida precisa ser da mesma família do container (`.mp4`/`.m4v`/`.mov` para MP4/MOV,
+  `.mkv`/`.webm` para Matroska/WebM); um container disfarçado (ex.: MKV renomeado para `.mp4`) -> 422
+  `unsupported_media`. Sem extensão ou com extensão desconhecida, vale o container.
+- Erros: corpo acima do teto -> 413 `payload_too_large` (pelo Content-Length declarado, antes de ler, ou durante a
+  leitura); não multipart, sem campo `file` ou mais de um arquivo -> 422 `invalid_upload`; arquivo que não é mídia,
+  truncado ou corrompido -> 422 `invalid_media`; imagem -> 422 `unsupported_media` ("Só vídeos podem ser editados.");
+  FFmpeg/ffprobe ausente -> 503 `ffmpeg_missing`; disco abaixo do mínimo dos downloads (`worker.disk_check`) -> 507
+  `disk_full` com `free_bytes`/`required_bytes`; mais de 2 envios simultâneos -> 429 `too_many_uploads` (sem fila no
+  servidor; o painel envia no máximo 2 por vez).
+- A checagem de integridade tem prazo de 120 s (`INTEGRITY_TIMEOUT`). Estourado (ex.: vídeo válido com um único GOP
+  muito longo, que obriga a decodificar quase tudo) -> 422 `integrity_timeout` ("Não foi possível verificar o arquivo
+  a tempo. Tente um arquivo menor ou com mais quadros-chave."), sem afirmar que o arquivo é inválido; temporário
+  apagado e vaga liberada.
+- O espaço em disco é verificado antes de aceitar o corpo; disco cheio durante a gravação (ENOSPC / Windows 39 e 112)
+  também responde 507 `disk_full` (sem `free_bytes`) e o temporário é apagado.
+- A vaga de um envio só é liberada quando a análise termina (SHA-256, ffprobe, integridade), mesmo se o cliente
+  desistiu nessa fase; o painel trata 429 tentando de novo após 1, 2, 4, 8 e 15 s.
+
 ## 9. Processor (`media_processor`)
 
 ```python
@@ -1107,6 +1232,7 @@ from media_processor import (MediaProcessor, ProcessingOptions, ProbeResult, Pro
 @dataclass(frozen=True) class ProcessingOptions: metadata_cleanup=True; trim_start=0.5; mirror=True; speed=1.05;
     auto_adjust=True; reencode=True;
     zoom=0.0; brightness=0.0; contrast=1.0; saturation=1.0; trim_end=0.0; pitch_shift=0.0; grain=0.0;  # opcionais
+    max_duration=0.0; sharpen=False; audio_sync_start=False;   # edição (opcionais)
     @classmethod from_params(cls, params: dict)   # chave desconhecida ou valor fora da faixa -> ValueError
 @dataclass class ToolInfo: found: bool; path: str|None; version: str|None; error: str|None
 @dataclass class ProbeResult: media_type: "video"|"image"; format_name; duration|None; width|None; height|None; fps|None;
@@ -1144,6 +1270,35 @@ conta como filtro ativo e entra na duração esperada do progresso):
   vídeo, o início do áudio se desloca em até |`pitch_shift`| % do atraso inicial (~28 ms para 1 s com 3 %),
   constante ao longo do arquivo e zero quando áudio e vídeo começam juntos.
 - Imagem: `trim_end` e `pitch_shift` são ignorados.
+- `max_duration` (0..86400 s, 0 = desligado): duração **alvo da saída**. Corte na linha do tempo de saída: `trim=end=T`
+  depois de `setpts`/`fps` (e antes do `setsar=1`) e `atrim=end=T` depois de `atempo`/tom. Só vale quando a duração
+  natural da saída `(duração - trim_start - trim_end efetivo) / speed` passa de `T`; senão é ignorado (vídeo menor não
+  é prolongado nem cortado). Com corte o plano é sempre `encode` (stream copy só corta em keyframe) e a duração
+  esperada do progresso é `min(natural, T)`. A margem de 0,03 s é do backend (seção 8.4), não do processor.
+- Com corte, o encoder de vídeo recebe `-enc_time_base:v filter`: sem isso o PTS do vídeo é arredondado para a grade
+  1/fps e um vídeo que começa fora da grade (ex.: MPEG-TS com start_time alto) desloca até meio quadro e termina além
+  do alvo.
+- Verificação (`verify.check_output_duration`, só quando há corte), depois do probe de saída (sem ffprobe extra).
+  `commands.expected_spans` calcula, por stream, início e fim esperados na linha do tempo de saída: início do vídeo =
+  `(start_time da stream - start_time do container - trim_start) / speed`; início do áudio = a mesma fórmula dividida
+  por `speed` **só com `audio_sync_start`**, senão sem a divisão (o `atempo` mantém o PTS inicial) (o deslocamento
+  entre as streams da origem é preservado, nada é "puxado" para 0) e fim = `min(T, fim natural daquela stream)` (nenhuma stream é prolongada:
+  áudio mais curto que o vídeo termina onde terminava). Com `frame = 1/fps` do vídeo de saída (ou da origem; 0,1 s se
+  desconhecido): fim do vídeo a no máximo `frame + 5 ms` do esperado; fim do áudio a no máximo 25 ms; fim do container
+  a no máximo `frame + 5 ms` do maior fim esperado; início de cada stream a no máximo 50 ms do esperado; deslocamento
+  vídeo - áudio a no máximo `frame + 25 ms` do esperado. Stream sem duração informada na origem: só o limite superior
+  do fim. Violação -> `ProcessingFailedError("duração final fora da tolerância: ...")` e o `.part` é apagado.
+- Medido (FFmpeg 9, testsrc2 + seno 48 kHz, T = 15,03): áudio 15,030 em todos os casos; vídeo 15,033 (30 e 60 fps),
+  15,040 (25 fps), 15,048 (29,97 fps a 1,0x) e 15,015 (29,97 fps a 1,25x/1,5x).
+- Limitação da verificação: ela confere só timestamps e durações do probe de saída. Tolerâncias: início de cada
+  stream ±50 ms do esperado e deslocamento vídeo - áudio ±(1 quadro + 25 ms). Um atraso que esteja só no conteúdo do
+  áudio (som deslocado dentro de uma stream com timestamps corretos) não é detectável por timestamps.
+- `sharpen`: `cas=strength=0.25:planes=1` (só luma) depois do `eq` e antes do `noise`; força reencode. Imagem: ignorado.
+- `audio_sync_start` (booleano, a edição sempre envia `true`): com velocidade, acrescenta
+  `asetpts=PTS-STARTPTS+STARTPTS/<speed>` depois do `atempo`/tom (e antes do `atrim` do corte). O `atempo` mantém o
+  PTS inicial do áudio; sem isto um áudio que começa depois do vídeo fica atrasado em `início × (1 - 1/speed)`
+  (medido: ~145 ms com 0,5 s a 1,5x). Desligado (presets) o comando é o de antes. A verificação usa o mesmo modelo:
+  início do áudio dividido pela velocidade só com o parâmetro ligado.
 
 ## 10. Design (frontend)
 

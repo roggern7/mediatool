@@ -269,6 +269,7 @@ export function ImportGroupPanel({
         note={exportOffer.note}
         lastExport={group.last_export}
         libraryPath={ROUTES.library}
+        contentChoice={group.process}
         onChanged={refresh}
       />
 

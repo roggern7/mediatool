@@ -40,6 +40,7 @@ export function navigate(to: string): void {
 export const ROUTES = {
   import: "/",
   library: "/biblioteca",
+  edit: "/editar",
   queue: "/fila",
   presets: "/presets",
   settings: "/configuracoes",

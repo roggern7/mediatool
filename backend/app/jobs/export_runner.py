@@ -23,12 +23,13 @@ import threading
 import time
 import zipfile
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.db.connection import utc_now
-from app.db.repositories.exports import COUNT_COLUMNS
+from app.db.repositories.exports import COUNT_COLUMNS, export_content
 from app.services import export_time, export_zip
 from app.services.export_destination import (
     DestinationError,
@@ -37,7 +38,7 @@ from app.services.export_destination import (
     remove_if_empty,
     validate_destination,
 )
-from app.services.export_names import export_extension, export_stem, file_name
+from app.services.export_names import export_extension, export_stem, file_name, rendition_tag
 from app.services.storage import StorageError
 
 if TYPE_CHECKING:
@@ -69,6 +70,26 @@ INTERRUPTED_MESSAGE = (
 FOLDER_GONE_MESSAGE = (
     "A pasta de destino deixou de existir (ou foi trocada) durante a exportação. A Biblioteca não foi alterada."
 )
+
+
+@dataclass(frozen=True)
+class ExportItem:
+    """Um arquivo a exportar: o original da mídia ou uma versão (rendition) dela. `path`/`sha256` são SEMPRE os do
+    próprio arquivo (uma versão nunca lê o original); `tag` marca a versão no nome."""
+    media: dict[str, Any]
+    path: str | None
+    sha256: str | None
+    tag: str = ""
+    rendition_id: int | None = None
+
+
+def original_item(media: dict[str, Any]) -> ExportItem:
+    return ExportItem(media=media, path=media.get("original_path"), sha256=media.get("original_sha256"))
+
+
+def rendition_item(media: dict[str, Any], rendition: dict[str, Any]) -> ExportItem:
+    return ExportItem(media=media, path=rendition.get("processed_path"), sha256=rendition.get("processed_sha256"),
+                      tag=rendition_tag(rendition), rendition_id=rendition.get("id"))
 
 
 class ExportCancelled(Exception):
@@ -247,7 +268,7 @@ class ExportRunner:
                 dest = validate_destination(export["dest_path"], self.ctx.settings)
                 self._dest_identity = file_identity(dest)
                 self._copy_all(export, counts,
-                               lambda media, carousel: self._export_one(export["id"], dest, media, carousel))
+                               lambda item, carousel: self._export_one(export["id"], dest, item, carousel))
             # A seleção pode mudar durante a cópia (mídia excluída da Biblioteca, ou job concluído depois do pedido):
             # ao concluir, tratadas == total. O que sumiu conta como original ausente.
             processed = counts["copied"] + counts["skipped_existing"] + counts["missing"] + counts["failed"]
@@ -313,8 +334,10 @@ class ExportRunner:
         self.progress_writes += 1
 
     def _copy_all(self, export: dict[str, Any], counts: dict[str, int], handle) -> None:
-        """Percorre as mídias em páginas (keyset) e chama `handle(media, carousel)` para cada uma."""
+        """Percorre as mídias em páginas (keyset) e chama `handle(item, carousel)` para cada arquivo: o original
+        (`content` originals/both) e depois cada versão da mídia (`content` edited/both)."""
         export_id = export["id"]
+        content = export_content(export)
         after_id = 0
         pending_files = 0
         consecutive_failures = 0
@@ -325,9 +348,17 @@ class ExportRunner:
             if not rows:
                 return
             carousels = self.ctx.exports.carousel_posts(row["source_post_id"] for row in rows)
-            for media in rows:
+            versions = (self.ctx.exports.renditions_page(export, [row["id"] for row in rows])
+                        if content != "originals" else {})
+            items = (
+                (item, media["source_post_id"] in carousels)
+                for media in rows
+                for item in ([original_item(media)] if content != "edited" else [])
+                + [rendition_item(media, rendition) for rendition in versions.get(media["id"], ())]
+            )
+            for item, carousel in items:
                 self._check_cancel()
-                outcome = handle(media, media["source_post_id"] in carousels)
+                outcome = handle(item, carousel)
                 if outcome == "renamed":
                     counts["copied"] += 1
                 counts[outcome] += 1
@@ -361,10 +392,13 @@ class ExportRunner:
         if self._dest_identity is not None and file_identity(dest) != self._dest_identity:
             raise ExportAborted("export_folder_missing", FOLDER_GONE_MESSAGE)
 
-    def _export_one(self, export_id: int, dest: Path, media: dict[str, Any], carousel: bool) -> str:
-        """Copia UM original. Retorna `copied`, `renamed`, `skipped_existing`, `missing` ou `failed`."""
+    def _export_one(self, export_id: int, dest: Path, item: ExportItem | dict[str, Any], carousel: bool) -> str:
+        """Copia UM arquivo (original ou versão; uma mídia solta = o original dela). Retorna `copied`, `renamed`,
+        `skipped_existing`, `missing` ou `failed`."""
+        item = item if isinstance(item, ExportItem) else original_item(item)
+        media = item.media
         try:
-            src = self.ctx.storage.resolve(media["original_path"])
+            src = self.ctx.storage.resolve(item.path)
             if src.is_symlink() or not src.is_file():
                 return "missing"
             size = src.stat().st_size
@@ -372,21 +406,21 @@ class ExportRunner:
             return "missing"
         try:
             stem = export_stem(media, carousel=carousel, zone=self._zone)
-            ext = export_extension(media["original_path"])
-            file_name(stem, ext)
+            ext = export_extension(item.path)
+            file_name(stem, ext, tag=item.tag)
         except Exception:  # noqa: BLE001 - dado inesperado numa mídia não derruba a exportação inteira
             logger.warning("Exportação %s: mídia %s com dados inválidos para o nome", export_id, media.get("id"))
             return "failed"
         self._check_dest(dest)
         for attempt in range(1, MAX_NAME_ATTEMPTS + 1):
-            name = file_name(stem, ext, attempt)
+            name = file_name(stem, ext, attempt, tag=item.tag)
             final = dest / name
             if final.parent != dest or os.path.basename(name) != name:   # o arquivo final fica NA pasta de destino
                 return "failed"
             part: Path | None = None
             try:
                 if os.path.lexists(io_path(final)):
-                    if self._identical(final, size, media["original_sha256"]):
+                    if self._identical(final, size, item.sha256):
                         return "skipped_existing"
                     continue   # arquivo DIFERENTE com o mesmo nome: nunca sobrescreve; tenta " (2)", " (3)"...
                 part = self._copy(src, dest, name, export_id, size)
@@ -502,7 +536,9 @@ class ExportRunner:
                 raise ExportAborted(
                     "export_empty",
                     "Nenhum arquivo original disponível para o ZIP: os originais desta seleção não estão no"
-                    " storage. A Biblioteca não foi alterada.",
+                    " storage. A Biblioteca não foi alterada." if export_content(export) == "originals" else
+                    "Nenhum arquivo disponível para o ZIP: os arquivos desta seleção (originais ou versões editadas)"
+                    " não estão no storage. A Biblioteca não foi alterada.",
                 )
             # Conferência barata (sem reler o conteúdo e sem manter duas listas): o ZIP abre e o diretório central
             # tem exatamente as entradas gravadas.
@@ -529,13 +565,17 @@ class ExportRunner:
         used: set[str] = set()   # nomes já usados (sem diferenciar maiúsculas/minúsculas)
         with _open_zip_part(part) as raw, \
                 zipfile.ZipFile(raw, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
-            self._copy_all(export, counts, lambda media, carousel: self._zip_one(archive, used, media, carousel))
+            self._copy_all(export, counts, lambda item, carousel: self._zip_one(archive, used, item, carousel))
             return len(archive.filelist)
 
-    def _zip_one(self, archive: zipfile.ZipFile, used: set[str], media: dict[str, Any], carousel: bool) -> str:
-        """Grava UM original como entrada na raiz do ZIP. Retorna `copied`, `renamed`, `missing` ou `failed`."""
+    def _zip_one(self, archive: zipfile.ZipFile, used: set[str], item: ExportItem | dict[str, Any],
+                 carousel: bool) -> str:
+        """Grava UM arquivo (original ou versão; uma mídia solta = o original dela) como entrada na raiz do ZIP.
+        Retorna `copied`, `renamed`, `missing` ou `failed`."""
+        item = item if isinstance(item, ExportItem) else original_item(item)
+        media = item.media
         try:
-            src = self.ctx.storage.resolve(media["original_path"])
+            src = self.ctx.storage.resolve(item.path)
             if src.is_symlink() or not src.is_file():
                 return "missing"
             size = src.stat().st_size
@@ -543,12 +583,12 @@ class ExportRunner:
             return "missing"
         try:
             stem = export_stem(media, carousel=carousel, zone=self._zone)
-            ext = export_extension(media["original_path"])
+            ext = export_extension(item.path)
             stamp = _zip_time(media, src, self._zone)
             # Nome único no arquivo, sem diferenciar maiúsculas/minúsculas (o ZIP extrai bem no Windows).
             name, attempt = None, 0
             for attempt in range(1, MAX_NAME_ATTEMPTS + 1):
-                candidate = file_name(stem, ext, attempt)
+                candidate = file_name(stem, ext, attempt, tag=item.tag)
                 if candidate.casefold() not in used:
                     name = candidate
                     break

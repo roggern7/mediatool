@@ -1,6 +1,7 @@
 import type {
   Batch,
   Diagnostics,
+  EditRequest,
   ExportJob,
   ExportRequest,
   Health,
@@ -27,6 +28,7 @@ import type {
   SessionInput,
   Settings,
   SettingsUpdate,
+  UploadResult,
 } from "./types";
 import { errorMessageFor } from "./errors";
 import type { CookiePatch } from "../lib/sessionCookies";
@@ -295,7 +297,77 @@ export const api = {
   clearSession: () => request<InstagramStatus>("DELETE", "/settings/instagram/session"),
   testSession: () =>
     request<InstagramStatus>("POST", "/settings/instagram/session/test", { timeoutMs: INSTAGRAM_TIMEOUT_MS }),
+
+  /** Lote de edição dos vídeos (máx. 500); o progresso vem de getBatch/listJobs. */
+  startEdit: (body: EditRequest) => request<Batch>("POST", "/edits", { body, timeoutMs: SLOW_TIMEOUT_MS }),
+  uploadLocalVideo: (file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal) =>
+    uploadLocalVideo(file, onProgress, signal),
 };
+
+/** Rota isenta do limite de 1 MB do corpo (o teto é o tamanho máximo de download, 2 GB por padrão). */
+export const UPLOAD_URL = "/api/library/uploads";
+export const UPLOAD_INTERRUPTED_TEXT =
+  "O envio foi interrompido. Confira se o arquivo tem até 2 GB e se o Media Tool está aberto, e tente de novo.";
+
+/**
+ * Envia um vídeo local (multipart, campo `file`) com progresso de envio. Usa XMLHttpRequest porque fetch não
+ * informa o progresso do corpo. Sem prazo fixo: arquivos grandes podem levar minutos; `signal` cancela.
+ */
+export function uploadLocalVideo(
+  file: File,
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<UploadResult> {
+  return new Promise<UploadResult>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ApiError(0, "aborted", "Requisição cancelada."));
+      return;
+    }
+    const xhr = new XMLHttpRequest();
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener("abort", onAbort);
+    const done = () => signal?.removeEventListener("abort", onAbort);
+    xhr.open("POST", UPLOAD_URL);
+    xhr.setRequestHeader(CLIENT_HEADER, CLIENT_VALUE);
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.responseType = "text";
+    xhr.upload.onprogress = (e: ProgressEvent) => {
+      if (e.lengthComputable && e.total > 0) onProgress?.(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      done();
+      let payload: unknown;
+      try {
+        payload = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        payload = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && payload && typeof payload === "object") {
+        resolve(payload as UploadResult);
+        return;
+      }
+      const { detail, code } = extractDetail(payload);
+      const finalCode = code ?? `http_${xhr.status}`;
+      const extra = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+      // 413 aqui é o arquivo acima do teto: a mensagem do backend (com o limite) vale mais que a genérica.
+      const message =
+        finalCode === "payload_too_large" && detail ? detail : errorMessageFor(finalCode, xhr.status, detail);
+      reject(new ApiError(xhr.status, finalCode, message, detail, extra));
+    };
+    xhr.onerror = () => {
+      done();
+      // A conexão caiu no meio do envio: backend parado ou o arquivo recusado antes do fim (ex.: acima do teto).
+      reject(new ApiError(0, "upload_interrupted", UPLOAD_INTERRUPTED_TEXT));
+    };
+    xhr.onabort = () => {
+      done();
+      reject(new ApiError(0, "aborted", "Requisição cancelada."));
+    };
+    const form = new FormData();
+    form.append("file", file, file.name);
+    xhr.send(form);
+  });
+}
 
 export function messageOf(err: unknown): string {
   if (err instanceof ApiError) return err.message;

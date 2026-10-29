@@ -345,6 +345,22 @@ describe("cliente: baixar ZIP", () => {
     expect(job.mode).toBe("zip");
   });
 
+  it("createExport manda o conteúdo das versões editadas quando pedido", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 10, mode: "zip", status: "pending", content: "edited" }, 202));
+    const job = await api.createExport({
+      source: { kind: "batch", id: 41 },
+      destination: { zip: true },
+      content: "edited",
+    });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      source: { kind: "batch", id: 41 },
+      destination: { zip: true },
+      content: "edited",
+    });
+    expect(job.content).toBe("edited");
+  });
+
   it("sem espaço: erro 507 com a mensagem do backend", async () => {
     const detail = "Sem espaço em disco para preparar o ZIP: são necessários 18,6 GB e há 2,0 GB disponíveis.";
     fetchMock.mockResolvedValue(jsonResponse({ detail, code: "export_no_space" }, 507));
@@ -387,5 +403,151 @@ describe("cliente: retomada de exportações", () => {
       );
     expect((err as ApiError).code).toBe("export_already_running");
     expect((err as ApiError).payload?.export_id).toBe(31);
+  });
+});
+
+describe("cliente: edição e upload de vídeo local", () => {
+  const fetchMock = vi.fn();
+
+  class FakeXhr {
+    static last: FakeXhr | null = null;
+    method = "";
+    url = "";
+    headers: Record<string, string> = {};
+    body: unknown = null;
+    status = 0;
+    responseText = "";
+    responseType = "";
+    upload: { onprogress: ((e: { lengthComputable: boolean; loaded: number; total: number }) => void) | null } = {
+      onprogress: null,
+    };
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    aborted = false;
+    constructor() {
+      FakeXhr.last = this;
+    }
+    open(method: string, url: string) {
+      this.method = method;
+      this.url = url;
+    }
+    setRequestHeader(name: string, value: string) {
+      this.headers[name] = value;
+    }
+    send(body: unknown) {
+      this.body = body;
+    }
+    abort() {
+      this.aborted = true;
+      this.onabort?.();
+    }
+    respond(status: number, payload: unknown) {
+      this.status = status;
+      this.responseText = JSON.stringify(payload);
+      this.onload?.();
+    }
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+    FakeXhr.last = null;
+  });
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it("startEdit envia o corpo do contrato para /api/edits", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 12, preset_name: "Edição" }, 202));
+    const body = {
+      media_ids: [5, 6],
+      settings: { duration_mode: "15" as const, custom_seconds: null, speed: 1.25, sharpen: true, output_type: "mp4" as const },
+    };
+    const batch = await api.startEdit(body);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/edits");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["X-Media-Tool-Client"]).toBe("panel");
+    expect(JSON.parse(String(init.body))).toEqual(body);
+    expect(batch.id).toBe(12);
+  });
+
+  it("startEdit traduz edit_no_changes", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ detail: "x", code: "edit_no_changes" }, 422));
+    const err = await api.startEdit({
+      media_ids: [1],
+      settings: { duration_mode: "original", custom_seconds: null, speed: 1, sharpen: false, output_type: "auto" },
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect((err as ApiError).code).toBe("edit_no_changes");
+    expect((err as ApiError).message).toBe("Nenhuma edição selecionada.");
+  });
+
+  it("uploadLocalVideo monta FormData no campo file, usa a rota isenta e informa o progresso", async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], "meu vídeo.mp4", { type: "video/mp4" });
+    const progress: number[] = [];
+    const pending = api.uploadLocalVideo(file, (f) => progress.push(f));
+    const xhr = FakeXhr.last!;
+    expect(xhr.method).toBe("POST");
+    expect(xhr.url).toBe("/api/library/uploads");
+    expect(xhr.headers["X-Media-Tool-Client"]).toBe("panel");
+    expect(xhr.body).toBeInstanceOf(FormData);
+    const sent = (xhr.body as FormData).get("file");
+    expect(sent).toBeInstanceOf(File);
+    expect((sent as File).name).toBe("meu vídeo.mp4");
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 100 });
+    xhr.respond(200, { media: { id: 9 }, duplicate: true });
+    const result = await pending;
+    expect(progress).toEqual([0.5]);
+    expect(result.duplicate).toBe(true);
+    expect(result.media.id).toBe(9);
+  });
+
+  it("uploadLocalVideo: erro individual vira ApiError; 413 usa o texto do backend", async () => {
+    const file = new File([new Uint8Array([1])], "a.mp4");
+    const invalid = api.uploadLocalVideo(file).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    FakeXhr.last!.respond(422, { detail: "x", code: "invalid_media" });
+    expect((await invalid as ApiError).message).toBe("O arquivo enviado não é um vídeo válido.");
+
+    const big = api.uploadLocalVideo(file).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    FakeXhr.last!.respond(413, { detail: "Arquivo maior que o limite de 2,0 GB.", code: "payload_too_large" });
+    const err = (await big) as ApiError;
+    expect(err.status).toBe(413);
+    expect(err.message).toBe("Arquivo maior que o limite de 2,0 GB.");
+  });
+
+  it("uploadLocalVideo: conexão interrompida não vira 'backend offline'", async () => {
+    const pending = api.uploadLocalVideo(new File([new Uint8Array([1])], "a.mp4")).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    FakeXhr.last!.onerror?.();
+    const err = (await pending) as ApiError;
+    expect(err.code).toBe("upload_interrupted");
+    expect(err.message).toContain("2 GB");
+    expect(err.message).not.toContain("backend local");
+  });
+
+  it("uploadLocalVideo cancela pelo signal", async () => {
+    const controller = new AbortController();
+    const pending = api.uploadLocalVideo(new File([new Uint8Array([1])], "a.mp4"), undefined, controller.signal).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    controller.abort();
+    const err = (await pending) as ApiError;
+    expect(FakeXhr.last!.aborted).toBe(true);
+    expect(err.code).toBe("aborted");
   });
 });

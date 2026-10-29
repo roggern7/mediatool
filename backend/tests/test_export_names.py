@@ -15,6 +15,7 @@ from app.services.export_names import (
     export_extension,
     export_stem,
     file_name,
+    rendition_tag,
     safe_stem,
     sanitize_component,
 )
@@ -513,3 +514,62 @@ def test_long_path_destination_and_too_long_code(tmp_path, settings):
     finally:
         shutil.rmtree(ed.io_path(top), ignore_errors=True)
     assert code_of(str(tmp_path / "curto-que-nao-existe"), settings) == "export_dest_missing"
+
+
+# --------------------------------------------------------------------------- versões editadas
+
+
+EDIT = {"metadata_cleanup": False, "trim_start": 0.0, "mirror": False, "speed": 1.0, "auto_adjust": False,
+        "reencode": True, "max_duration": 0.0, "sharpen": False, "audio_sync_start": True}
+
+
+@pytest.mark.parametrize("changes, expected", [
+    ({"max_duration": 15.03, "speed": 1.5}, "_editado_15s_1.5x"),
+    ({"max_duration": 12.53}, "_editado_12.5s"),
+    ({"max_duration": 60.03, "speed": 1.25, "sharpen": True}, "_editado_60s_1.25x_nitido"),
+    ({"sharpen": True}, "_editado_nitido"),
+    ({}, "_editado"),   # só converter para MP4, sem outra mudança
+])
+def test_rendition_tag_for_edits(changes, expected):
+    assert rendition_tag({"preset_id": None, "preset_name": "Edição", "params": {**EDIT, **changes}}) == expected
+
+
+def test_rendition_tag_for_presets():
+    assert rendition_tag({"preset_id": 2, "preset_name": "Anti-duplicidade", "params": {"speed": 1.05}}) == \
+        "_Anti-duplicidade"
+    assert rendition_tag({"preset_id": 3, "preset_name": None, "params": {}}) == "_processado"
+    assert rendition_tag({"preset_id": 4, "preset_name": 'a/b:c*' + "x" * 80, "params": {}}) == (
+        "_a_b_c_" + "x" * 33)
+    for tag in (rendition_tag({"preset_id": 5, "preset_name": "Meu preset", "params": {}}),
+                rendition_tag({"preset_id": None, "preset_name": "Edição", "params": {**EDIT, "speed": 1.5}})):
+        assert len(tag) <= 40 and not set(tag) & INVALID
+
+
+def test_file_name_with_tag_keeps_the_tag_and_without_tag_is_unchanged():
+    stem = "p" * 200
+    for attempt in (1, 2, 137):
+        assert file_name(stem, ".mp4", attempt, tag="") == file_name(stem, ".mp4", attempt)
+        tagged = file_name(stem, ".mp4", attempt, tag="_editado_15s_1.5x")
+        suffix = "" if attempt == 1 else f" ({attempt})"
+        assert len(tagged) == MAX_NAME_LENGTH and tagged.endswith(f"_editado_15s_1.5x{suffix}.mp4")
+    assert file_name("nome", ".mp4", tag="_editado") == "nome_editado.mp4"
+    assert file_name("nome", ".mp4", 2, tag="_editado") == "nome_editado (2).mp4"
+
+
+def test_rendition_tag_of_a_deleted_preset_is_not_an_edit():
+    # Preset excluído: preset_id vira NULL (ON DELETE SET NULL), mas o nome continua o do preset.
+    assert rendition_tag({"preset_id": None, "preset_name": "Anti-duplicidade", "params": {"speed": 1.05}}) ==         "_Anti-duplicidade"
+    assert rendition_tag({"preset_id": None, "preset_name": None, "params": {"sharpen": True}}) == "_processado"
+    assert rendition_tag({"preset_id": 9, "preset_name": "Edição", "params": {"speed": 1.5}}) == "_Edição"
+
+
+def test_local_upload_stem_is_the_uploaded_name():
+    local = {"id": 3, "source_platform": "local", "source_profile": None, "source_post_id": None,
+             "source_media_index": 0, "original_sha256": "f" * 64, "taken_at": "2026-03-04T10:00:00Z"}
+    assert export_stem({**local, "original_filename": "clip.mp4"}) == "clip"
+    assert export_stem({**local, "original_filename": "meu vídeo.final.MOV"}) == "meu vídeo.final"
+    assert export_stem({**local, "original_filename": "CON.mp4"}) == "_CON"
+    assert export_stem({**local, "original_filename": "a:b?.mp4"}) == "a_b_"
+    # Sem nome enviado: o nome de sempre; mídia do Instagram nunca usa o nome do arquivo.
+    assert export_stem({**local, "original_filename": None}) == "midia_2026-03-04_ffffffffffff"
+    assert export_stem(media(original_filename="clip.mp4")) == export_stem(media())

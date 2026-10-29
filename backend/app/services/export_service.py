@@ -14,10 +14,12 @@ from typing import Any
 
 from app.core.errors import AppError, not_found
 from app.db.connection import utc_now
+from app.db.repositories.exports import export_content
 from app.jobs.export_runner import CANCELLED_MESSAGE, cleanup_default_folder
 from app.services import export_destination, export_zip
 from app.services.context import AppContext
 from app.services.export_destination import DestinationError, validate_destination
+from app.services.export_names import EDIT_PRESET_NAME
 from app.services.system_open import SystemOpenError, open_folder
 
 logger = logging.getLogger("media_tool.exports")
@@ -27,6 +29,12 @@ LAST_FOLDER_STATE_KEY = "export_last_folder"
 MAX_PENDING_EXPORTS = 20
 _OPEN_ERROR_STATUS = {"not_found": 404, "not_allowed": 403, "invalid_target": 422, "unsupported": 501}
 _COUNTS = ("total", "copied", "skipped_existing", "renamed", "missing", "failed")
+_EMPTY_MESSAGE = "Não há mídias para exportar nesta seleção."
+_EMPTY_EDITED_MESSAGE = {
+    "batch": "Este lote não tem versões editadas ou processadas.",
+    "group": "Esta importação não tem versões editadas ou processadas.",
+    "library": "Nenhuma das mídias selecionadas tem versões editadas ou processadas.",
+}
 
 
 def _export_not_found() -> AppError:
@@ -46,6 +54,7 @@ def export_out(export: dict[str, Any]) -> dict[str, Any]:
     mode = export.get("mode") or "folder"
     ready = mode == "zip" and export["status"] == "completed"
     data["mode"] = mode
+    data["content"] = export_content(export)
     if mode == "zip":
         data["dest_path"] = export.get("zip_name") or ""   # o caminho interno do temporário não sai pela API
     data["zip_name"] = export.get("zip_name") if mode == "zip" else None
@@ -96,13 +105,17 @@ def pick_folder(ctx: AppContext) -> dict[str, Any]:
     return {"cancelled": False, "token": ctx.export_tokens.issue(resolved), "path_display": str(resolved)}
 
 
-def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str, Any]) -> dict[str, Any]:
+def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str, Any],
+                  content: str = "originals") -> dict[str, Any]:
     kind = source["kind"]
     fields: dict[str, Any] = {"kind": kind}
+    edit_batch = False
     if kind == "batch":
-        if ctx.batches.get(source["id"]) is None:
+        batch = ctx.batches.get(source["id"])
+        if batch is None:
             raise not_found("Lote", "batch_not_found")
         fields["batch_id"] = source["id"]
+        edit_batch = batch["preset_id"] is None and batch["preset_name"] == EDIT_PRESET_NAME
     elif kind == "group":
         if ctx.batches.get_group(source["id"]) is None:
             raise not_found("Grupo de importação", "group_not_found")
@@ -125,6 +138,10 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
                 "max_id": int(ctx.db.scalar("SELECT COALESCE(MAX(id), 0) FROM media")),
                 "excluded": len(set(excluded)),
             }
+    if content != "originals":
+        # Fica no JSON `selection` (sem migração); `originals` não grava nada: o registro continua como antes.
+        fields["selection"] = {**(fields.get("selection") or {}), "content": content}
+    empty_message = _EMPTY_EDITED_MESSAGE[kind] if content == "edited" else _EMPTY_MESSAGE
 
     use_default = bool(destination.get("default"))
     use_zip = bool(destination.get("zip"))
@@ -144,8 +161,8 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
                 f"Já há {MAX_PENDING_EXPORTS} exportações na fila. Aguarde alguma terminar antes de pedir outra.",
             )
         if use_zip:
-            export = _create_zip(ctx, kind, fields)
-            logger.info("ZIP %s criado (%s, %s mídias)", export["id"], kind, export["total"])
+            export = _create_zip(ctx, kind, fields, content, empty_message, edit_batch)
+            logger.info("ZIP %s criado (%s, %s, %s arquivos)", export["id"], kind, content, export["total"])
             if ctx.export_runner is not None:
                 ctx.export_runner.wake()
             return export_out(export)
@@ -170,27 +187,29 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
         if export is None:
             if created is not None:
                 export_destination.remove_if_empty(created)   # pasta padrão recém-criada e vazia: não fica
-            raise AppError(409, "export_empty", "Não há mídias para exportar nesta seleção.")
+            raise AppError(409, "export_empty", empty_message)
         if not use_default:
             ctx.export_tokens.consume(destination["token"])
             ctx.app_settings.set_state(LAST_FOLDER_STATE_KEY, str(dest))
-    logger.info("Exportação %s criada (%s, %s mídias)", export["id"], kind, export["total"])
+    logger.info("Exportação %s criada (%s, %s, %s arquivos)", export["id"], kind, content, export["total"])
     if ctx.export_runner is not None:
         ctx.export_runner.wake()
     return export_out(export)
 
 
-def _create_zip(ctx: AppContext, kind: str, fields: dict[str, Any]) -> dict[str, Any]:
+def _create_zip(ctx: AppContext, kind: str, fields: dict[str, Any], content: str = "originals",
+                empty_message: str = _EMPTY_MESSAGE, edit_batch: bool = False) -> dict[str, Any]:
     """Cria a exportação em modo ZIP depois de conferir o espaço livre para o temporário: soma agregada de
     `file_size` + margem, contra o espaço livre menos a reserva dos downloads e menos o que os ZIPs já na fila ainda
     vão escrever (reserva lógica)."""
     if os.path.lexists(export_zip.zip_dir(ctx.settings)) and export_zip.safe_zip_dir(ctx.settings) is None:
         raise AppError(500, "internal_error", "A pasta de ZIPs temporários não pôde ser usada.")
     folder = export_zip.zip_dir(ctx.settings)
-    export = ctx.exports.create(dest_path=str(folder), mode="zip", zip_fields=export_zip.new_zip_fields(kind),
+    export = ctx.exports.create(dest_path=str(folder), mode="zip",
+                                zip_fields=export_zip.new_zip_fields(kind, content=content, edit_batch=edit_batch),
                                 **fields)
     if export is None:
-        raise AppError(409, "export_empty", "Não há mídias para exportar nesta seleção.")
+        raise AppError(409, "export_empty", empty_message)
     problem = export_zip.space_problem(ctx, export)
     if problem is not None:
         ctx.exports.delete(export["id"])

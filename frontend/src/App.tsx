@@ -3,6 +3,7 @@ import { ToastProvider } from "./components/Toasts";
 import { ROUTES, usePath } from "./lib/router";
 import { ImportPage } from "./pages/ImportPage";
 import { LibraryPage } from "./pages/LibraryPage";
+import { EditPage } from "./pages/EditPage";
 import { QueuePage } from "./pages/QueuePage";
 import { PresetsPage } from "./pages/PresetsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -18,6 +19,8 @@ function Page({ path }: { path: string }) {
       return <ImportPage />;
     case ROUTES.library:
       return <LibraryPage />;
+    case ROUTES.edit:
+      return <EditPage />;
     case ROUTES.queue:
       return <QueuePage />;
     case ROUTES.presets:

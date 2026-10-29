@@ -90,6 +90,51 @@ def files_in(folder: Path) -> list[str]:
     return sorted(path.name for path in folder.iterdir())
 
 
+EDIT_PARAMS = {"metadata_cleanup": False, "trim_start": 0.0, "mirror": False, "speed": 1.5, "auto_adjust": False,
+               "reencode": True, "max_duration": 15.03, "sharpen": False, "audio_sync_start": True}
+
+
+def seed_rendition(harness, media_id: int, *, params: dict, preset_name: str | None = "Edição",
+                   preset_id: int | None = None, ext: str = ".mp4", job_id: int | None = None,
+                   size: int | None = None) -> int:
+    """Uma versão (rendition) com arquivo próprio em `processed/...` do storage de teste (conteúdo único)."""
+    storage = harness.ctx.storage
+    serial = harness.ctx.db.scalar("SELECT COALESCE(MAX(id), 0) + 1 FROM renditions")
+    data = MAGIC["video"] + f"RENDITION-{media_id}-{serial}-{preset_name}".encode()
+    if size is not None:
+        data = (data * (size // len(data) + 1))[:size]
+    sha = hashlib.sha256(data).hexdigest()
+    relative = f"processed/2026/01/{sha[:2]}/{sha}{ext}"
+    path = storage.root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return harness.ctx.media.insert_rendition({
+        "media_id": media_id, "preset_id": preset_id, "preset_name": preset_name, "params": params,
+        "job_id": job_id, "processed_path": relative, "processed_sha256": sha, "file_size": len(data),
+    })
+
+
+def seed_edit_batch(harness, jobs: list[tuple[int, int | None]], *, params: dict, preset_id: int | None = None,
+                    preset_name: str = "Edição", stage: str = "done", group_id: int | None = None) -> int:
+    """Lote de processamento da Biblioteca (padrão: Edição, preset_id NULL) já encerrado: um job `process` por
+    `(media_id, rendition_id)`; com rendition o job está concluído (`stage`), sem rendition falhou."""
+    from app.db.connection import utc_now
+
+    batch_id = harness.ctx.batches.create(
+        source="library", status="completed", preset_id=preset_id, preset_name=preset_name, params=params,
+        process=True, group_id=group_id, group_position=0 if group_id is not None else None,
+    )
+    for media_id, rendition_id in jobs:
+        job_id = harness.ctx.jobs.create_process(media=harness.ctx.media.get(media_id), batch_id=batch_id,
+                                                 preset_id=preset_id, preset_name=preset_name, params=params)
+        harness.ctx.db.execute(
+            "UPDATE jobs SET status = ?, stage = ?, rendition_id = ?, finished_at = ? WHERE id = ?",
+            ("completed" if rendition_id else "failed", stage if rendition_id else "failed", rendition_id,
+             utc_now(), job_id),
+        )
+    return batch_id
+
+
 def seed_batch(harness, media_ids: list[int], *, profile: str = "semente") -> int:
     """Lote concluído cujas mídias estão só na relação durável `batch_media` (como um lote antigo, depois da
     retenção): origem distinta para testes de fila sem passar pela importação."""

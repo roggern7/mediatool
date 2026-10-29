@@ -15,6 +15,7 @@ import {
   forcesReencode,
   initialOptionalState,
   optionalSummary,
+  passthroughParams,
   validatePreset,
 } from "../lib/presets";
 import { useQuery } from "../lib/useQuery";
@@ -202,7 +203,9 @@ function PresetEditor({
   const [touched, setTouched] = useState(false);
   const [nameTaken, setNameTaken] = useState<string | null>(null);
 
-  const params = editorParams(flags, trimText, speedText, optional);
+  // Chaves da Edição (duração máx., nitidez, sincronia do áudio) não têm campo aqui, mas não podem sumir ao salvar.
+  const [passthrough] = useState(() => passthroughParams(start));
+  const params = editorParams(flags, trimText, speedText, optional, passthrough);
   const errors = validatePreset(name, params);
   const valid = Object.keys(errors).length === 0;
   const builtin = preset?.is_builtin ?? false;

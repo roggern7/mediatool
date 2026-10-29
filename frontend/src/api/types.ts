@@ -60,6 +60,11 @@ export interface PresetParams {
   trim_end?: number;
   pitch_shift?: number;
   grain?: number;
+  // Chaves da Edição (aceitas pela API em qualquer preset): limite de duração em s (0 = sem limite), nitidez e
+  // sincronia do áudio que começa depois do vídeo. Ausente = desligado.
+  max_duration?: number;
+  sharpen?: boolean;
+  audio_sync_start?: boolean;
 }
 
 export interface Preset {
@@ -553,6 +558,8 @@ export interface ExportJob extends LastExport {
   zip_ready?: boolean;
   zip_expires_at?: string | null;
   download_url?: string | null;
+  /** O que a exportação leva (ausente nas respostas antigas = "originals"). */
+  content?: ExportContent;
   kind: "batch" | "group" | "library";
   batch_id: number | null;
   group_id: number | null;
@@ -581,13 +588,45 @@ export type ExportSource =
 /** `token`: pasta escolhida no seletor nativo; `default`: pasta padrão criada pelo servidor em Documentos. */
 export type ExportDestination = { token: string } | { default: true } | { zip: true };
 
+/** O que a exportação leva: originais (padrão), versões editadas/processadas ou os dois. */
+export type ExportContent = "originals" | "edited" | "both";
+
 export interface ExportRequest {
   source: ExportSource;
   destination: ExportDestination;
+  /** Ausente = "originals" (o corpo antigo continua idêntico). */
+  content?: ExportContent;
 }
 
 export interface PickFolderResult {
   cancelled: boolean;
   token: string | null;
   path_display: string | null;
+}
+
+// ---- Edição de vídeos (POST /api/edits) e upload de vídeo local (POST /api/library/uploads) ----
+
+export type EditDurationMode = "original" | "15" | "30" | "60" | "custom";
+export type EditOutputType = "mp4" | "auto";
+
+export interface EditSettings {
+  duration_mode: EditDurationMode;
+  /** Obrigatório só em "custom" (segundos, > 0 e <= 7200); null nos demais. */
+  custom_seconds: number | null;
+  /** 1,0 a 1,5. */
+  speed: number;
+  sharpen: boolean;
+  output_type: EditOutputType;
+}
+
+export interface EditRequest {
+  /** 1 a 500 vídeos. */
+  media_ids: number[];
+  settings: EditSettings;
+}
+
+export interface UploadResult {
+  media: Media;
+  /** Conteúdo idêntico (sha256) a uma mídia já existente: nenhuma mídia nova foi criada. */
+  duplicate: boolean;
 }

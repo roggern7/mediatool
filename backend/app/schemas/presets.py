@@ -7,9 +7,9 @@ from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_seri
 from app.schemas.common import PresetName, StrictModel
 
 # Ajustes opcionais e seu valor neutro (desligado). Chave ausente = neutro.
-OPTIONAL_NEUTRALS: dict[str, float] = {
+OPTIONAL_NEUTRALS: dict[str, float | bool] = {
     "zoom": 0.0, "brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "trim_end": 0.0, "pitch_shift": 0.0,
-    "grain": 0.0,
+    "grain": 0.0, "max_duration": 0.0, "sharpen": False, "audio_sync_start": False,
 }
 
 
@@ -27,6 +27,10 @@ class PresetParams(StrictModel):
     trim_end: Annotated[float, Field(strict=True, ge=0, le=30, allow_inf_nan=False)] = 0.0
     pitch_shift: Annotated[float, Field(strict=True, ge=-3, le=3, allow_inf_nan=False)] = 0.0
     grain: Annotated[float, Field(strict=True, ge=0, le=4, allow_inf_nan=False)] = 0.0
+    # Edição (seção 9): duração alvo da saída em segundos (0 = sem corte) e nitidez leve.
+    max_duration: Annotated[float, Field(strict=True, ge=0, le=86400, allow_inf_nan=False)] = 0.0
+    sharpen: Annotated[bool, Field(strict=True)] = False
+    audio_sync_start: Annotated[bool, Field(strict=True)] = False  # início do áudio escalado pela velocidade
 
     @model_serializer(mode="wrap")
     def _omit_neutral(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:

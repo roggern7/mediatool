@@ -28,6 +28,7 @@ from .probe import ProbeResult, run_probe, video_stream
 from .remux import MUX_TIMEOUT
 from .remux import mux_streams as _mux_streams
 from .tools import ToolInfo, locate, popen_kwargs, tool_info
+from .verify import check_output_duration
 
 STDERR_LIMIT = 64 * 1024  # bytes de stderr mantidos (cauda)
 STDERR_SUMMARY = 1500  # caracteres de stderr incluídos na mensagem de erro
@@ -343,6 +344,7 @@ class MediaProcessor:
                     f"em um vídeo de {src_probe.duration:.2f}s)"
                 )
         p = commands.plan(src_probe, opts)
+        spans = commands.expected_spans(src_probe, opts)
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         tmp = _temp_path(dst)
@@ -363,6 +365,10 @@ class MediaProcessor:
                 raise ProcessingFailedError(f"saída inválida: {exc.message}") from exc
             if out_probe.media_type != src_probe.media_type:
                 raise ProcessingFailedError("saída inválida: tipo de mídia diferente da entrada")
+            if spans is not None:
+                problem = check_output_duration(out_probe, spans, src_probe.fps)
+                if problem is not None:
+                    raise ProcessingFailedError(f"duração final fora da tolerância: {problem}")
             try:
                 os.replace(tmp, dst)
             except OSError as exc:

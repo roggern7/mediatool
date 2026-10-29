@@ -53,6 +53,7 @@ from app.services.settings_service import (
     instagram_provider,
 )
 from app.services.storage import Storage
+from app.services.upload_service import UPLOAD_PATH
 
 logger = logging.getLogger("media_tool")
 
@@ -195,7 +196,8 @@ def create_app(
     )
     app.state.ctx = ctx
     install_error_handlers(app)
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES)
+    # O upload de vídeo local tem teto próprio (max_download_bytes) e lê o corpo em streaming.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES, exempt_paths=(UPLOAD_PATH,))
     # Origens do Vite (5173) só em modo de desenvolvimento; em produção só o próprio backend.
     install_security(app, port=settings.port, cors_origins=DEFAULT_CORS_ORIGINS if settings.dev_mode else ())
     app.include_router(api_router)

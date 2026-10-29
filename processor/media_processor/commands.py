@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .options import ProcessingOptions
-from .probe import PACKETS_DURATION_KEY, ProbeResult, audio_stream, parse_rate, video_stream
+from .probe import PACKETS_DURATION_KEY, ProbeResult, _float, audio_stream, parse_rate, video_stream
 
 X264_PRESET = "medium"
 X264_CRF = "20"
@@ -29,6 +29,9 @@ ALPHA_HINTS = ("yuva", "rgba", "argb", "bgra", "abgr", "gbrap", "ya8", "ya16")
 
 # Tags de stream zeradas no cleanup (o muxer mp4 deixa de gravar a tag quando vazia)
 CLEARED_STREAM_TAGS = ("encoder",)
+
+# Nitidez (sharpen): Contrast Adaptive Sharpening só na luma (não realça ruído de croma).
+SHARPEN_FILTER = "cas=strength=0.25:planes=1"
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,61 @@ def effective_trim_end(probe: ProbeResult, opts: ProcessingOptions) -> float:
     if probe.duration - opts.trim_start - opts.trim_end < MIN_DURATION_AFTER_TRIM_END:
         return 0.0
     return opts.trim_end
+
+
+def effective_max_duration(probe: ProbeResult, opts: ProcessingOptions) -> float | None:
+    """Duração alvo realmente aplicada à saída, ou None sem corte.
+
+    None em imagens, com max_duration desligado e quando a duração natural da saída (depois dos cortes e da
+    velocidade) já cabe no alvo: vídeo menor não é prolongado nem recortado.
+    """
+    if probe.media_type != "video" or opts.max_duration <= EPS or not probe.duration:
+        return None
+    natural = (probe.duration - opts.trim_start - effective_trim_end(probe, opts)) / opts.speed
+    if natural <= opts.max_duration + EPS:
+        return None
+    return opts.max_duration
+
+
+@dataclass(frozen=True)
+class StreamSpan:
+    """Início e fim esperados de uma stream na linha do tempo de saída (s). `end_known` False: a origem não informa
+    a duração da stream e o fim só tem limite superior."""
+
+    start: float
+    end: float
+    end_known: bool
+
+
+def expected_spans(probe: ProbeResult, opts: ProcessingOptions) -> dict[str, StreamSpan] | None:
+    """Spans esperados de vídeo e áudio quando há corte por duração alvo (None sem corte).
+
+    Cada stream mantém o próprio início (o ffmpeg só desconta o start_time do container, então o deslocamento entre
+    as streams é preservado) e termina em min(alvo, fim natural daquela stream): nenhuma é prolongada.
+    """
+    target = effective_max_duration(probe, opts)
+    if target is None:
+        return None
+    raw = probe.raw or {}
+    origin = _float((raw.get("format") or {}).get("start_time")) or 0.0
+    limit = (probe.duration or 0.0) - effective_trim_end(probe, opts)  # fim de origem após trim_end (relativo)
+    spans: dict[str, StreamSpan] = {}
+    streams = [("video", video_stream(raw))]
+    if probe.has_audio:
+        streams.append(("audio", audio_stream(raw)))
+    for kind, stream in streams:
+        if stream is None:
+            continue
+        # sem audio_sync_start o atempo mantém o início do áudio (não é dividido pela velocidade)
+        scale = 1.0 if kind == "audio" and not opts.audio_sync_start else opts.speed
+        start = _float(stream.get("start_time"))
+        start = 0.0 if start is None else max(start - origin, 0.0)
+        duration = _float(stream.get("duration"))
+        end = min(start + duration, limit) if duration else limit
+        out_start = max(start - opts.trim_start, 0.0) / scale
+        out_end = max(end - opts.trim_start, 0.0) / opts.speed
+        spans[kind] = StreamSpan(min(out_start, target), min(out_end, target), bool(duration))
+    return spans
 
 
 def _trim_args(probe: ProbeResult, opts: ProcessingOptions) -> str:
@@ -195,6 +253,9 @@ def _look_filters(probe: ProbeResult, opts: ProcessingOptions) -> list[str]:
     color = _color_args(opts)
     if color:
         chain.append("eq=" + ":".join(color))
+    if opts.sharpen and probe.media_type == "video":
+        # depois da cor e antes da granulação (a granulação não deve ser realçada); ignorado em imagens
+        chain.append(SHARPEN_FILTER)
     if opts.grain > EPS:
         g = _num(opts.grain)
         pix = str((video_stream(probe.raw) or {}).get("pix_fmt") or "")
@@ -219,6 +280,7 @@ def plan(probe: ProbeResult, opts: ProcessingOptions) -> Plan:
 
     duration = probe.duration or 0.0
     trim_end = effective_trim_end(probe, opts)
+    target = effective_max_duration(probe, opts)
     filters_active = (
         opts.trim_start > 0
         or opts.mirror
@@ -227,8 +289,12 @@ def plan(probe: ProbeResult, opts: ProcessingOptions) -> Plan:
         or _look_active(opts)
         or trim_end > 0
         or _pitch_factor(probe, opts) is not None
+        or opts.sharpen
+        or target is not None  # corte exato exige recodificar (stream copy só corta em keyframe)
     )
     encoded_duration = max(duration - opts.trim_start - trim_end, 0.0) / opts.speed
+    if target is not None:
+        encoded_duration = min(encoded_duration, target)
     if opts.reencode:
         return Plan("encode", ".mp4", "mp4", False, encoded_duration)
     if filters_active:
@@ -286,6 +352,10 @@ def video_filters(probe: ProbeResult, opts: ProcessingOptions) -> list[str]:
         if rate:
             # mantém o fps de origem (teto 60) em vez de inflar para fps*speed
             chain.append(f"fps={source if rate <= MAX_FPS else _num(MAX_FPS)}")
+    target = effective_max_duration(probe, opts)
+    if target is not None:
+        # corte na linha do tempo de saída (PTS já começam em 0 e já passaram pela velocidade)
+        chain.append(f"trim=end={_num(target)}")
     if opts.auto_adjust:
         chain.append("setsar=1")
     return chain
@@ -302,12 +372,18 @@ def audio_filters(probe: ProbeResult, opts: ProcessingOptions) -> list[str]:
     if pitch is None:
         if _speed_active(opts):
             chain += atempo_chain(opts.speed)
-        return chain
-    # asetrate muda tom e duração juntos (fator f); o atempo compensa para a velocidade final ser a do preset
-    factor, rate = pitch
-    chain += [f"asetrate={round(rate * factor)}", f"aresample={rate}"]
-    if abs(opts.speed / factor - 1.0) > EPS:
-        chain += atempo_chain(opts.speed / factor)
+    else:
+        # asetrate muda tom e duração juntos (fator f); o atempo compensa para a velocidade final ser a do preset
+        factor, rate = pitch
+        chain += [f"asetrate={round(rate * factor)}", f"aresample={rate}"]
+        if abs(opts.speed / factor - 1.0) > EPS:
+            chain += atempo_chain(opts.speed / factor)
+    if opts.audio_sync_start and _speed_active(opts):
+        # o atempo mantém o PTS inicial: o início do áudio também é dividido pela velocidade (como o setpts do vídeo)
+        chain.append(f"asetpts=PTS-STARTPTS+STARTPTS/{_num(opts.speed)}")
+    target = effective_max_duration(probe, opts)
+    if target is not None:
+        chain.append(f"atrim=end={_num(target)}")  # mesmo ponto do vídeo, depois do atempo (exato por amostra)
     return chain
 
 
@@ -382,6 +458,10 @@ def build(ffmpeg: str, src: Path, dst: Path, probe: ProbeResult, opts: Processin
             cmd += ["-filter:a", ",".join(af)]
         cmd += ["-c:v", "libx264", "-preset", X264_PRESET, "-crf", X264_CRF, "-profile:v", "high",
                 "-pix_fmt", "yuv420p"]
+        if effective_max_duration(probe, opts) is not None:
+            # Com corte, o encoder usa a time base dos filtros em vez de 1/fps: sem isso o PTS do vídeo é arredondado
+            # para a grade de quadros (vídeo que começa fora da grade desloca até meio quadro e o fim passa do alvo).
+            cmd += ["-enc_time_base:v", "filter"]
         if opts.metadata_cleanup:
             # remove NALs SEI (tipo 6): a SEI do x264 traz versão e opções do encoder em texto
             cmd += ["-bsf:v", "filter_units=remove_types=6"]

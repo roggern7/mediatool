@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { ExternalLink, FolderOpen, Trash2, Wand2, X } from "lucide-react";
 import { api, messageOf } from "../api/client";
-import type { Media, MediaType, MediaView, Preset, Rendition } from "../api/types";
+import type { ExportContent, Media, MediaType, MediaView, Preset, Rendition } from "../api/types";
 import { Link } from "../components/Layout";
-import { ExportStatus } from "../components/ExportPanel";
+import { ExportContentSelect, ExportStatus } from "../components/ExportPanel";
 import { PresetPickerDialog } from "../components/PresetPicker";
 import { ConfirmDialog, Empty, ErrorLine, Pill, SkeletonRows, Spinner, Thumb } from "../components/ui";
 import {
@@ -19,7 +19,7 @@ import {
 import { ACTIVE_BATCH, JOB_STATUS_LABEL, TERMINAL_JOB, jobTone } from "../lib/labels";
 import { MAX_BULK_PROCESS, canOfferSelectAll, processByFilterBody, withinBulkCap } from "../lib/filterSelection";
 import {
-  ORIGINALS_NOTE,
+  exportContentNote,
   exportSelectedLabel,
   initialLibrarySearch,
   isExportActive,
@@ -71,6 +71,9 @@ function presetNames(m: Media): string {
 export function LibraryPage() {
   const toast = useToast();
   const [view, setView] = useState<MediaView>("all");
+  // O que "Baixar ZIP"/"Exportar selecionados" levam; na visão "Originais" é sempre originais.
+  const [exportContentChoice, setExportContentChoice] = useState<ExportContent>("originals");
+  const exportContent: ExportContent = view === "originals" ? "originals" : exportContentChoice;
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   // "Ver na Biblioteca" de uma importação abre a tela já com a busca pelo perfil (?perfil=usuario).
   const [search, setSearch] = useState(() => initialLibrarySearch(window.location.search));
@@ -190,7 +193,7 @@ export function LibraryPage() {
   /** Exporta a seleção atual (ids da página ou todos os resultados do filtro, resolvidos no servidor). */
   function exportSelected(mode: "pick" | "zip" = "pick") {
     const source = librarySelectionSource({ allByFilter, view, typeFilter, q, selectedIds });
-    if (source) void exportFlow.start(source, mode);
+    if (source) void exportFlow.start(source, mode, exportContent);
   }
 
   async function runDialog(presetId?: number) {
@@ -333,6 +336,9 @@ export function LibraryPage() {
             <Wand2 size={13} strokeWidth={1.75} aria-hidden="true" />
             Processar com preset (opcional)
           </button>
+          {view !== "originals" ? (
+            <ExportContentSelect value={exportContentChoice} onChange={setExportContentChoice} />
+          ) : null}
           <button
             type="button"
             className="btn btn-sm"
@@ -347,7 +353,7 @@ export function LibraryPage() {
             type="button"
             className="btn btn-sm"
             disabled={total === 0 || exportFlow.busy || exportActive}
-            title={ORIGINALS_NOTE}
+            title={exportContentNote(exportContent)}
             aria-label={exportSelectedLabel(total)}
             onClick={() => exportSelected()}
           >
@@ -378,6 +384,9 @@ export function LibraryPage() {
             <Wand2 size={13} strokeWidth={1.75} aria-hidden="true" />
             Processar com preset (opcional)
           </button>
+          {view !== "originals" ? (
+            <ExportContentSelect value={exportContentChoice} onChange={setExportContentChoice} />
+          ) : null}
           <button
             type="button"
             className="btn btn-sm"
@@ -392,7 +401,7 @@ export function LibraryPage() {
             type="button"
             className="btn btn-sm"
             disabled={exportFlow.busy || exportActive}
-            title={ORIGINALS_NOTE}
+            title={exportContentNote(exportContent)}
             aria-label={exportSelectedLabel(selectedIds.length)}
             onClick={() => exportSelected()}
           >

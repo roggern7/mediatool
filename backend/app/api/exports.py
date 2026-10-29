@@ -115,7 +115,7 @@ def pick_folder(ctx: Ctx) -> dict[str, Any]:
 @router.post("/exports", response_model=ExportOut, status_code=202)
 def create_export(ctx: Ctx, body: ExportRequest) -> dict[str, Any]:
     payload = body.model_dump()
-    return export_service.create_export(ctx, payload["source"], payload["destination"])
+    return export_service.create_export(ctx, payload["source"], payload["destination"], payload["content"])
 
 
 @router.get("/exports", response_model=ExportList)
