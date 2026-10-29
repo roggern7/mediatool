@@ -109,10 +109,11 @@ class _CountingTransport(httpx.BaseTransport):
 
 
 class _NoSession:
-    """A POC não usa a sessão salva: qualquer leitura dela é erro de programação."""
+    """A POC não usa a sessão salva: o provider só a pede para a 2a tentativa de uma publicação restrita, e aqui
+    ela nunca existe (a publicação restrita termina em ``post_gated_logged_out``, sem 2a requisição)."""
 
     def get(self) -> Any:
-        raise RuntimeError("a POC do documento público não lê a sessão salva")
+        return None
 
 
 class _RecordingHttp:

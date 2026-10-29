@@ -20,7 +20,7 @@ from app.integrations.instagram.web.http import WebResponse
 from app.integrations.instagram.web.provider import InstagramWebDownloader
 from app.services import cdn_downloader
 from media_fakes import FakeInstagramDownloader
-from post_document_fixtures import media_node, post_page
+from post_document_fixtures import media_node, post_page, session_page
 from test_web_provider import FakeProvider
 
 OWNER = "dono_fake"
@@ -125,11 +125,14 @@ class ScriptedHttp:
     ``roots[shortcode]`` = nó da mídia (dict, embrulhado no envelope com o shortcode pedido), ``None`` (publicação
     inexistente: 404) ou ``str`` (corpo HTML cru). ``script[shortcode]`` = fila de respostas/erros consumida antes
     (``WebResponse`` | ``Exception`` | callable(shortcode)). A partir da 2a consulta do mesmo shortcode as URLs de
-    mídia trocam ``FAKE_OH`` por ``FRESH<n>`` (renovação). ``paths`` = path pedido em cada consulta."""
+    mídia trocam ``FAKE_OH`` por ``FRESH<n>`` (renovação). ``paths`` = path pedido em cada consulta.
+    ``logged=True``: o cliente com a sessão (aceita ``/reels/`` e serve o nó em ``xig_fetch_media``, como o
+    documento logado observado em 2026-10-29)."""
 
     cancel = None   # o provider grava aqui o cancelamento da operação
 
-    def __init__(self):
+    def __init__(self, *, logged: bool = False):
+        self.logged = logged
         self.roots: dict[str, object] = {}
         self.script: dict[str, list] = {}
         self.calls: list[str] = []
@@ -146,7 +149,8 @@ class ScriptedHttp:
 
     def get_document(self, path, *, referer=None, max_bytes=None, diagnostic_path=None):
         kind, shortcode = path.strip("/").split("/")
-        assert kind in ("p", "reel") and diagnostic_path == f"/{kind}/", path
+        kinds = ("p", "reel", "reels") if self.logged else ("p", "reel")
+        assert kind in kinds and diagnostic_path == f"/{kind}/", path
         with self._lock:
             self.in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self.in_flight)
@@ -170,7 +174,11 @@ class ScriptedHttp:
             if isinstance(root, str):
                 return document(200, root)
             # O envelope leva o shortcode da chave (na resposta trocada, o da OUTRA publicação).
-            text = post_page(root, code=key, noise=4)
+            if self.logged:
+                node = {k: v for k, v in root.items() if k != "__typename"}
+                text = session_page(node if key == shortcode else {**node, "code": key}, noise=4)
+            else:
+                text = post_page(root, code=key, noise=4)
             if n > 1:
                 text = text.replace("FAKE_OH", f"FRESH{n}")
             return document(200, text)
@@ -201,14 +209,26 @@ def _no_session_client(session):
 
 class WebSim:
     """Downloader real (``InstagramWebDownloader``) sobre ``ScriptedHttp`` + ``CdnSim``. O cliente das publicações é
-    o anônimo (``public_http_factory``); nenhum cliente com a sessão é criado para links."""
+    o anônimo (``public_http_factory``). Sem ``session_http`` nenhum cliente com a sessão pode ser criado; com ele, a
+    2a tentativa de uma publicação restrita usa esse ``ScriptedHttp`` (``session_clients`` conta as criações).
+    ``session=False``: nenhuma sessão salva."""
 
-    def __init__(self, base: dict[str, bytes], *, max_download_bytes: int = 50 * 1024 * 1024):
+    def __init__(self, base: dict[str, bytes], *, max_download_bytes: int = 50 * 1024 * 1024,
+                 session: bool = True, session_http: ScriptedHttp | None = None):
         self.http = ScriptedHttp()
         self.cdn = CdnSim(base)
+        self.session_http = session_http
+        self.session_clients = 0
+
+        def session_client(owner_session):
+            if session_http is None:
+                return _no_session_client(owner_session)
+            self.session_clients += 1
+            return session_http
+
         self.downloader = HybridWebDownloader(
-            FakeProvider(True), max_download_bytes=max_download_bytes, public_http_factory=lambda: self.http,
-            http_factory=_no_session_client,
+            FakeProvider(session), max_download_bytes=max_download_bytes, public_http_factory=lambda: self.http,
+            http_factory=session_client,
         )
         self.profile = FakeInstagramDownloader(refreshable=True)
         self.downloader.profile_fake = self.profile

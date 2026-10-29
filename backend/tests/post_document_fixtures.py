@@ -146,3 +146,44 @@ def post_html(scripts: list[str], *, noise: int = 38) -> str:
 def post_page(node: object, *, code: str | None = None, gating: object = None, noise: int = 38) -> str:
     """HTML completo de uma publicação: um envelope com ``node`` no meio do ruído."""
     return post_html([data_sjs_script(media_payload(envelope(node, code=code, gating=gating)))], noise=noise)
+
+
+# --------------------------------------------------------------------------- documento aberto COM a sessão
+# Estrutura observada em 2026-10-29 (só nomes; valores FAKE): o mesmo caminho ScheduledServerJS ->
+# RelayPrefetchedStreamCache -> __bbox.result.data, com `xig_fetch_media` = nó v1 (sem `__typename`) e, em outro
+# script, o feed de Reels `xdt_api__v1__clips__home__connection_v2.edges[i].node.media` (outras publicações).
+SESSION_PRELOADER = "adp_PolarisFakeLoggedInPostQueryRelayPreloader_fake0001"
+FEED_FIELD = "xdt_api__v1__clips__home__connection_v2"
+
+
+def session_media_node(code: str, owner: str = OWNER, *, sized: bool = True) -> dict:
+    """Nó de Reel como em ``xig_fetch_media``: sem ``__typename``; ``video_versions`` com largura/altura."""
+    node = media_node("video", code, owner)
+    del node["__typename"]
+    if sized:
+        sizes = ((720, 1280), (1080, 1920), (480, 852))
+        node["video_versions"] = [{**version, "width": w, "height": h}
+                                  for version, (w, h) in zip(node["video_versions"], sizes, strict=True)]
+    node["carousel_media"] = None
+    node["owner_id"] = "900000001"
+    return node
+
+
+def relay_payload(data: dict, *, preloader: object = SESSION_PRELOADER) -> dict:
+    return {"require": [["ScheduledServerJS", "handle", None, [{"__bbox": {"define": [], "require": [
+        ["RelayPrefetchedStreamCache", "next", [], [preloader, {"__bbox": {
+            "complete": True, "result": {"data": data, "extensions": {"is_final": True}}, "sequence_number": 0}}]],
+    ]}}]]]}
+
+
+def feed_payload(nodes: list[dict]) -> dict:
+    edges = [{"node": {"media": {**node, "__typename": "XDTMediaDict"}, "__typename": "XDTClipsItem"},
+              "cursor": f"FAKECURSOR{index}"} for index, node in enumerate(nodes)]
+    return relay_payload({FEED_FIELD: {"edges": edges, "page_info": {"has_next_page": True}}})
+
+
+def session_page(node: object, *, feed: list[dict] | None = None, noise: int = 38) -> str:
+    """HTML logado: ``xig_fetch_media`` = ``node`` (None = campo nulo) e, se ``feed``, o feed de Reels ANTES dele."""
+    scripts = [data_sjs_script(feed_payload(feed))] if feed else []
+    scripts.append(data_sjs_script(relay_payload({"xig_fetch_media": node})))
+    return post_html(scripts, noise=noise)

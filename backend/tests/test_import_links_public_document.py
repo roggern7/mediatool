@@ -221,9 +221,11 @@ def test_three_documents_without_the_envelope_in_a_row_stop_the_batch(harness_fa
 
 
 def test_gated_post_fails_the_link_without_arming_the_hold(harness_factory, base_media, audit_env):
+    """Sem sessão salva (com a sessão: test_import_links_session_document.py)."""
+    from audit_links_helpers import WebSim
     from post_document_fixtures import data_sjs_script, envelope, media_payload, post_html
 
-    h, sim = make_app(harness_factory, base_media, audit_env)
+    h, sim = make_app(harness_factory, base_media, audit_env, sim=WebSim(base_media, session=False))
     sim.http.roots[A] = post_html([data_sjs_script(media_payload(envelope(None, code=A)))], noise=2)
     sim.add("image", B)
     batch = create_links(h, [link(A), link(B)])

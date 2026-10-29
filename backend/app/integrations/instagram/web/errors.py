@@ -289,3 +289,32 @@ def classify_public_document(resp: WebResponse, *, stage: str = "post_document")
     if 200 <= status < 300:
         return None if html else err("contract_changed", _MSG_CONTRACT_CHANGED, "document_not_html")
     return err("contract_changed", _MSG_CONTRACT_CHANGED, f"http_{status}")
+
+
+def classify_session_document(resp: WebResponse, *, stage: str = "session_document") -> InstagramWebError | None:
+    """Resposta do GET do documento de UMA publicação COM a sessão do dono (2a tentativa de um link restrito no
+    documento público). Mesma classificação de ``classify_response`` (a da importação por perfil): checkpoint/
+    challenge -> ``checkpoint_required``; 429/"please wait" -> ``rate_limited``; redirect para login, 401 e
+    ``require_login`` -> ``request_auth_failed`` (o stage não é de bootstrap: não é evidência forte de sessão
+    expirada); ``Set-Cookie`` apagando o ``sessionid`` -> ``session_invalid``; restrição -> ``action_blocked``; outro
+    redirect e 403 -> ``access_refused``; 5xx -> ``network_error``. Diferenças: 2xx HTML é o documento utilizável
+    (``None``) e 2xx não-HTML (inclusive JSON válido) é ``contract_changed`` ``document_not_html``; 404 é ``content_unavailable``
+    ``post_http_404``. O caminho do ``Location`` não entra no diagnóstico (pode carregar o shortcode). O corpo HTML
+    nunca é varrido. NÃO VERIFICADO no real: nenhuma destas respostas foi observada com a sessão."""
+    error = classify_response(resp, stage=stage)
+    if error is None:
+        # 2xx que passou na classificação (ex.: JSON válido): o documento esperado é HTML.
+        if _is_html(resp.content_type):
+            return None
+        return InstagramWebError("contract_changed", _MSG_CONTRACT_CHANGED, stage=stage,
+                                 diagnostic={**_base_diagnostic(resp, stage), "detail": "document_not_html"})
+    error.diagnostic.pop("location_path", None)
+    detail = error.diagnostic.get("detail")
+    if detail == "invalid_json" and 200 <= resp.status < 300:
+        if _is_html(resp.content_type):
+            return None
+        error.diagnostic["detail"] = "document_not_html"
+    elif detail == "http_404":
+        return InstagramWebError("content_unavailable", _MSG_POST_NOT_FOUND, stage=stage,
+                                 diagnostic={**error.diagnostic, "detail": "post_http_404"})
+    return error

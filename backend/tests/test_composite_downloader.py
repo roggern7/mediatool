@@ -141,6 +141,16 @@ def test_resolve_post_forwards_path_kind_only_when_given():
     assert dl.resolve_post("ABCDE1", path_kind=None) == [] and web.resolve_kwargs == {}
 
 
+@pytest.mark.parametrize("strategy", ["web", "auto"])
+def test_resolve_post_forwards_use_session_false_only_to_the_web_provider(strategy):
+    web, gallery = Recording("web"), Recording("gallery")
+    dl = CompositeInstagramDownloader(web, gallery, strategy=strategy)
+    assert dl.resolve_post("ABCDE1", use_session=False) == [] and web.resolve_kwargs == {"use_session": False}
+    assert dl.resolve_post("ABCDE1", use_session=True) == [] and web.resolve_kwargs == {}
+    legacy = CompositeInstagramDownloader(web, gallery, strategy="gallery_dl")
+    assert legacy.resolve_post("ABCDE1", use_session=False) == [] and gallery.resolve_kwargs == {}
+
+
 @pytest.mark.parametrize("code, detail", [
     ("contract_changed", "post_envelope_missing"), ("contract_changed", "post_mismatch"),
     ("content_unavailable", "post_gated_logged_out"),

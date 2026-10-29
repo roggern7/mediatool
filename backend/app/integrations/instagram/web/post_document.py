@@ -96,9 +96,11 @@ def iter_json_scripts(html: str, *, max_scripts: int = MAX_SCRIPTS,
     yield from collector.scripts
 
 
-def _envelope_of(entry: object) -> tuple[str | None, dict] | None:
+def _envelope_of(entry: object, field: str = ROOT_FIELD,
+                 allow_null: bool = False) -> tuple[str | None, dict | None] | None:
     """``["RelayPrefetchedStreamCache", <ação>, <args>, [<preloader>, {"__bbox": {"result": {"data": {...}}}}]]``
-    -> (nome do preloader, ``data.xig_polaris_media``); None se a lista não for isso."""
+    -> (nome do preloader, ``data.<field>``; padrão ``xig_polaris_media``); None se a lista não for isso.
+    ``allow_null``: o campo presente com valor nulo também conta (devolve ``(preloader, None)``)."""
     if not isinstance(entry, list) or not entry or entry[0] != CACHE_MARKER:
         return None
     payload = entry[-1]
@@ -109,30 +111,33 @@ def _envelope_of(entry: object) -> tuple[str | None, dict] | None:
         bbox = item.get("__bbox") if isinstance(item, dict) else None
         result = bbox.get("result") if isinstance(bbox, dict) else None
         data = result.get("data") if isinstance(result, dict) else None
-        envelope = data.get(ROOT_FIELD) if isinstance(data, dict) else None
+        envelope = data.get(field) if isinstance(data, dict) else None
         if isinstance(envelope, dict):
             return preloader, envelope
+        if allow_null and isinstance(data, dict) and field in data and envelope is None:
+            return preloader, None
     return None
 
 
-def _walk(value: object, depth: int, found: list[tuple[str | None, dict]]) -> None:
+def _walk(value: object, depth: int, found: list, field: str = ROOT_FIELD, allow_null: bool = False) -> None:
     if depth > MAX_DEPTH:
         return
     if isinstance(value, list):
-        envelope = _envelope_of(value)
+        envelope = _envelope_of(value, field, allow_null)
         if envelope is not None:
             found.append(envelope)
             return
         for item in value:
             if isinstance(item, (list, dict)):
-                _walk(item, depth + 1, found)
+                _walk(item, depth + 1, found, field, allow_null)
     elif isinstance(value, dict):
         for item in value.values():
             if isinstance(item, (list, dict)):
-                _walk(item, depth + 1, found)
+                _walk(item, depth + 1, found, field, allow_null)
 
 
-def _load_scripts(scripts: Iterable[str]) -> tuple[int, int, list[tuple[str | None, dict]]]:
+def _load_scripts(scripts: Iterable[str], field: str = ROOT_FIELD,
+                  allow_null: bool = False) -> tuple[int, int, list[tuple[str | None, dict]]]:
     total = valid = 0
     found: list[tuple[str | None, dict]] = []
     for text in scripts:
@@ -142,7 +147,7 @@ def _load_scripts(scripts: Iterable[str]) -> tuple[int, int, list[tuple[str | No
         except (ValueError, RecursionError):
             continue   # script que não é JSON válido: contado e ignorado
         valid += 1
-        _walk(data, 0, found)
+        _walk(data, 0, found, field, allow_null)
     return total, valid, found
 
 
@@ -193,3 +198,40 @@ def parse_post_document(html: str, shortcode: str) -> tuple[Mapping | None, Post
         if isinstance(typename, str) and _TYPENAME_RE.fullmatch(typename) and typename != shortcode:
             parse.typename = typename
     return node, parse
+
+
+# --------------------------------------------------------------------------- documento aberto COM a sessão
+# VERIFICADO no Instagram real (2026-10-29, sessão do dono, UM Reel restrito sem login): ``/reels/<código>/`` aberto
+# com a sessão traz, no MESMO caminho ``RelayPrefetchedStreamCache`` -> ``__bbox.result.data``, o campo
+# ``xig_fetch_media`` = o nó da mídia no formato v1 (``code``, ``pk``, ``media_type``, ``video_versions`` com
+# largura/altura, ``video_dash_manifest``...; sem ``__typename``). Outro script traz o feed de Reels
+# (``xdt_api__v1__clips__home__connection_v2``, com OUTRAS publicações): nunca é lido. Não há ``xig_polaris_media``,
+# ``if_not_gated_logged_out`` nem ``gating_ruling`` nessa página.
+SESSION_ROOT_FIELD = "xig_fetch_media"          # observado com a sessão
+
+
+def parse_session_post_document(html: str, shortcode: str) -> tuple[Mapping | None, PostDocumentParse]:
+    """HTML do documento aberto com a sessão -> (nó ``xig_fetch_media`` cujo ``code`` é EXATAMENTE o pedido, ou None;
+    resumo seguro). ``outcome``: "ok"; "mismatch" (só nós de outra publicação); "gated" (o campo veio nulo e nenhum
+    nó do pedido: forma NÃO verificada, tratada como publicação ainda restrita); "envelope_missing"/"no_scripts".
+    Mesmos tetos de ``parse_post_document``; o feed de Reels e qualquer outro campo nunca viram mídia."""
+    parse = PostDocumentParse()
+    parse.scripts, parse.json_scripts, found = _load_scripts(iter_json_scripts(html), SESSION_ROOT_FIELD, True)
+    nodes = [node for _name, node in found if node is not None]
+    parse.envelopes = len(nodes)
+    if not parse.scripts:
+        return None, parse
+    chosen = next((node for node in nodes if node.get("code") == shortcode), None)
+    if chosen is not None:
+        parse.outcome = "ok"
+        typename = chosen.get("__typename")
+        if isinstance(typename, str) and _TYPENAME_RE.fullmatch(typename) and typename != shortcode:
+            parse.typename = typename
+        return chosen, parse
+    if nodes:
+        parse.outcome = "mismatch"
+    elif found:
+        parse.outcome = "gated"
+    else:
+        parse.outcome = "envelope_missing"
+    return None, parse

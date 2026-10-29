@@ -151,7 +151,8 @@ class InstagramDownloader(ABC):
     def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
                      path_kind: str | None = None) -> list[RemoteMedia]
         # todas as mídias da publicação; renova URLs expiradas. path_kind: "p" | "reel" (tipo do link de quem chama;
-        # obrigatório no provider web, ignorado no gallery-dl)
+        # obrigatório no provider web, ignorado no gallery-dl). Só o provider web (e o composite, que repassa) aceita
+        # também `use_session: bool = True`: False = sem a 2a tentativa com a sessão numa publicação restrita
     def download(self, item: RemoteMedia, dest_dir: Path, *, cancel=None, progress=None) -> Path  # em dest_dir (temp)
 class GalleryDlInstagramDownloader(InstagramDownloader):
     def __init__(self, session_provider: InstagramSessionProvider, *, python_executable: str = sys.executable,
@@ -942,14 +943,38 @@ seguir redirect; os dados vêm embutidos no HTML (`docs/INSTAGRAM_WEB_CONTRACT.m
 publicação"). A consulta por POST GraphQL que existia antes foi removida. A criação do lote continua exigindo sessão
 configurada (409 `session_missing`), como antes.
 
+**Publicação restrita: 2a tentativa com a sessão** (automática). Só quando o documento público vem restrito (o que
+antes terminava em `post_gated_logged_out`), o Media Tool abre o documento da publicação com a sessão salva, como o
+navegador logado abriria: Reel -> `GET /reels/<código>/` (o `/reel/` logado responde 302 para ele, verificado em
+2026-10-29); `/p/` -> `GET /p/<código>/`, seguindo no máximo UM redirect para a mesma publicação. É o cliente
+autenticado da importação por perfil (mesmos headers de navegador, mesmo portão, mesmo teto de páginas por hora;
+nunca POST/GraphQL); a mídia vem do nó `xig_fetch_media` da página logada (o feed de Reels dela é ignorado). Links
+públicos continuam sem sessão. Só tenta com sessão salva e sem pausa do Instagram (com pausa nada é enviado e o link
+segue `pending`). Resultado: publicação entregue -> importada como as outras (o log da publicação traz
+`via=session_document`); ainda restrita -> link `failed` com `content_unavailable` ("A publicação continua
+indisponível mesmo com a sessão: pode ser de conta privada que você não segue, removida ou restrita por
+região/idade."); página logada num formato que o Media Tool não lê -> link `failed` (`contract_changed`); nesses dois
+casos a sessão é desligada no resto do lote e a falha não conta no disjuntor `links_failing` (nem as dos
+restritos seguintes, com a sessão desligada); recusa (redirect para login/challenge/checkpoint, 401/403, 429, restrição, `sessionid` apagado) ou
+falha de rede -> sem nova tentativa, a política de sempre (`rate_limited`/`checkpoint_required`/
+`request_auth_failed`/`session_invalid`/`action_blocked` pausam o Instagram; `access_refused` arma a recusa em
+espera; rede -> backoff; o link segue `pending`; o diagnóstico traz `stage=session_document`) e a sessão deixa de
+ser usada no resto do lote: os links seguintes continuam pelo documento público e os restritos falham com
+`content_unavailable` ("A publicação exige login ou está restrita. Nesta importação o Instagram recusou a tentativa
+com a sessão salva (ou ela falhou), então o Media Tool não usa mais a sessão para os links restritos deste lote.
+Para tentar de novo com a sessão, importe este link em uma nova importação."). Esse desligamento fica só em memória
+(um reinício do app o desfaz). Sem sessão salva, a publicação restrita falha com `content_unavailable` ("A
+publicação exige login ou está restrita, e não há sessão do Instagram salva para tentar abri-la. Salve a sessão em
+Configurações e importe este link de novo."). NÃO VERIFICADO no Instagram real: o caminho `/p/` com a sessão, foto e
+carrossel pela sessão e as respostas de recusa.
+
 **Ressalva**: isso foi verificado no Instagram real só para UM Reel público sem login (2026-10-10). NÃO foram
 verificados: foto, carrossel, o caminho `/p/`, publicação restrita/privada, a melhor versão de vídeo (as versões
 vêm sem largura/altura; fica a primeira) e a qualidade de foto sem login (a capa do Reel veio com no máximo 640 px
 de largura; uma foto pode vir abaixo de 1080 px). O restante foi testado só offline, com respostas falsas; a prova
 desses casos depende de uma execução autorizada pelo dono (`scripts\poc-instagram-post.ps1`). Por isso existem as
-proteções abaixo (disjuntor `links_failing` e link que repete erro). Publicação que exige login não é importada: o
-link falha com `content_unavailable` ("A publicação exige login ou está restrita. O Media Tool não usa a sessão salva
-para abrir publicações por link.").
+proteções abaixo (disjuntor `links_failing` e link que repete erro). Publicação que exige login só é importada
+pela 2a tentativa com a sessão descrita acima.
 
 O usuário cola um ou vários links de publicações (um por linha) e o app baixa TODAS as mídias de cada publicação
 (foto, Reel, vídeo, carrossel inteiro). Vários links formam UM lote comum (`Batch` com `import_mode: "links"`,
@@ -1032,7 +1057,8 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
   `POST /api/batches/{id}/resume-listing`). Nesses estados o link da vez continua `pending` e nenhum outro é pedido.
 - Consulta recusada (`error_code: "access_refused"`) e a **recusa em espera** do lote: qualquer `access_refused`
   numa consulta de publicação do lote (na resolução de um link OU na renovação de um link de download vencido;
-  no documento público: qualquer redirect, inclusive para a tela de login, e HTTP 401/403)
+  no documento público: qualquer redirect, inclusive para a tela de login, e HTTP 401/403; na 2a tentativa com a
+  sessão de uma publicação restrita: redirect que não é para login/challenge/checkpoint e HTTP 403)
   arma UMA espera para o lote inteiro, gravada no próprio lote (`error_code: "access_refused"`; sem campo novo).
   Enquanto ela vale, o Media Tool não faz NENHUMA consulta ao Instagram por esse lote: o próximo link não é pedido e
   nenhum link de download é renovado; não há nova tentativa automática (nem a de 6 h, nem no reinício do app, nem
@@ -1096,9 +1122,10 @@ de importação, `null` para lotes de Biblioteca) e `links: {total, pending, res
 - Página da publicação sem os dados no formato conhecido (detalhe `post_envelope_missing`): o link vira `failed` com
   `error_code: "contract_changed"` e `error_message` "O Instagram abriu a página da publicação, mas sem os dados
   dela no formato que o Media Tool conhece. Nada foi importado deste link."; o lote segue para o próximo link (3
-  seguidos param o lote com `links_failing`). Publicação restrita (detalhe `post_gated_logged_out`) e inexistente
-  (HTTP 404, detalhe `post_http_404`): link `failed` com `error_code: "content_unavailable"`; não armam a recusa em
-  espera.
+  seguidos param o lote com `links_failing`). Publicação restrita (detalhes `post_gated_logged_out` sem sessão
+  salva, `post_gated_with_session` restrita mesmo com a sessão, `post_gated_session_off` sessão já recusada no lote)
+  e inexistente (HTTP 404, detalhe `post_http_404`): link `failed` com `error_code: "content_unavailable"`; não armam
+  a recusa em espera.
 - Limitações conhecidas da recusa em espera: (i) se o aplicativo é encerrado DURANTE a consulta de um link
   (requisição enviada, resposta ainda não recebida), o resultado é desconhecido e o link continua `pending`: ele é
   consultado de novo no próximo início (o índice único dos jobs descarta mídias repetidas); o mesmo vale para uma
