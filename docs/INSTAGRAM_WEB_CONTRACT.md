@@ -699,6 +699,63 @@ no RemoteMedia (o ffprobe mede depois). `is_reel` = post `product_type == "clips
 com contagem (não derruba a listagem); `media_type` desconhecido -> pulado e contado em `skipped_unsupported`.
 Conteúdo: reels = só itens `is_reel`; videos = itens vídeo; images = itens imagem; posts/all = tudo.
 
+### Contagem de visualizações (filtro de visualizações mínimas): aba Reels SEM login
+
+A listagem com a sessão (`PolarisProfilePostsQuery`) NÃO traz contagem de visualizações (VERIFICADO 2026-10-28:
+`play_count`/`ig_play_count` ausentes, `view_count` nulo). A fonte é a aba Reels do perfil aberta SEM login
+(`web/reels_tab.py`, `ReelsViews`), **VERIFICADA no Instagram real em 2026-10-29** (só nomes):
+
+- `GET /<usuario>/reels/` pelo cliente ANÔNIMO (`InstagramWebHttp.anonymous`, jar vazio, mesmo portão e teto de
+  páginas por hora; nenhum cookie da sessão viaja). O HTML embute num `<script type="application/json" data-sjs>` o
+  envelope `RelayPrefetchedStreamCache` com `data.xig_user_by_username` (`id`, `pk`, `polaris_clips_connection`
+  {`edges[].node`, `page_info` {`end_cursor`, `has_next_page`}}) e o marcador `LSD` (lido pela mesma regra do
+  bootstrap). A resposta define cookies anônimos (`csrftoken` etc.), guardados só no jar em memória.
+- Nó (`XIGPolarisVideoMedia`): `code`, `pk`, `id`, `play_count` (int; a contagem usada), `like_count`,
+  `comment_count`, `product_type`, `like_and_view_counts_disabled`, `clips_tab_pinned_user_ids`, `display_uri`,
+  `user`, `seo_canonical_url`. Sem `taken_at`/`media_type`/`video_versions`.
+- Páginas seguintes: `POST /api/graphql` form-urlencoded com `fb_api_req_friendly_name`
+  `PolarisLoggedOutDesktopWWWProfileReelsTabContentQuery_connection` e `doc_id` `27420265870989234`
+  (`web/queries.py`, `REELS_TAB_CONNECTION`; override por `instagram_web_doc_ids`/`MEDIA_TOOL_IG_DOC_<NOME>` como as
+  demais), `variables={"after", "first", "id"}`, `server_timestamps`, `fb_api_caller_class=RelayModern`, `lsd`;
+  headers `X-FB-LSD`, `X-CSRFToken` (cookie anônimo), `X-IG-App-ID`, `X-FB-Friendly-Name`, `X-ASBD-ID`,
+  `Origin`/`Referer` da aba. Resposta: `data.node.polaris_clips_connection`. O Media Tool pede `first=12` (o
+  navegador usa 4; 12 NÃO verificado); sem a conexão na resposta, a MESMA página é pedida uma vez com 4 e o tamanho
+  fica valendo para o resto do trecho.
+
+Regras: contagem = `play_count` `int` (não `bool`) >= 0; qualquer outra coisa é "sem contagem". Casamento pelo
+`code` da publicação. Páginas sob demanda: para um vídeo da listagem cujo código ainda não está no mapa, a próxima
+página da aba é pedida até achar o código, até `has_next_page` false ou até o menor `pk` NÃO fixado já visto na aba
+ser menor que o `pk` do item (a aba vai do mais novo para o mais antigo: o item não está nela -> "sem contagem").
+Reel fixado na aba (`clips_tab_pinned_user_ids` não vazio) não entra nesse menor `pk`. Erros: GET classificado por
+`classify_public_document` (3xx/401/403 -> `access_refused`, 429 -> `rate_limited`, 5xx -> `network_error`); POST por
+`classify_response`, com códigos de sessão/autenticação trocados por `access_refused` (não há sessão na requisição).
+Formato inesperado (sem envelope, sem conexão, `page_info` inválido, cursor ausente com próxima página, JSON inválido,
+404) -> `contract_changed` com a mensagem "Não foi possível ler as visualizações do perfil…" e detail `reels_tab_*`.
+Nada de cookie, token, cursor, código, id ou contagem em log ou diagnóstico (path fixo `/reels/`).
+
+NÃO VERIFICADO: `first=12`; aba de perfil privado, sem Reels ou restrito sem login (falha como formato inesperado e o
+lote para); se a aba contém TODOS os Reels do perfil (Reel fora dela vira "sem contagem").
+
+**Teste real de 2026-10-29 (segunda rodada; só nomes e ids de consulta):**
+- 1a página anônima (`GET /<usuario>/reels/`, envelope `xig_user_by_username`): FUNCIONA (12 Reels, `play_count`
+  inteiro).
+- Paginação anônima `PolarisLoggedOutDesktopWWWProfileReelsTabContentQuery_connection` (doc `27420265870989234`, POST
+  `/api/graphql`) a partir do Python: HTTP 429.
+- Consulta LOGADA da aba Reels `PolarisProfileReelsTabContentQuery` (doc `39368442709468666`, variáveis
+  `{data: {include_feed_video, page_size, target_user_id}, user_id}` + relay providers): `field_exception` em
+  `/graphql/query` e HTTP 429 em `/api/graphql`.
+- Conclusão: hoje o filtro de visualizações só enxergaria os 12 Reels mais recentes. Ele está DESLIGADO
+  (`import_service.MIN_VIEWS_ENABLED = False`: a API recusa `min_views` com 422 `min_views_unavailable`; e
+  `VIEWS_FILTER_ENABLED = false` no frontend esconde o campo e os contadores). O código da aba Reels continua no
+  lugar e testado com o interruptor ligado.
+
+### Período de postagem e publicações fixadas
+
+O período usa `taken_at` do nó da listagem (verificado presente em 2026-10-28). Fixação no perfil:
+`timeline_pinned_user_ids` (lista não vazia = fixada) — **NÃO verificado** na resposta real da listagem (inferido do
+formato v1). Sem o campo, o provider não sabe se a publicação é fixada e só encerra depois de 4 publicações seguidas
+mais antigas que o corte (o Instagram fixa no máximo 3).
+
 ## web/provider.py (builder-web-provider)
 
 `InstagramWebDownloader(InstagramDownloader)`, construtor com `session_provider`, `max_download_bytes`,

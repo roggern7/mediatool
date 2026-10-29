@@ -10,11 +10,13 @@ import {
   groupStatusLabel,
   groupSummary,
   groupTitle,
+  groupViewsText,
   profileProgressText,
   profileStateDetail,
   profileStateLabel,
 } from "../lib/importGroup";
 import { useNow } from "../lib/pause";
+import { visibleFilter } from "../lib/viewsFilter";
 import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
 import { groupExportOffer } from "../lib/exportFolder";
 import { ROUTES, navigate } from "../lib/router";
@@ -135,6 +137,11 @@ export function ImportGroupPanel({
       <div className="muted small" style={{ marginTop: 6 }} aria-live="polite">
         {groupSummary(group)}
       </div>
+      {groupViewsText({ ...group, views_filter: visibleFilter(group.views_filter) }) ? (
+        <div className="muted small" style={{ marginTop: 4 }}>
+          {groupViewsText({ ...group, views_filter: visibleFilter(group.views_filter) })}
+        </div>
+      ) : null}
       {attention ? (
         <div className="alert warn" role="status" style={{ marginTop: 10 }}>
           <span className="grow">{attention}</span>

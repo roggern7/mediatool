@@ -745,6 +745,48 @@ carrossel inválido ou faltando) fica em contadores PERSISTENTES do lote (migrat
   quando a página não tinha nenhum nó utilizável.
 - Providers sem checkpoint por página (gallery-dl) não informam descartes: os campos ficam zerados.
 
+### Filtros da importação por perfil (visualizações mínimas e período de postagem)
+**Estado (2026-10-29):** só o período está ativo. O filtro de visualizações está desligado por um interruptor único
+(`import_service.MIN_VIEWS_ENABLED` no backend, `VIEWS_FILTER_ENABLED` no frontend): a API recusa `min_views` com 422
+`min_views_unavailable`. As regras abaixo continuam valendo para quando ele for religado.
+Opcionais, só na importação por perfil e vários perfis (a importação por link não tem filtros), só no provider web
+(docs/CONTRACTS.md, seção 8.1). Desligados, nada muda: o runner nem repassa os argumentos e as colunas novas
+(migrations 0017 e 0019, só `ADD COLUMN` anuláveis) ficam NULL. Regras:
+- **Onde filtra:** dentro do provider web (`iter_profile_media(..., min_views=N, posted_after=corte)`), depois do
+  filtro de conteúdo e ANTES de contar e entregar o item: o provider só entrega o que vira job (a aritmética do
+  runner continua valendo; filtrar depois cairia em `LISTING_STALLED`).
+- **Período:** `posted_within_days` (1 a 3650) vira o corte `posted_after` (agora - N dias, UTC) UMA vez, na criação
+  (grupo: o mesmo corte para todos os filhos), gravado no lote; retomada, reinício do app e `restart-listing` usam
+  sempre o gravado. Publicação mais antiga que o corte, ou sem `taken_at`, não vira job (`out_of_period`). A listagem
+  vem da mais nova para a mais antiga: a primeira publicação NÃO fixada mais antiga que o corte ENCERRA a listagem
+  (checkpoint `has_next=False`, `period_end=True`, na mesma página; nenhuma página seguinte é pedida). Fixada é pulada
+  sem encerrar. Sem o campo de fixação no nó (não verificado; docs/INSTAGRAM_WEB_CONTRACT.md) encerra só depois de 4
+  publicações seguidas mais antigas que o corte; uma dentro do período zera a sequência; sem data não conta. O lote
+  grava `listing_period_end = 1` com o checkpoint, termina com `listing_end = 'profile_end'` (CHECK da 0012) sem a
+  mensagem de fim de perfil, e a API mostra `listing_end: "period_end"`.
+- **Visualizações:** `play_count` da aba Reels SEM login (docs/INSTAGRAM_WEB_CONTRACT.md), só para vídeos dentro do
+  período, com páginas da aba buscadas sob demanda. >= mínimo = `approved`; menor = `below`; fora da aba Reels ou
+  sem contagem = `no_count`; foto/carrossel sem vídeo com o filtro ligado = `no_count` (escolha documentada; a API só
+  aceita o filtro com `reels`/`videos`). "Sem contagem" nunca é baixado. "Últimos N" conta só aprovados.
+- **Requisições da aba Reels:** só com o filtro de visualizações ligado; cada uma passa pelo teto de páginas por hora
+  e pelo portão global (pausa publicada -> `InstagramPaused`, a listagem fica `paused`), e respeita o cancelamento.
+  Erro da aba sobe como erro da listagem e segue a política existente (429/recusa -> pausa/backoff do lote, sem retry
+  imediato); nunca há download sem o filtro. Formato inesperado -> `contract_changed` "Não foi possível ler as
+  visualizações do perfil…": sem nenhum job o lote falha com esse motivo; no meio do lote fica `needs_attention`.
+  O mapa código -> contagem, o cursor e o LSD vivem só durante o trecho: cada trecho novo relê a aba do começo até o
+  ponto necessário (custo extra conhecido em perfis grandes com muitas retomadas).
+- **Não duplicar (espelho dos descartes):** o `ListingCheckpoint` de cada página leva `page_views`
+  ({approved, below, no_count, out_of_period}) e o runner soma em `listing_views` na MESMA transação do checkpoint;
+  sem checkpoint, o estado da página aberta fica em `listing_views_partial` (página refeita sobrescreve, checkpoint
+  apaga; fim da listagem e cancelamento somam uma vez). Erro numa página sem checkpoint: `exc.listing_views`.
+  `restart-listing` zera `listing_views`, o parcial e `listing_period_end` (o corte não muda).
+- **Duplicatas:** o filtro roda antes do dedup; aprovado que já está na Biblioteca vira job duplicado (conta em
+  `approved`, não em `progress.downloaded`).
+- **API:** `views_filter = {min_views, posted_within_days, posted_after, analyzed, approved, below, no_count,
+  out_of_period, pending}` (`analyzed` = soma dos quatro). No grupo, soma dos filhos.
+- **Logs:** só totais (`views_approved=… views_below=… views_no_count=… out_of_period=… reels_pages=…` por trecho e
+  `filtros: N analisados, …` no fim). Nenhuma contagem individual, código, URL, cursor ou token.
+
 ## 10. Download-only é o padrão; processamento é opcional e separado
 
 O Media Tool é usado principalmente para BAIXAR os originais. O processamento por FFmpeg/presets continua disponível,

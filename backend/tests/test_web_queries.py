@@ -28,7 +28,18 @@ ENV_KEY = "MEDIA_TOOL_IG_DOC_POLARISPROFILEPOSTSQUERY"
 def test_profile_posts_spec_matches_contract():
     assert PROFILE_POSTS == QuerySpec("PolarisProfilePostsQuery", "28991540097136703",
                                       "xdt_api__v1__feed__user_timeline_graphql_connection", "2026-10-03", RELAY)
-    assert KNOWN_QUERIES == ("PolarisProfilePostsQuery", "PolarisPostActionLoadPostQueryQuery")
+    assert KNOWN_QUERIES == ("PolarisProfilePostsQuery", "PolarisLoggedOutDesktopWWWProfileReelsTabContentQuery_connection",
+                             "PolarisPostActionLoadPostQueryQuery")
+
+
+def test_reels_tab_spec_matches_contract_and_accepts_override():
+    from app.integrations.instagram.web.queries import REELS_TAB_CONNECTION, resolve_spec
+
+    assert REELS_TAB_CONNECTION == QuerySpec("PolarisLoggedOutDesktopWWWProfileReelsTabContentQuery_connection",
+                                             "27420265870989234", "node", "2026-10-29", {})
+    name = REELS_TAB_CONNECTION.name
+    assert resolve_spec(REELS_TAB_CONNECTION, {name: "1234567"}).doc_id == "1234567"
+    assert resolve_spec(REELS_TAB_CONNECTION, {}, {"MEDIA_TOOL_IG_DOC_" + name.upper(): "7654321"}).doc_id == "7654321"
 
 
 # --------------------------------------------------------------------------- consulta de post (REMOVIDA)

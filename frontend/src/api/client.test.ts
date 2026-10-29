@@ -115,6 +115,31 @@ describe("cliente: keyset, resumo do lote e processar por filtro", () => {
     });
   });
 
+  it("createImport/createImportGroup mandam min_views só quando o filtro está ligado", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ group: { id: 7 }, children: [], next_after_position: null }, 202));
+    await api.createImport({ profile: "p", content_type: "reels", limit: 10, preset_id: null, process: false });
+    await api.createImportGroup({
+      profiles: ["a", "b"],
+      content_type: "reels",
+      limit: 10,
+      preset_id: null,
+      process: false,
+      min_views: 500_000,
+    });
+    const [, first] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(String(first.body)).not.toContain("min_views");
+    const [url, second] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe("/api/import-groups");
+    expect(JSON.parse(String(second.body))).toEqual({
+      profiles: ["a", "b"],
+      content_type: "reels",
+      limit: 10,
+      preset_id: null,
+      process: false,
+      min_views: 500000,
+    });
+  });
+
   it("grupos: lista, detalhe paginado por after_position e cancelamento", async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ items: [], total: 0, next_before_id: null })));
     await api.listImportGroups(8);

@@ -80,27 +80,71 @@ def post_processing(
 
 
 WEB_ONLY_MESSAGE = (
-    "\"Todos\", \"Publicações do feed\" e quantidades acima de 5.000 exigem o método de importação web. O método "
-    "configurado (gallery-dl) não lista o perfil até o fim, para em 5.000 mídias e não conhece esse filtro. Troque o "
-    "método em Configurações ou escolha outra opção."
+    "\"Todos\", \"Publicações do feed\", quantidades acima de 5.000 e os filtros de visualizações mínimas e de "
+    "período de postagem exigem o método de importação web. O método configurado (gallery-dl) não lista o perfil até o "
+    "fim, para em 5.000 mídias e não conhece esses filtros. Troque o método em Configurações ou escolha outra opção."
+)
+# O filtro de visualizações mínimas é de VÍDEOS: só com conteúdo "Reels" ou "Vídeos" (fotos nunca entram nele).
+MIN_VIEWS_CONTENT_TYPES = ("reels", "videos")
+MIN_VIEWS_CONTENT_MESSAGE = (
+    "O filtro de visualizações mínimas só vale para vídeos: escolha o conteúdo \"Reels\" ou \"Vídeos\", ou "
+    "desligue o filtro."
 )
 
 
-def ensure_provider_supports(ctx: AppContext, content_type: str, limit: int | None) -> None:
-    """ "Todos" (`limit=None`), N acima de 5.000 e `photos_carousels` só existem no provider web: com o método
-    `gallery_dl` configurado a criação é recusada com erro claro (o legado truncaria em 5.000 itens, fingindo fim de
-    perfil, e recusa o filtro)."""
-    if web_only(content_type, limit) and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl":
+# Interruptor ÚNICO do filtro de visualizações mínimas (docs/INSTAGRAM_WEB_CONTRACT.md, "Contagem de visualizações"):
+# desligado, a API recusa `min_views` com 422 e nenhum lote novo usa o filtro. A paginação da aba Reels sem login
+# recebeu 429 no teste real de 2026-10-29, então o filtro só enxergaria os 12 Reels mais recentes. O backend do filtro
+# (provider, runner, contadores) continua intacto e testado com o interruptor ligado. Religar = True aqui e
+# VIEWS_FILTER_ENABLED no frontend (frontend/src/lib/viewsFilter.ts).
+MIN_VIEWS_ENABLED = False
+MIN_VIEWS_UNAVAILABLE_MESSAGE = "O filtro de visualizações ainda não está disponível."
+
+
+def ensure_provider_supports(ctx: AppContext, content_type: str, limit: int | None,
+                             min_views: int | None = None, posted_within_days: int | None = None) -> None:
+    """ "Todos" (`limit=None`), N acima de 5.000, `photos_carousels` e os filtros de visualizações mínimas e de período
+    de postagem só existem no provider web: com o método `gallery_dl` configurado a criação é recusada com erro claro
+    (o legado truncaria em 5.000 itens, fingindo fim de perfil, recusa o filtro de conteúdo, não expõe contagem de
+    visualizações e não encerra pelo período). O filtro de visualizações também exige conteúdo de vídeo."""
+    if min_views is not None and not MIN_VIEWS_ENABLED:
+        raise AppError(422, "min_views_unavailable", MIN_VIEWS_UNAVAILABLE_MESSAGE)
+    if min_views is not None and content_type not in MIN_VIEWS_CONTENT_TYPES:
+        raise AppError(422, "min_views_requires_video", MIN_VIEWS_CONTENT_MESSAGE)
+    period = None if posted_within_days is None else "on"
+    if (web_only(content_type, limit, min_views, period)
+            and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl"):
         raise AppError(422, "not_supported_by_provider", WEB_ONLY_MESSAGE)
+
+
+def filter_fields(min_views: int | None, posted_within_days: int | None) -> dict[str, Any]:
+    """Colunas dos filtros para `create`/`create_group`. O corte do período é calculado AQUI, uma vez (agora - N
+    dias, UTC) e gravado: retomada, reinício do app e "recomeçar listagem" usam sempre o mesmo corte. Sem filtro, nenhuma
+    chave (as chamadas de criação ficam idênticas às de antes)."""
+    fields: dict[str, Any] = {}
+    if min_views is not None:
+        fields["min_views"] = min_views
+    if posted_within_days is not None:
+        cutoff = utc_now(-posted_within_days * 86400)
+        fields["posted_within_days"] = posted_within_days
+        fields["posted_after"] = cutoff[:19] + "Z"   # "AAAA-MM-DDTHH:MM:SSZ" (sem milissegundos)
+    return fields
+
+
+def _filters_log(min_views: int | None, posted_within_days: int | None) -> str:
+    return ("" if min_views is None else f", min_views {min_views}") + (
+        "" if posted_within_days is None else f", últimos {posted_within_days} dias")
 
 
 def create_import(
     ctx: AppContext, *, profile: str, content_type: str, limit: int | None, preset_id: int | None, process: bool,
-    edit: EditSettings | None = None,
+    edit: EditSettings | None = None, min_views: int | None = None, posted_within_days: int | None = None,
 ) -> int:
     # `limit=None` = "Todos": a listagem vai até o fim real do perfil (docs/BATCH_ROBUSTNESS.md, seção 0.1).
+    # `min_views`: filtro de visualizações mínimas (só vídeos; None = desligado). `posted_within_days`: período de
+    # postagem (últimos N dias; None = qualquer data); o corte é calculado AGORA e gravado no lote.
     check_edit(edit, process=process, preset_id=preset_id)
-    ensure_provider_supports(ctx, content_type, limit)
+    ensure_provider_supports(ctx, content_type, limit, min_views, posted_within_days)
     try:
         username = parse_profile_input(profile)
     except ValueError as exc:
@@ -120,8 +164,10 @@ def create_import(
             content_type=content_type,
             requested_limit=limit,
             **fields,
+            **filter_fields(min_views, posted_within_days),
         )
-    logger.info("Lote %s criado: importação de %s (%s, limite %s)", batch_id, username, content_type, limit)
+    logger.info("Lote %s criado: importação de %s (%s, limite %s%s)", batch_id, username, content_type, limit,
+                _filters_log(min_views, posted_within_days))
     ctx.wake_import_runner()
     return batch_id
 
@@ -192,13 +238,15 @@ def parse_profile_entries(entries: list[str]) -> tuple[list[str], list[dict[str,
 
 def create_import_group(
     ctx: AppContext, *, profiles: list[str], content_type: str, limit: int | None, preset_id: int | None,
-    process: bool, edit: EditSettings | None = None,
+    process: bool, edit: EditSettings | None = None, min_views: int | None = None,
+    posted_within_days: int | None = None,
 ) -> tuple[int, list[dict[str, str]], int]:
-    """Uma importação pai e um lote filho por perfil (na ordem da lista; `limit` é POR PERFIL). Retorna
-    (id do grupo, perfis pulados por já terem importação ativa, repetições removidas). Com `edit`, o grupo e todos
-    os filhos são lotes de Edição."""
+    """Uma importação pai e um lote filho por perfil (na ordem da lista; `limit`, `min_views` e o período valem POR
+    PERFIL). Retorna (id do grupo, perfis pulados por já terem importação ativa, repetições removidas). Com `edit`, o
+    grupo e todos os filhos são lotes de Edição. O corte do período é calculado UMA vez, na criação, e o mesmo vale
+    para todos os filhos."""
     check_edit(edit, process=process, preset_id=preset_id)
-    ensure_provider_supports(ctx, content_type, limit)
+    ensure_provider_supports(ctx, content_type, limit, min_views, posted_within_days)
     valid, invalid, duplicates = parse_profile_entries(profiles)
     if invalid:
         raise AppError(422, "invalid_profiles",
@@ -214,6 +262,8 @@ def create_import_group(
         "requested_limit": limit,
         **post_processing(ctx, preset_id=preset_id, process=process, edit=edit),
     }
+    # Um único corte para o grupo e todos os filhos (calculado uma vez, aqui).
+    fields.update(filter_fields(min_views, posted_within_days))
     # Conferência e criação na mesma transação (como em create_import): um perfil nunca ganha duas listagens.
     with ctx.db.transaction():
         importing = ctx.batches.open_listing_profiles()
@@ -226,8 +276,8 @@ def create_import_group(
         for position, username in enumerate(pending, start=1):
             ctx.batches.create(source="instagram_import", status="listing", source_profile=username,
                                group_id=group_id, group_position=position, **fields)
-    logger.info("Grupo %s criado: %s perfis (%s, limite por perfil %s; %s pulados)", group_id, len(pending),
-                content_type, limit, len(skipped))
+    logger.info("Grupo %s criado: %s perfis (%s, limite por perfil %s%s; %s pulados)", group_id, len(pending),
+                content_type, limit, _filters_log(min_views, posted_within_days), len(skipped))
     ctx.wake_import_runner()
     return group_id, skipped, duplicates
 
@@ -344,6 +394,8 @@ def _cancel_batch_rows(ctx: AppContext, batch_id: int, status: str) -> list[int]
     # Descartes da página que estava aberta (sem checkpoint): a página não será refeita, então são perda real do
     # que já tinha sido listado; somam uma única vez (o parcial é apagado na mesma instrução).
     ctx.batches.add_listing_dropped(batch_id, merge_partial=True)
+    # Idem para os vereditos do filtro de visualizações (lote sem filtro não é tocado).
+    ctx.batches.add_listing_views(batch_id, merge_partial=True)
     return running
 
 

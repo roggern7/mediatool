@@ -13,6 +13,8 @@ import {
   planImport,
   profilesCountText,
 } from "./importOptions";
+import { formatCount } from "./format";
+import { type MinViewsChoice, type PeriodChoice, periodSummary } from "./viewsFilter";
 
 /** Resposta da pré-validação, com a lista (chave) para a qual ela foi pedida. */
 export interface PreviewResult<T = ProfilesPreview> {
@@ -46,19 +48,31 @@ export function settledPreview<T = ProfilesPreview>(input: {
 
 export const WEB_ONLY_MESSAGE =
   "“Todos” e “Publicações do feed” exigem o método de importação web. Troque o método em Configurações > Instagram.";
+export const MIN_VIEWS_WEB_ONLY_MESSAGE =
+  "O filtro de visualizações mínimas exige o método de importação web. Troque o método em Configurações > " +
+  "Instagram ou desligue o filtro.";
 
 /**
- * Com o método legado gallery-dl configurado, "Todos" e "Publicações do feed" são recusados pela API
- * (422 not_supported_by_provider): avisa antes de enviar. Com `auto`/`web` (ou sem a informação), null.
+ * Com o método legado gallery-dl configurado, "Todos", "Publicações do feed" e o filtro de visualizações mínimas
+ * são recusados pela API (422 not_supported_by_provider): avisa antes de enviar. Com `auto`/`web` (ou sem a
+ * informação), null.
  */
 export function providerBlocker(
   provider: InstagramProvider | null | undefined,
   content: ContentType,
   allSelected: boolean,
+  minViews: number | null = null,
+  postedWithinDays: number | null = null,
 ): string | null {
   if (provider !== "gallery_dl") return null;
-  return allSelected || content === "photos_carousels" ? WEB_ONLY_MESSAGE : null;
+  if (allSelected || content === "photos_carousels") return WEB_ONLY_MESSAGE;
+  if (minViews !== null) return MIN_VIEWS_WEB_ONLY_MESSAGE;
+  return postedWithinDays !== null ? PERIOD_WEB_ONLY_MESSAGE : null;
 }
+
+export const PERIOD_WEB_ONLY_MESSAGE =
+  "O filtro de período de postagem exige o método de importação web. Troque o método em Configurações > " +
+  "Instagram ou escolha \u201cQualquer data\u201d.";
 
 export type StartBlocker =
   | "submitting"
@@ -67,6 +81,8 @@ export type StartBlocker =
   | "no_preview"
   | "no_valid"
   | "limit"
+  | "min_views"
+  | "period"
   | "preset"
   | "edit"
   | "provider";
@@ -79,6 +95,10 @@ export interface StartState {
   /** Resultado de `settledPreview` (null enquanto confere ou em erro). */
   preview: ProfilesPreview | null;
   limit: LimitChoice;
+  /** Resultado de `resolveMinViews` (ausente = sem filtro). */
+  minViews?: MinViewsChoice;
+  /** Resultado de `resolvePeriod` (ausente = qualquer data). */
+  period?: PeriodChoice;
   process: boolean;
   presetId: number | null;
   /** "Editar após baixar" com o formulário inválido (`editProblemOf`); ausente/null = sem problema. */
@@ -95,6 +115,8 @@ export function startBlocker(s: StartState): StartBlocker | null {
   if (s.preview === null) return "no_preview";
   if (s.preview.valid.length === 0) return "no_valid";
   if (!s.limit.ok) return "limit";
+  if (s.minViews && !s.minViews.ok) return "min_views";
+  if (s.period && !s.period.ok) return "period";
   if (!canSubmitImport(s.process, s.presetId)) return "preset";
   if (s.editProblem) return "edit";
   if (s.providerProblem !== null) return "provider";
@@ -117,12 +139,28 @@ export function startSummary(input: {
   preview: ProfilesPreview | null;
   limit: LimitChoice;
   content: ContentType;
+  minViews?: MinViewsChoice;
+  period?: PeriodChoice;
 }): StartSummary | null {
-  const { preview, limit, content } = input;
+  const { preview, limit, content, minViews, period } = input;
   if (preview === null || preview.valid.length === 0) return null;
   if (!limit.ok) return { kind: "problem", text: `Quantidade por perfil: ${limit.error}` };
+  if (minViews && !minViews.ok) return { kind: "problem", text: `Visualizações mínimas: ${minViews.error}` };
+  if (period && !period.ok) return { kind: "problem", text: `Período de postagem: ${period.error}` };
   const options = { profiles: preview.valid.length, content, limit: limit.limit };
-  return { kind: "summary", text: importSummary(options), hints: importHints(options) };
+  let text = importSummary(options);
+  const hints = importHints(options);
+  if (minViews && minViews.minViews !== null) {
+    text += ` • Mín. ${formatCount(minViews.minViews)} visualizações`;
+    hints.push(
+      "Só vídeos com contagem de visualizações disponível e no mínimo pedido são baixados; “Últimos N” conta só os aprovados.",
+    );
+  }
+  if (period && period.days !== null) {
+    text += ` • ${periodSummary(period.days)}`;
+    hints.push("Publicações mais antigas que o período não são baixadas; a listagem para ao chegar nelas.");
+  }
+  return { kind: "summary", text, hints };
 }
 
 /**
@@ -137,9 +175,15 @@ export function planFromPreview(
     processAfterDownload: boolean;
     presetId: number | null;
     edit?: EditSettings | null;
+    /** Ausente = sem filtro (o corpo omite `min_views`). */
+    minViews?: MinViewsChoice;
+    /** Ausente = qualquer data (o corpo omite `posted_within_days`). */
+    period?: PeriodChoice;
   },
 ): ImportPlan | null {
   if (preview === null || !options.limit.ok) return null;
+  if (options.minViews && !options.minViews.ok) return null;
+  if (options.period && !options.period.ok) return null;
   return planImport({
     profiles: preview.valid,
     content: options.content,
@@ -147,6 +191,8 @@ export function planFromPreview(
     processAfterDownload: options.processAfterDownload,
     presetId: options.presetId,
     edit: options.edit,
+    minViews: options.minViews?.minViews ?? null,
+    postedWithinDays: options.period?.ok ? options.period.days : null,
   });
 }
 

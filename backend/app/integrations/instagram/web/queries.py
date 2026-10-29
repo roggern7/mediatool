@@ -43,12 +43,20 @@ PROFILE_POSTS = QuerySpec(
      "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": False},
 )
 
+# Páginas seguintes da aba Reels do perfil SEM login (filtro de visualizações mínimas; web/reels_tab.py). VERIFICADO
+# no Instagram real em 2026-10-29: POST anônimo com `variables={"after", "first", "id"}` responde em
+# `data.node.polaris_clips_connection`. A 1a página vem embutida no HTML de `/<usuario>/reels/`.
+REELS_TAB_CONNECTION = QuerySpec(
+    "PolarisLoggedOutDesktopWWWProfileReelsTabContentQuery_connection", "27420265870989234",
+    "node", "2026-10-29", {},
+)
+
 # Consultas desativadas: o nome continua válido em `instagram_web_doc_ids` e em `MEDIA_TOOL_IG_DOC_<NAME>` /
 # `MEDIA_TOOL_IG_ROOT_<NAME>` (configuração salva antes da remoção), mas nenhum valor é usado.
 DISABLED_QUERY_NAMES: tuple[str, ...] = ("PolarisPostActionLoadPostQueryQuery",)
 
 # Nomes aceitos em `instagram_web_doc_ids` (o schema valida contra esta lista).
-KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, *DISABLED_QUERY_NAMES)
+KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, REELS_TAB_CONNECTION.name, *DISABLED_QUERY_NAMES)
 
 _disabled_override_logged = False
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -16,6 +16,12 @@ from app.schemas.media import MediaDeleteResult
 ContentType = Literal["reels", "posts", "videos", "images", "all", "photos_carousels"]
 # "Últimos N": inteiro positivo livre (o máximo só rejeita lixo). `null` = "Todos": até o fim real do perfil.
 ImportLimit = Annotated[int, Field(strict=True, ge=1, le=MAX_IMPORT_LIMIT)]
+# Filtro de visualizações mínimas (só vídeos: content_type "reels" ou "videos"; só o método web). Inteiro estrito:
+# "500000", 5e5, true, 0 e negativo são 422. Omitido ou `null` = sem filtro.
+ImportMinViews = Annotated[int, Field(strict=True, ge=1, le=10_000_000_000)]
+# Período de postagem: "últimos N dias" (1 a 3650; inteiro estrito). Omitido ou `null` = qualquer data. Só importação
+# por perfil (e vários perfis); a importação por link não tem filtros.
+ImportPostedWithinDays = Annotated[int, Field(strict=True, ge=1, le=3650)]
 
 
 class ImportRequest(StrictModel):
@@ -29,6 +35,8 @@ class ImportRequest(StrictModel):
     # "Editar após baixar": cada vídeo baixado ganha a versão editada (as mesmas configurações de POST /edits).
     # Exclusivo com o preset: `edit` junto com `process: true` ou `preset_id` = 422 `edit_with_preset`.
     edit: EditSettings | None = None
+    min_views: ImportMinViews | None = None
+    posted_within_days: ImportPostedWithinDays | None = None
 
 
 class ProfilesPreviewRequest(StrictModel):
@@ -57,6 +65,8 @@ class ImportGroupRequest(StrictModel):
     preset_id: PositiveId | None = None
     process: bool = Field(default=False, strict=True)
     edit: EditSettings | None = None   # aplicada a todos os lotes filhos
+    min_views: ImportMinViews | None = None   # POR PERFIL
+    posted_within_days: ImportPostedWithinDays | None = None   # o mesmo corte para todos os perfis
 
 
 class LinksPreviewRequest(StrictModel):
@@ -83,6 +93,10 @@ class ImportLinksRequest(StrictModel):
     preset_id: PositiveId | None = None
     process: bool = Field(default=False, strict=True)
     edit: EditSettings | None = None
+    # Filtros só existem na importação por perfil: aceitos no schema apenas para responder 422 `filters_profile_only`
+    # com mensagem clara (qualquer valor não nulo é recusado em api/imports.py).
+    min_views: Any = None
+    posted_within_days: Any = None
 
 
 class HistoryHideRequest(StrictModel):
@@ -162,6 +176,23 @@ class ListingDropped(BaseModel):
     pending: int = 0
 
 
+class ViewsFilterOut(BaseModel):
+    # Filtros da importação por perfil (visualizações mínimas e/ou período de postagem): mídias analisadas
+    # (= approved + below + no_count + out_of_period) por veredito. `approved` = passou em todos os filtros ligados; não
+    # é "baixados": mídia aprovada que já está na Biblioteca vira job duplicado (o número real está em
+    # progress.downloaded). `below`/`no_count` só com `min_views`; `out_of_period` só com o período. `pending`: parte
+    # dos analisados que ainda é da página aberta (sem checkpoint).
+    min_views: int | None = None
+    posted_within_days: int | None = None
+    posted_after: str | None = None   # corte gravado na criação (UTC)
+    analyzed: int = 0
+    approved: int = 0
+    below: int = 0
+    no_count: int = 0
+    out_of_period: int = 0
+    pending: int = 0
+
+
 class BatchOut(BaseModel):
     id: int
     source: Literal["instagram_import", "library"]
@@ -195,7 +226,10 @@ class BatchOut(BaseModel):
     listing_dropped: ListingDropped = Field(default_factory=ListingDropped)
     # Por que a listagem terminou: "profile_end" (fim real do perfil; pode ter menos que o pedido) ou "limit"
     # (quantidade pedida atingida). None enquanto lista, em erro/cancelamento e em lotes antigos.
-    listing_end: Literal["profile_end", "limit"] | None = None
+    # "period_end": a listagem chegou às publicações mais antigas que o corte do período de postagem.
+    listing_end: Literal["profile_end", "limit", "period_end"] | None = None
+    # Filtro de visualizações mínimas do lote; None = sem filtro (lotes antigos e criados sem ele).
+    views_filter: ViewsFilterOut | None = None
     # Como o lote foi criado: "profile" (importação por perfil), "links" (importação por link) ou None (Biblioteca).
     import_mode: Literal["profile", "links"] | None = None
     # Só em lote por link: quantos links há e em que estado (lista: GET /api/batches/{id}/links).
@@ -252,9 +286,12 @@ class ImportGroupOut(BaseModel):
     attention: bool
     profiles: GroupProfiles
     # Filhos cuja listagem chegou ao fim real do perfil.
-    profile_end_count: int
+    profile_end_count: int   # filhos que chegaram ao fim REAL do perfil (sem os que pararam pelo período)
+    period_end_count: int = 0   # filhos cuja listagem terminou pelo corte do período de postagem
     progress: BatchProgress
     listing_dropped_total: int
+    # Filtro de visualizações mínimas do grupo (soma dos filhos); None = sem filtro.
+    views_filter: ViewsFilterOut | None = None
     # Última exportação para pasta CONCLUÍDA do grupo inteiro (None se nunca foi exportado).
     last_export: LastExport | None = None
 

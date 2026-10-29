@@ -40,6 +40,7 @@ import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
 import { navigate, ROUTES, useSearch } from "../lib/router";
 import { useQuery } from "../lib/useQuery";
 import { useToast } from "../lib/toast";
+import { viewsFilterText, visibleFilter } from "../lib/viewsFilter";
 
 const PAGE_SIZE = 100;
 
@@ -394,6 +395,11 @@ function BatchHeader({
       ) : error ? (
         <div style={{ marginTop: 6 }}>
           <ErrorLine message={error} onRetry={onRetry} />
+        </div>
+      ) : null}
+      {batch && viewsFilterText(visibleFilter(batch.views_filter), batch.progress.downloaded) ? (
+        <div className="muted small" style={{ marginTop: 4 }}>
+          {viewsFilterText(visibleFilter(batch.views_filter), batch.progress.downloaded)}
         </div>
       ) : null}
       {batch ? <BatchNotice batch={batch} onResumed={onRetry} /> : null}

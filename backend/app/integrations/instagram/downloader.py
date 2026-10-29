@@ -140,6 +140,13 @@ class ListingCheckpoint:
     # {"unexpected": {motivo: n}, "expected": {...}, "degraded": {...}}; chaves vazias omitidas; None = nenhum.
     # Quem persiste o checkpoint soma estas contagens na MESMA transação (cada página conta uma única vez).
     page_counts: Mapping[str, Mapping[str, int]] | None = field(default=None, compare=False)
+    # Filtros da importação por perfil (só com ``min_views`` e/ou ``posted_after``): mídias da página que este
+    # checkpoint encerra por veredito {"approved", "below", "no_count", "out_of_period"} (só totais); None = filtros
+    # desligados. Somado na mesma transação do checkpoint, como ``page_counts``.
+    page_views: Mapping[str, int] | None = field(default=None, compare=False)
+    # True = a listagem terminou porque chegou às publicações mais antigas que o corte do período (``has_next`` é
+    # False junto): não é o fim real do perfil.
+    period_end: bool = field(default=False, compare=False)
 
     def __repr__(self) -> str:
         return (f"ListingCheckpoint(next_page_index={self.next_page_index}, pages={self.pages}, "
@@ -183,6 +190,9 @@ class RemoteMedia:
     dash_width: int | None = None
     dash_height: int | None = None
     dash_duration: float | None = None
+    # Filtros da importação por perfil (só com ``min_views``/``posted_after``): vereditos da página desta mídia até
+    # ela, inclusive (mesmo papel de ``listing_dropped`` para a página que termina sem checkpoint); None = desligados.
+    listing_views: dict[str, int] | None = field(default=None, compare=False, repr=False)
 
 
 SessionTestOutcome = Literal[

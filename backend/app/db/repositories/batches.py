@@ -38,6 +38,11 @@ LISTING_COLUMNS = frozenset(
         "listing_end",
         # Lote por link (migration 0014): links seguidos falhos sem nenhum resolvido entre eles.
         "link_fail_streak",
+        # Vereditos do filtro de visualizações da página ainda sem checkpoint (migration 0017); os totais só mudam por
+        # add_listing_views.
+        "listing_views_partial",
+        # Listagem encerrada pelo corte do período de postagem (migration 0019).
+        "listing_period_end",
     }
 )
 TERMINAL_BATCH_STATUSES = ("completed", "failed", "cancelled")
@@ -65,6 +70,12 @@ def load_listing_counts(value: Any) -> dict[str, Any]:
 
 def _count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+# Vereditos dos filtros da importação por perfil (migrations 0017 e 0019): `listing_views`/`listing_views_partial`.
+# "approved" = passou em todos os filtros ligados; "below"/"no_count" só com o filtro de visualizações; "out_of_period"
+# só com o período de postagem.
+VIEWS_KEYS = ("approved", "below", "no_count", "out_of_period")
 # Pausa que não justifica impedir a suspensão do Windows (has_active_work).
 LONG_PAUSE_SECONDS = 30 * 60
 # Contadores finais congelados no lote (seção 6: a retenção apaga jobs de lotes antigos). Subconsultas correlatas:
@@ -116,6 +127,9 @@ class BatchRepository:
         group_id: int | None = None,
         group_position: int | None = None,
         import_mode: str | None = None,
+        min_views: int | None = None,
+        posted_within_days: int | None = None,
+        posted_after: str | None = None,
     ) -> int:
         now = utc_now()
         cursor = self.db.execute(
@@ -131,6 +145,11 @@ class BatchRepository:
                             (group_id, group_position, cursor.lastrowid))
         if import_mode is not None:   # lote por link (migration 0014); os demais não tocam a coluna nova
             self.db.execute("UPDATE batches SET import_mode = ? WHERE id = ?", (import_mode, cursor.lastrowid))
+        if min_views is not None:   # filtro de visualizações (migration 0017); sem ele a coluna fica NULL
+            self.db.execute("UPDATE batches SET min_views = ? WHERE id = ?", (min_views, cursor.lastrowid))
+        if posted_after is not None:   # período de postagem (migration 0019); sem ele as colunas ficam NULL
+            self.db.execute("UPDATE batches SET posted_within_days = ?, posted_after = ? WHERE id = ?",
+                            (posted_within_days, posted_after, cursor.lastrowid))
         return cursor.lastrowid
 
     def get(self, batch_id: int) -> dict[str, Any] | None:
@@ -329,13 +348,20 @@ class BatchRepository:
 
     # ---- grupos de importação (migration 0012) -----------------------------------------------------------------
     def create_group(self, *, content_type: str, requested_limit: int | None, preset_id: int | None,
-                     preset_name: str | None, params: dict[str, Any] | None, process: bool) -> int:
+                     preset_name: str | None, params: dict[str, Any] | None, process: bool,
+                     min_views: int | None = None, posted_within_days: int | None = None,
+                     posted_after: str | None = None) -> int:
         cursor = self.db.execute(
             "INSERT INTO import_groups (content_type, requested_limit, preset_id, preset_name, params, process,"
             " created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (content_type, requested_limit, preset_id, preset_name,
              None if params is None else canonical_json(params), int(process), utc_now()),
         )
+        if min_views is not None:   # filtro de visualizações (migration 0017); sem ele a coluna fica NULL
+            self.db.execute("UPDATE import_groups SET min_views = ? WHERE id = ?", (min_views, cursor.lastrowid))
+        if posted_after is not None:   # período de postagem (migration 0019)
+            self.db.execute("UPDATE import_groups SET posted_within_days = ?, posted_after = ? WHERE id = ?",
+                            (posted_within_days, posted_after, cursor.lastrowid))
         return cursor.lastrowid
 
     def get_group(self, group_id: int) -> dict[str, Any] | None:
@@ -379,6 +405,11 @@ class BatchRepository:
             return result
         marks = placeholders(len(group_ids))
         frozen = ", ".join(f"SUM(COALESCE(final_{key}, 0)) AS {key}" for key in BATCH_PROGRESS_CONDITIONS)
+        # Filtro de visualizações (migration 0017): total + página aberta de cada veredito, só dos filhos com filtro.
+        views = "".join(
+            f"SUM(COALESCE(json_extract(listing_views, '$.{key}'), 0)"
+            f" + COALESCE(json_extract(listing_views_partial, '$.{key}'), 0)) AS views_{key}, "
+            for key in VIEWS_KEYS)
         rows = self.db.fetchall(
             f"""
             SELECT group_id,
@@ -391,7 +422,9 @@ class BatchRepository:
                        AND listing_next_page IS NULL) AS waiting,
                    SUM(COALESCE(final_found, found)) AS found,
                    SUM(listing_dropped_unexpected) AS dropped,
-                   SUM(listing_end = 'profile_end') AS profile_end,
+                   SUM(listing_end = 'profile_end' AND COALESCE(listing_period_end, 0) = 0) AS profile_end,
+                   SUM(listing_end = 'profile_end' AND listing_period_end = 1) AS period_end,
+                   {views}
                    MAX(finished_at) AS finished_at,
                    {frozen}
             FROM batches WHERE group_id IN ({marks}) GROUP BY group_id
@@ -450,6 +483,8 @@ class BatchRepository:
             " listing_items_compatible = 0, listing_unproductive_streak = 0, listing_has_next = NULL,"
             # As páginas serão listadas (e contadas) de novo: os descartes do lote recomeçam do zero.
             " listing_dropped_unexpected = 0, listing_dropped_reasons = NULL, listing_dropped_partial = NULL,"
+            # Idem para os vereditos do filtro de visualizações (migration 0017).
+            " listing_views = NULL, listing_views_partial = NULL, listing_period_end = NULL,"
             " listing_end = NULL"
         ) if from_start else ""
         cursor = self.db.execute(
@@ -516,6 +551,32 @@ class BatchRepository:
             " WHERE id = ?",
             (sum(_count(v) for v in stored.get("unexpected", {}).values()),
              canonical_json(stored) if stored else None, utc_now(), batch_id),
+        )
+
+    def add_listing_views(self, batch_id: int, counts: Mapping[str, int] | None = None, *,
+                          merge_partial: bool = False) -> None:
+        """Soma vereditos do filtro de visualizações aos totais do lote (migration 0017), com as mesmas regras de
+        ``add_listing_dropped``: DENTRO da transação que grava o checkpoint da página (``counts`` =
+        ListingCheckpoint.page_views) ou que encerra a listagem (``merge_partial``: soma `listing_views_partial` e o
+        apaga). Lote sem filtro (`min_views` e `posted_after` NULL) nunca é tocado."""
+        row = self.db.fetchone(
+            "SELECT min_views, posted_after, listing_views, listing_views_partial FROM batches WHERE id = ?",
+            (batch_id,))
+        if row is None or (row["min_views"] is None and row["posted_after"] is None):
+            return
+        extra = {key: _count((counts or {}).get(key)) for key in VIEWS_KEYS}
+        if merge_partial:
+            partial = load_listing_counts(row["listing_views_partial"])
+            for key in VIEWS_KEYS:
+                extra[key] += _count(partial.get(key))
+        if not any(extra.values()) and not (merge_partial and row["listing_views_partial"] is not None):
+            return
+        stored = load_listing_counts(row["listing_views"])
+        total = {key: _count(stored.get(key)) + extra[key] for key in VIEWS_KEYS}
+        clear = ", listing_views_partial = NULL" if merge_partial else ""
+        self.db.execute(
+            f"UPDATE batches SET listing_views = ?{clear}, updated_at = ? WHERE id = ?",
+            (canonical_json(total), utc_now(), batch_id),
         )
 
     def sync_found(self, batch_id: int) -> None:

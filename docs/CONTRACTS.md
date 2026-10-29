@@ -261,6 +261,10 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
   attention_count /*vezes em que o link deixou o lote em needs_attention*/, PK (batch_id, position),
   UNIQUE (batch_id, shortcode))`; `batches.link_fail_streak` (links seguidos falhos; disjuntor de 3). A renovação
   de link de download de uma publicação é registrada em `listing_pages` com `page_index = position` do link.
+- Filtro de visualizações mínimas (migration 0017; seção 8.1): `import_groups.min_views` e `batches.min_views`
+  (INTEGER >= 1; NULL = sem filtro), `batches.listing_views` (JSON `{"approved", "below", "no_count"}` somado por página
+  no checkpoint) e `batches.listing_views_partial` (mesmo formato, página aberta sem checkpoint). Só colunas
+  anuláveis; lotes antigos e lotes criados sem o filtro ficam com NULL nas quatro.
 - `exports(id, kind /*batch|group|library*/, batch_id FK SET NULL, group_id FK SET NULL, selection json /*só library*/,
   dest_path, dest_created /*1 = pasta padrão criada pelo servidor para esta exportação*/,
   mode /*folder|zip*/, zip_path, zip_name, zip_token, zip_bytes, zip_expires_at, zip_downloaded_at,
@@ -404,6 +408,7 @@ Batch = { id, source, source_profile|null, content_type|null, requested_limit|nu
   links: { total: number, pending: number, resolved: number, failed: number }|null,   // só em lote por link
   group_id: number|null, group_position: number|null /*1-based*/,
   group_state: "waiting"|"active"|"attention"|"completed"|"failed"|"cancelled"|null /*só em filhos de grupo*/,
+  views_filter: ViewsFilter|null /*filtro de visualizações mínimas (seção 8.1); null = sem filtro*/,
   last_export: LastExport|null /*última exportação para pasta concluída do lote; seção 8.2*/ }
   // pending: parte de unexpected_total/reasons que ainda é da página ABERTA da listagem (sem checkpoint; ex.: lote
   // em needs_attention ou parado no meio da página). Já está somada no total para não ficar invisível; vira
@@ -477,6 +482,48 @@ gallery-dl: o erro do web fica visível no lote.
 Valores antigos ainda aceitos: `posts` (igual a `all`), `videos`, `images`. Carrossel conta por item; se o limite cai
 no meio de um carrossel, entram só os primeiros itens dele. O que o filtro ignora NÃO aparece em `listing_dropped`.
 
+**Visualizações mínimas (`min_views`, opcional)**: inteiro estrito de 1 a 10.000.000.000 em `POST /api/imports` e
+`POST /api/import-groups` (POR PERFIL). Omitido ou `null` = sem filtro, e tudo fica exatamente como antes (o frontend
+OMITE a chave quando o filtro está desligado). `0`, negativo, decimal (`1.5`, `5e5`), texto (`"500000"`) e booleano:
+422 (validação). Só vale para vídeo: com `content_type` diferente de `reels` ou `videos`, 422
+`min_views_requires_video` (pt-BR) e nada é criado. Só existe no método web: com `gallery_dl`, 422
+`not_supported_by_provider`; em `auto` não há fallback. A interface oferece Sem filtro, 100.000, 250.000, 500.000,
+1.000.000 e Personalizado, e só com o conteúdo Reels (a interface não oferece "Vídeos"; ao trocar o conteúdo o
+filtro volta a "Sem filtro").
+
+Regra: vídeo com contagem de visualizações >= `min_views` é aprovado (igual ao mínimo aprova) e segue o fluxo normal;
+abaixo do mínimo ou sem contagem disponível é ignorado ANTES do download (não vira job). Com o filtro, "Últimos N"
+conta só vídeos aprovados: a listagem continua até achar N aprovados ou o perfil acabar. Duplicata: vídeo aprovado que
+já está na Biblioteca vira job duplicado como sempre (por isso `approved` pode ser maior que `progress.downloaded`);
+vídeo abaixo do mínimo não vira job e a mídia da Biblioteca não é tocada. Leitura da contagem e tipos de publicação:
+`docs/INSTAGRAM_WEB_CONTRACT.md`, "Contagem de visualizações" (campos NÃO verificados contra uma resposta real da
+listagem). Regras de contagem sem duplicar: `docs/BATCH_ROBUSTNESS.md`, "Filtro de visualizações mínimas".
+
+```ts
+ViewsFilter = { min_views: number, analyzed: number /*= approved + below + no_count*/, approved: number,
+  below: number /*abaixo do mínimo*/, no_count: number /*sem contagem disponível*/,
+  pending: number /*parte de analyzed que ainda é da página aberta; no grupo é sempre 0 (já somada)*/ }
+```
+
+**Filtro de visualizações DESLIGADO (2026-10-29):** enquanto `import_service.MIN_VIEWS_ENABLED` for `False`, qualquer
+`min_views` não nulo em `POST /api/imports` ou `POST /api/import-groups` é 422 `min_views_unavailable` ("O filtro de
+visualizações ainda não está disponível.") e nada é criado; `min_views: null` ou omitido segue aceito. Motivo e
+evidência: docs/INSTAGRAM_WEB_CONTRACT.md ("Teste real de 2026-10-29").
+
+**Período de postagem (`posted_within_days`, opcional)**: inteiro estrito de 1 a 3650 em `POST /api/imports` e
+`POST /api/import-groups` (o mesmo para todos os perfis); omitido ou `null` = qualquer data. Fora disso 422. Só no
+método web (com `gallery_dl`, 422 `not_supported_by_provider`). Não existe em `POST /api/import-links`: `min_views` ou
+`posted_within_days` não nulos lá = 422 `filters_profile_only` ("O filtro de período/visualizações vale só para
+importação por perfil."). O corte `posted_after` (agora - N dias, UTC, `AAAA-MM-DDTHH:MM:SSZ`) é calculado na criação e
+gravado (migration 0019: `posted_within_days`, `posted_after` em `import_groups` e `batches`; `batches.listing_period_end`);
+retomadas usam sempre esse corte. Publicação mais antiga que o corte não é baixada (`out_of_period`) e a listagem
+termina ao chegar nelas (`listing_end: "period_end"`). As visualizações (`min_views`) vêm da aba Reels do perfil SEM
+login (docs/INSTAGRAM_WEB_CONTRACT.md); vídeo fora da aba ou sem contagem não é baixado. `views_filter` (lote e grupo)
+passa a ser `{min_views: number|null, posted_within_days: number|null, posted_after: string|null, analyzed, approved,
+below, no_count, out_of_period, pending}`, presente quando qualquer um dos dois filtros está ligado.
+Interface (linha do lote e do grupo): "Mín. 500.000 visualizações: N analisados • N aprovados • N baixados • N abaixo
+do mínimo • N sem contagem disponível", com "baixados" = `progress.downloaded` (contagem já existente).
+
 **`Batch.listing_end`**: `"limit"` (achou a quantidade pedida), `"profile_end"` (o perfil acabou; pode ter menos que
 o pedido: mostrar "perfil chegou ao fim: `found` de `requested_limit`"; nesse caso `error_message` traz um texto
 informativo e `error_code` é `null`), `null` (ainda listando, erro, cancelado ou lote antigo).
@@ -501,9 +548,11 @@ ImportGroup = { id, content_type, requested_limit: number|null /*POR PERFIL*/, p
   status: "active"|"attention"|"completed"|"cancelled",
   attention: boolean /*algum filho em attention ou failed; vale também com status active/completed*/,
   profiles: { total, waiting, active, completed, attention, failed, cancelled } /*os seis somam total*/,
-  profile_end_count: number /*filhos com listing_end = profile_end*/,
+  profile_end_count: number /*filhos que chegaram ao fim REAL do perfil (listing_end = profile_end, sem os do período)*/,
+  period_end_count: number /*filhos cuja listagem terminou pelo corte do período de postagem (listing_end = period_end)*/,
   progress: { found, downloaded, processed, skipped, failed, pending, active } /*soma das mídias dos filhos*/,
   listing_dropped_total: number /*soma de listing_dropped definitivo dos filhos; o detalhe fica em cada filho*/,
+  views_filter: ViewsFilter|null /*soma dos filhos (com a página aberta de cada um); null = sem filtro*/,
   last_export: LastExport|null /*última exportação para pasta concluída do grupo inteiro; seção 8.2*/ }
 ImportGroupDetail = { group: ImportGroup, children: Batch[] /*ordem group_position*/,
   next_after_position: number|null,

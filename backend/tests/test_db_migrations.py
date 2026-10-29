@@ -249,8 +249,7 @@ def test_dash_streams_migration_is_additive_over_existing_rows(tmp_path, db):
 
 def test_history_hidden_migration_is_additive_over_existing_rows(tmp_path, db):
     """Migration 0018: `batches.history_hidden_at` e `import_groups.history_hidden_at` (anuláveis) num banco COM
-    dados; nenhuma linha existente muda ou some (NULL = visível no histórico). Não existe 0017 neste código."""
-    assert 17 not in [m.version for m in discover_migrations()]
+    dados; nenhuma linha existente muda ou some (NULL = visível no histórico)."""
     apply_migrations(db, _migrations_until(tmp_path, 16))
     now = "2026-01-01T00:00:00.000Z"
     db.execute("INSERT INTO import_groups (id, content_type, requested_limit, process, created_at)"
@@ -262,11 +261,128 @@ def test_history_hidden_migration_is_additive_over_existing_rows(tmp_path, db):
     tables = ("batches", "import_groups")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
     assert apply_migrations(db) == [m.version for m in discover_migrations() if m.version > 16]
+    # Colunas das 0017/0019 (filtros) também chegam NULL; aqui a da 0018 é conferida em detalhe.
+    filters = ("min_views", "listing_views", "listing_views_partial", "posted_within_days", "posted_after",
+               "listing_period_end")
     for table in tables:
         info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
         column = info["history_hidden_at"]
         assert column["type"] == "TEXT" and not column["notnull"] and column["dflt_value"] is None
         rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
         assert rows and all(row.pop("history_hidden_at") is None for row in rows)
+        for row in rows:
+            for name in filters:
+                assert row.pop(name, None) is None
         assert rows == before[table], table
     assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
+
+
+def test_min_views_migration_is_additive_over_existing_rows(tmp_path, db):
+    """Migration 0017: `import_groups.min_views`, `batches.min_views`, `batches.listing_views` e
+    `batches.listing_views_partial` (anuláveis) num banco COM dados; nenhuma linha existente muda ou some."""
+    apply_migrations(db, _migrations_until(tmp_path, 16))
+    assert schema_version(db) == 16
+    now = "2026-01-01T00:00:00.000Z"
+    db.execute("INSERT INTO import_groups (id, content_type, requested_limit, process, created_at)"
+               " VALUES (1, 'reels', 10, 0, ?)", (now,))
+    db.execute("INSERT INTO batches (id, source, source_profile, content_type, requested_limit, process, status, found,"
+               " created_at, updated_at, group_id, group_position, listing_dropped_partial)"
+               " VALUES (1, 'instagram_import', 'perfil', 'reels', 10, 0, 'listing', 1, ?, ?, 1, 1, '{\"x\":1}')",
+               (now, now))
+    db.execute("INSERT INTO jobs (id, batch_id, kind, status, source_post_id, source_media_index, created_at,"
+               " updated_at) VALUES (1, 1, 'ingest', 'pending', 'POST1', 0, ?, ?)", (now, now))
+    tables = ("import_groups", "batches", "jobs", "media")
+    before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
+
+    assert apply_migrations(db) == [m.version for m in discover_migrations() if m.version > 16]
+    assert schema_version(db) >= 17
+    new_columns = {"import_groups": ("min_views", "history_hidden_at", "posted_within_days", "posted_after"),
+                   "batches": ("min_views", "listing_views", "listing_views_partial", "history_hidden_at",
+                               "posted_within_days", "posted_after", "listing_period_end")}
+    for table in tables:
+        rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
+        info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
+        for column in new_columns.get(table, ()):
+            assert not info[column]["notnull"] and info[column]["dflt_value"] is None
+            assert rows and all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        assert rows == before[table], table
+    assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
+
+    # Só NULL, inteiro >= 1 (mínimo) e JSON válido (contadores).
+    db.execute("UPDATE batches SET min_views = 500000, listing_views = '{\"approved\":1}' WHERE id = 1")
+    db.execute("UPDATE import_groups SET min_views = 1 WHERE id = 1")
+    for sql in ("UPDATE batches SET min_views = 0 WHERE id = 1", "UPDATE import_groups SET min_views = -1 WHERE id = 1",
+                "UPDATE batches SET listing_views = 'nao e json' WHERE id = 1",
+                "UPDATE batches SET listing_views_partial = 'nao e json' WHERE id = 1"):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(sql)
+    assert apply_migrations(db) == []
+
+
+# sha256 (fins de linha normalizados para LF) da 0017 de bf9b84b, já aplicada como versão 17 no banco real do dono.
+MIGRATION_0017_SHA256 = "b1ca6927b01f15c4388f9912deef8d0fa4e8614e7368ff58fdac9e9b21be2e00"
+
+
+def test_min_views_migration_keeps_the_name_and_content_already_applied_by_the_owner():
+    import hashlib
+
+    [migration] = [m for m in discover_migrations() if m.version == 17]
+    assert migration.path.name == "0017_min_views.sql"
+    text = migration.path.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(text).hexdigest() == MIGRATION_0017_SHA256
+
+
+def _bank_with_rows(db):
+    now = "2026-01-01T00:00:00.000Z"
+    db.execute("INSERT INTO import_groups (id, content_type, requested_limit, process, created_at)"
+               " VALUES (1, 'reels', 10, 0, ?)", (now,))
+    db.execute("INSERT INTO batches (id, source, source_profile, content_type, requested_limit, process, status, found,"
+               " created_at, updated_at, group_id, group_position, listing_end)"
+               " VALUES (1, 'instagram_import', 'perfil', 'reels', 10, 0, 'listing', 1, ?, ?, 1, 1, 'profile_end')",
+               (now, now))
+    db.execute("INSERT INTO jobs (id, batch_id, kind, status, source_post_id, source_media_index, created_at,"
+               " updated_at) VALUES (1, 1, 'ingest', 'pending', 'POST1', 0, ?, ?)", (now, now))
+
+
+@pytest.mark.parametrize("applied_until", [16, 17])
+def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, applied_until):
+    """Migration 0019 (período de postagem) sobre banco com dados: até a 0016 (aplica 0017+0018+0019) e com a 0017
+    já aplicada SEM a 0018 (o banco real do dono: aplica 0018+0019). Nenhuma linha existente muda ou some."""
+    apply_migrations(db, _migrations_until(tmp_path, applied_until))
+    assert schema_version(db) == applied_until
+    _bank_with_rows(db)
+    tables = ("import_groups", "batches", "jobs", "media")
+    before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
+
+    assert apply_migrations(db) == [v for v in (17, 18, 19) if v > applied_until]
+    assert schema_version(db) == 19
+    added = {"import_groups": ("posted_within_days", "posted_after", "history_hidden_at"),
+             "batches": ("posted_within_days", "posted_after", "listing_period_end", "history_hidden_at")}
+    if applied_until < 17:
+        added["import_groups"] += ("min_views",)
+        added["batches"] += ("min_views", "listing_views", "listing_views_partial")
+    for table in tables:
+        rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
+        info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
+        for column in added.get(table, ()):
+            assert not info[column]["notnull"] and info[column]["dflt_value"] is None
+            assert rows and all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        assert rows == before[table], table
+    assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
+
+    db.execute("UPDATE batches SET posted_within_days = 30, posted_after = '2026-09-29T00:00:00Z',"
+               " listing_period_end = 1 WHERE id = 1")
+    db.execute("UPDATE import_groups SET posted_within_days = 3650 WHERE id = 1")
+    for sql in ("UPDATE batches SET posted_within_days = 0 WHERE id = 1",
+                "UPDATE import_groups SET posted_within_days = 3651 WHERE id = 1",
+                "UPDATE batches SET listing_period_end = 2 WHERE id = 1"):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(sql)
+    assert apply_migrations(db) == []
+
+
+def test_new_database_gets_17_18_and_19(db):
+    assert apply_migrations(db)[-3:] == [17, 18, 19]
+    assert schema_version(db) == 19
+    columns = {row["name"] for row in db.fetchall("PRAGMA table_info(batches)")}
+    assert {"min_views", "history_hidden_at", "posted_after", "posted_within_days", "listing_period_end"} <= columns

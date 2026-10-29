@@ -208,7 +208,10 @@ export interface Batch {
    */
   listing_dropped?: ListingDropped | null;
   /** Por que a listagem terminou: fim real do perfil ou quantidade atingida; null enquanto lista/erro/antigo. */
-  listing_end?: "profile_end" | "limit" | null;
+  /** "period_end": a listagem chegou às publicações mais antigas que o período de postagem pedido. */
+  listing_end?: "profile_end" | "limit" | "period_end" | null;
+  /** Filtro de visualizações mínimas do lote; null/ausente = sem filtro (e em backends antigos). */
+  views_filter?: ViewsFilter | null;
   /** Grupo de importação (vários perfis); null/ausente em lotes avulsos e antigos. */
   group_id?: number | null;
   group_position?: number | null;
@@ -305,8 +308,12 @@ export interface ImportGroup {
   attention: boolean;
   profiles: GroupProfiles;
   profile_end_count: number;
+  /** Filhos cuja listagem terminou pelo corte do período de postagem. */
+  period_end_count?: number;
   progress: BatchProgress;
   listing_dropped_total: number;
+  /** Filtro de visualizações mínimas (soma dos perfis); null/ausente = sem filtro. */
+  views_filter?: ViewsFilter | null;
   /** Última exportação para pasta concluída do grupo inteiro; null/ausente se nunca foi exportado. */
   last_export?: LastExport | null;
 }
@@ -329,6 +336,28 @@ export interface ImportGroupList {
   items: ImportGroup[];
   total: number;
   next_before_id: number | null;
+}
+
+/**
+ * Filtro de visualizações mínimas: vídeos analisados (= approved + below + no_count) por veredito. "Aprovados" não é
+ * "baixados": vídeo aprovado que já estava na Biblioteca vira duplicata (o número real é `progress.downloaded`).
+ */
+/** Filtros da importação por perfil (visualizações mínimas e/ou período de postagem). */
+export interface ViewsFilter {
+  /** null = sem filtro de visualizações (só o período). */
+  min_views: number | null;
+  /** "Últimos N dias"; null = qualquer data. */
+  posted_within_days?: number | null;
+  /** Corte gravado na criação (UTC). */
+  posted_after?: string | null;
+  analyzed: number;
+  approved: number;
+  below: number;
+  no_count: number;
+  /** Publicações mais antigas que o corte do período (não baixadas). */
+  out_of_period?: number;
+  /** Parte dos analisados que ainda é da página aberta da listagem. */
+  pending: number;
 }
 
 export interface ListingDropped {
@@ -490,6 +519,10 @@ export interface ImportRequest {
   process: boolean;
   /** "Editar após baixar" (as mesmas configurações de POST /api/edits); exclusivo com `process`/`preset_id`. */
   edit?: EditSettings | null;
+  /** Visualizações mínimas (só Reels/Vídeos). A chave é OMITIDA sem filtro: o corpo fica igual ao de antes. */
+  min_views?: number;
+  /** Período de postagem: últimos N dias (1 a 3650). Omitida = qualquer data. */
+  posted_within_days?: number;
 }
 
 export interface ImportGroupRequest {
@@ -501,6 +534,10 @@ export interface ImportGroupRequest {
   process: boolean;
   /** "Editar após baixar" (as mesmas configurações de POST /api/edits); aplicada a todos os perfis; exclusivo com `process`/`preset_id`. */
   edit?: EditSettings | null;
+  /** Por perfil; omitida sem filtro. */
+  min_views?: number;
+  /** O mesmo corte para todos os perfis; omitida = qualquer data. */
+  posted_within_days?: number;
 }
 
 export type MediaView = "all" | "originals" | "processed";
