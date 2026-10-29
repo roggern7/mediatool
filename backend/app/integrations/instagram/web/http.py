@@ -57,10 +57,11 @@ class WebResponse:
     expõem; repr redigido; pickle/copy bloqueados. ``text`` NUNCA deve ser logado."""
 
     __slots__ = ("status", "location_path", "content_type", "elapsed_ms", "set_cookie_names",
-                 "sessionid_deleted", "text", "path")
+                 "sessionid_deleted", "text", "path", "location_origin")
 
     def __init__(self, status: int, location_path: str | None, content_type: str, elapsed_ms: int,
-                 set_cookie_names: list[str], sessionid_deleted: bool, text: str, path: str = "") -> None:
+                 set_cookie_names: list[str], sessionid_deleted: bool, text: str, path: str = "",
+                 location_origin: str = "") -> None:
         self.status = status
         self.location_path = location_path
         self.content_type = content_type
@@ -69,6 +70,8 @@ class WebResponse:
         self.sessionid_deleted = sessionid_deleted
         self.text = text  # NUNCA logar; repr não mostra
         self.path = path  # path da requisição, sem query (para diagnósticos)
+        # "esquema://host" do Location em minúsculas ("" = relativo); nunca logado (não entra no repr).
+        self.location_origin = location_origin
 
     def json(self) -> object:
         """Corpo como JSON (aceita o prefixo ``for (;;);``); ``ValueError`` se inválido."""
@@ -359,7 +362,10 @@ class InstagramWebHttp:
         self._normalize_jar(sessionid_deleted)
 
         location = response.headers.get("location")
-        location_path = (urlsplit(location).path or "/") if location else None
+        location_parts = urlsplit(location) if location else None
+        location_path = (location_parts.path or "/") if location_parts is not None else None
+        location_origin = (f"{location_parts.scheme}://{location_parts.netloc}".lower()
+                           if location_parts is not None and location_parts.netloc else "")
         result = WebResponse(
             status=response.status_code,
             location_path=location_path,
@@ -369,6 +375,7 @@ class InstagramWebHttp:
             sessionid_deleted=sessionid_deleted,
             text=text,
             path=safe_path,
+            location_origin=location_origin,
         )
         _log.debug("instagram web %s %s -> %s (%d ms, %d bytes)", method, safe_path, result.status, elapsed_ms,
                    len(body))

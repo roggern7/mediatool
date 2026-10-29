@@ -62,6 +62,10 @@ class AppContext:
     # Injetáveis (testes): None = diálogo nativo do Windows e pasta Documentos reais (app.services.export_destination).
     folder_picker: Callable[[Path | None], Path | None] | None = None
     documents_dir: Callable[[], Path] | None = None
+    # Lote por link: ids dos lotes em que a 2a tentativa de um link restrito com a sessão do dono foi recusada ou
+    # falhou (`app.jobs.pipeline.note_links_session_refusal`); os links restritos seguintes deles não usam mais a
+    # sessão. Só memória: um reinício do app libera de novo a 2a tentativa nesses lotes.
+    links_session_off: set[int] = field(default_factory=set)
     worker: Worker | None = None
     import_runner: ImportRunner | None = None
     export_runner: ExportRunner | None = None

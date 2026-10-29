@@ -106,7 +106,8 @@ varrido em busca de marcadores (o JavaScript embutido daria falso positivo).
 | errors.py (documento público) | `content_unavailable` / `contract_changed` | `post_http_404` / `document_not_html`, `http_<status>` |
 | http.py (documento público) | `contract_changed` | `document_too_large` |
 | provider.py | `unsupported_media` | `unsupported_media` |
-| provider.py (post) | `content_unavailable` / `contract_changed` | `post_no_media`, `post_gated_logged_out` / `post_shape_unknown`, `post_envelope_missing`, `post_mismatch` |
+| provider.py (post) | `content_unavailable` / `contract_changed` | `post_no_media`, `post_gated_logged_out`, `post_gated_session_off`, `post_gated_with_session` / `post_shape_unknown`, `post_envelope_missing`, `post_mismatch` |
+| errors.py (documento da publicação com a sessão, stage `session_document`; 2xx não-HTML, inclusive JSON, é `document_not_html`) | `checkpoint_required` / `rate_limited` / `request_auth_failed` / `session_invalid` / `action_blocked` / `access_refused` / `network_error` / `content_unavailable` / `contract_changed` | os de `classify_response` (`redirect_challenge`, `redirect_checkpoint`, `checkpoint_marker`, `http_429`, `please_wait`, `redirect_login`, `require_login`, `http_401`, `sessionid_deleted`, `restriction_fields`, `redirect_*`, `http_403`, `http_<5xx>`, `http_<status>`) / `post_http_404` / `document_not_html` |
 
 `timeout` e `network_error` do cliente HTTP (stage `http`) não têm `detail`; o diagnóstico traz método, path e o nome
 da exceção. Fim anômalo da paginação (`contract_changed`, graphql.py): `detail` em `empty_page`, `cursor_missing`,
@@ -361,7 +362,8 @@ forma segura, sem inventar):
   reais da versão escolhida ficam gravados.
 - Host do CDN das URLs sem login: se não for `.cdninstagram.com`/`.fbcdn.net`, o download falha com `invalid_url`.
 - Tela de login respondida com 200 (viraria `post_envelope_missing`), redirect `/p/<código>/` -> `/reel/<código>/`
-  e o documento aberto com sessão logada (não usado).
+  e o caminho `/p/` aberto com a sessão (o documento logado de um Reel foi verificado em 2026-10-29: ver "2a
+  tentativa de uma publicação restrita").
 
 **Requisição**: UM `GET /<tipo>/<shortcode>/` por publicação, com os headers de documento do `InstagramWebHttp`
 (`Sec-Fetch-Site: none`, sem `Referer`), sem `Cookie`, sem seguir redirect, pelo mesmo portão global (uma vaga por
@@ -416,16 +418,86 @@ shortcode; o caminho do `Location` não entra no diagnóstico):
 | corpo acima de 4 MiB | `contract_changed` | `document_too_large` | não | erro do lote |
 | HTML sem script `data-sjs` ou sem o envelope | `contract_changed` | `post_envelope_missing` | não | erro DO LINK; sem fallback em `auto`; 3 seguidos param o lote (`links_failing`) |
 | envelope só de outra publicação | `contract_changed` | `post_mismatch` (stage `normalize`) | não | erro do link |
-| `gating_ruling` não nulo ou mídia ausente | `content_unavailable` | `post_gated_logged_out` | não | o link falha (não arma a espera); mensagem: "A publicação exige login ou está restrita. O Media Tool não usa a sessão salva para abrir publicações por link." |
+| `gating_ruling` não nulo ou mídia ausente | (2a tentativa com a sessão, abaixo) | | | sem sessão salva: `content_unavailable` `post_gated_logged_out`, o link falha (não arma a espera); mensagem: "A publicação exige login ou está restrita, e não há sessão do Instagram salva para tentar abri-la. Salve a sessão em Configurações e importe este link de novo." |
 | nó só com tipo não suportado / sem código / sem URL | `unsupported_media` / `contract_changed` `post_shape_unknown` / `content_unavailable` `post_no_media` | | não | erro do link |
 | cancelado antes do GET | devolve `[]` | | | |
 
 Só a primeira linha de sucesso (200 HTML com o envelope de um Reel) foi observada no real; as demais seguem o
 comportamento HTTP padrão. **Redirect nunca é seguido**: qualquer 3xx, inclusive `/p/<código>/` -> `/reel/<código>/`,
-é `access_refused`. Este caminho **nunca** levanta `session_missing`, `session_invalid`, `session_expired`,
+é `access_refused`. O GET anônimo **nunca** levanta `session_missing`, `session_invalid`, `session_expired`,
 `request_auth_failed`, `checkpoint_required` nem `action_blocked`: não há sessão nem conta na requisição (um
-`Set-Cookie` apagando `sessionid` numa resposta anônima é ignorado). Por isso um problema de UMA publicação não mexe
-no status da sessão do dono.
+`Set-Cookie` apagando `sessionid` numa resposta anônima é ignorado). Por isso um problema de UMA publicação pública
+não mexe no status da sessão do dono.
+
+#### 2a tentativa de uma publicação restrita: o mesmo documento com a sessão
+
+Pedido do dono (2026-10-29): quando o documento público vem restrito (`gated`), e SÓ nesse caso, `resolve_post` faz
+UMA 2a tentativa abrindo o documento da publicação com a sessão salva, como o navegador logado abriria. Nunca
+POST/GraphQL (a consulta recusada pelo Instagram em 2026-10-09 continua removida). Links públicos continuam sem
+sessão: a sessão salva nem é lida.
+
+**VERIFICADO no Instagram real (2026-10-29, sessão do dono, UM Reel restrito sem login; sem download):**
+- `GET /reel/<código>/` anônimo -> documento público restrito (`gated`).
+- `GET /reel/<código>/` com a sessão -> 302 para `/reels/<mesmo código>/`, corpo vazio, sem `Set-Cookie` de
+  `sessionid`.
+- `GET /reels/<código>/` com a sessão -> 200 `text/html` (~730 KB). No mesmo caminho do público
+  (`ScheduledServerJS` -> `__bbox.require` -> `RelayPrefetchedStreamCache` -> `[preloader, {__bbox: {result: {data:
+  ...}}}]`), `data.xig_fetch_media` = o nó da mídia no formato v1 (`code` igual ao pedido, `pk`, `media_type` 2,
+  `product_type` "clips", `user`, `image_versions2`, `video_versions` com `width`/`height`, `video_dash_manifest`,
+  `carousel_media` nulo, `original_width`/`original_height`, `taken_at`...; sem `__typename`). Outro script, mesmo
+  envelope, traz `data.xdt_api__v1__clips__home__connection_v2.edges[i].node.media`: o feed de Reels (o 1o edge é
+  a mesma publicação, os seguintes são OUTRAS). Não há `xig_polaris_media`, `if_not_gated_logged_out` nem
+  `gating_ruling` na página logada.
+- NÃO VERIFICADO: o caminho `/p/` com a sessão, foto/carrossel, publicação que continua restrita com a sessão (forma
+  suposta: `xig_fetch_media` nulo), qualquer resposta de recusa.
+
+**Requisições** (cliente autenticado da importação por perfil, `http_factory`, padrão `InstagramWebHttp` com os
+cookies da sessão: headers de documento de navegador, `Sec-Fetch-Mode: navigate`, sem `Referer`, sem
+`X-CSRFToken`/`X-IG-App-ID`; cada GET passa pelo portão e conta uma página no teto por hora; teto de 4 MiB; fechado ao
+fim, cookies só no jar em memória):
+- Link de Reel: direto `GET /reels/<código>/` (o endereço do navegador logado). Redirect não é seguido.
+- Link `/p/`: `GET /p/<código>/`; um redirect (sem `sessionid` apagado, `Location` relativo ou com origem exatamente `https://www.instagram.com`/
+  `https://instagram.com`; outro host é recusa `redirect_other`) cujo caminho é `/reels/`, `/reel/` ou `/p/`
+  do MESMO código (comparação exata) é seguido UMA vez (no máximo 2 GETs com a sessão por link). Qualquer outro
+  redirect, inclusive um 2o, vai para a classificação, sem retry.
+
+**Pré-condições**, nesta ordem: `use_session` (quem chama passa `False` depois que a sessão foi desligada no lote)
+-> senão `content_unavailable` `post_gated_session_off`; cancelamento (cancelado -> lista vazia, a sessão nem é
+lida); sessão salva com `sessionid` -> senão `content_unavailable` `post_gated_logged_out`; portão sem pausa
+publicada (`paused_scope()`) -> senão `InstagramPaused` sem requisição. O cancelamento é conferido de novo depois de
+cada espera do teto.
+
+**Classificação**: `errors.classify_session_document`, a `classify_response` da importação por perfil com stage
+`session_document` (login/401/`require_login` -> `request_auth_failed`, não evidência forte), menos: só 2xx HTML é
+documento utilizável; qualquer outro 2xx (inclusive JSON válido) é `contract_changed` `document_not_html`; 404 é
+`content_unavailable` `post_http_404`; o caminho do `Location` não entra no diagnóstico.
+
+**Leitura**: `post_document.parse_session_post_document` (mesmos tetos e a mesma caminhada sem regex do público; o
+parser anônimo não mudou): só `data.xig_fetch_media` cujo `code` é EXATAMENTE o pedido vira mídia, pelo mesmo
+`normalize_post` (a maior `video_versions` por área; DASH pela regra de sempre). O feed de Reels nunca é lido, nem
+como reserva. Só nós de outra publicação -> `post_mismatch`; campo nulo -> `post_gated_with_session`; nada ->
+`post_envelope_missing`.
+
+| Resultado da 2a tentativa | code | detail | Efeito no lote por link |
+|---|---|---|---|
+| nó da publicação pedida | (mídias) | | importada como as outras; log `Publicação (documento com a sessão): outcome=ok ... via=session_document` e `Publicação resolvida (web): ... via=session_document` |
+| `xig_fetch_media` nulo | `content_unavailable` | `post_gated_with_session` | o link falha ("A publicação continua indisponível mesmo com a sessão: pode ser de conta privada que você não segue, removida ou restrita por região/idade."); sessão desligada no lote; não conta no disjuntor |
+| sem o nó / só de outra publicação / nó sem código | `contract_changed` | `post_envelope_missing` / `post_mismatch` / `post_shape_unknown` | o link falha; sessão desligada no lote já na 1a; não conta no disjuntor `links_failing` |
+| 404 / sem mídia utilizável | `content_unavailable` / `unsupported_media` | `post_http_404` / `post_no_media`... | o link falha (conta no disjuntor, como no documento público) |
+| recusa, limite, verificação, rede, 2xx não-HTML | o da classificação | o da classificação | sem nova tentativa; a política de sempre (pausa por `rate_limited`/`checkpoint_required`/`request_auth_failed`/`session_invalid`/`action_blocked`, recusa em espera por `access_refused`, backoff por rede; link `pending`); sessão desligada no lote |
+
+Todos os erros da 2a tentativa trazem `diagnostic["via"] = "session_document"`; os do GET têm stage
+`session_document` (o `safe_diagnostic` registra `stage=session_document`); o `path` de todas é o caminho realmente pedido
+(`/reels/` ou `/p/`). `session_off =
+True` na exceção marca os casos que desligam a sessão (`AppContext.links_session_off`, só memória;
+`app.jobs.pipeline.note_links_session_refusal` e `links_resolve_options`): o runner e a renovação de URL passam
+`use_session=False` nos pedidos seguintes do lote e um link restrito falha com `content_unavailable`
+`post_gated_session_off` ("A publicação exige login ou está restrita. Nesta importação o Instagram recusou a
+tentativa com a sessão salva (ou ela falhou), então o Media Tool não usa mais a sessão para os links restritos deste
+lote. Para tentar de novo com a sessão, importe este link em uma nova importação."); essas falhas também não contam
+no disjuntor `links_failing` (os links públicos seguem). O link que provocou uma recusa fica `pending` e, depois da pausa/espera, é pedido de novo só pelo
+documento público. Um reinício do app desfaz o desligamento. `resolve_post_authenticated` continua `False`: quem
+chama não registra `note_auth_success` nem quando a publicação veio pela sessão.
 
 #### Fluxos separados (`video_dash_manifest`): maior qualidade no modo "Por link"
 
@@ -651,10 +723,13 @@ padrão do app), ambos repassados a
   `forbidden/not_found` (URL expirada), refaz UMA listagem do `source_profile` (no máximo 3 páginas) para achar o
   mesmo `source_post_id` (por `media_id`, senão índice e tipo) e tenta de novo uma vez; não achou ->
   `content_unavailable`.
-- `resolve_post(shortcode, *, cancel=None, path_kind=None) -> list[RemoteMedia]`: UM GET **anônimo** do documento
-  público da publicação (`/<path_kind>/<shortcode>/`) + `parse_post_document` + `normalize_post` (ver "Documento
-  público da publicação"). **Não usa a sessão do dono**: o cliente vem de `public_http_factory` (padrão:
-  `InstagramWebHttp.anonymous`, jar vazio, mesmo portão) e é fechado ao fim; não há bootstrap nem GraphQL. Atributo de
+- `resolve_post(shortcode, *, cancel=None, path_kind=None, use_session=True) -> list[RemoteMedia]`: UM GET
+  **anônimo** do documento público da publicação (`/<path_kind>/<shortcode>/`) + `parse_post_document` +
+  `normalize_post` (ver "Documento público da publicação"). O cliente vem de `public_http_factory` (padrão:
+  `InstagramWebHttp.anonymous`, jar vazio, mesmo portão) e é fechado ao fim; não há bootstrap nem GraphQL. Só uma
+  publicação restrita no documento público ganha a 2a tentativa com a sessão (`/reels/<código>/`, ou `/p/<código>/`
+  com no máximo um redirect para a mesma publicação, pelo cliente de `http_factory`; ver "2a tentativa de uma
+  publicação restrita"); `use_session=False` a desliga. Atributo de
   classe `resolve_post_authenticated = False`: quem chama não registra `note_auth_success` (a resposta anônima não
   prova a sessão). `path_kind` precisa ser `"p"` ou `"reel"`; qualquer outro valor, inclusive `None`, é
   `invalid_input` sem requisição. Devolve TODAS as mídias da publicação (carrossel inteiro, na ordem,
@@ -714,8 +789,8 @@ padrão do app), ambos repassados a
   valendo). `resolve_post` (publicação por link) não tem fallback nenhum, ver abaixo.
 - `test_session()`: em `web` e `auto` testa o provider web (sem trocar o resultado pelo do gallery-dl); em
   `gallery_dl`, o teste legado (etapas web ficam `null`).
-- `resolve_post(shortcode, *, cancel=None, path_kind=None)`: repassa `cancel` e `path_kind` ao provider só quando
-  informados. Propriedade `resolve_post_authenticated`: a do provider que atende a estratégia (`gallery_dl` -> True;
+- `resolve_post(shortcode, *, cancel=None, path_kind=None, use_session=True)`: repassa `cancel` e `path_kind` ao
+  provider só quando informados, e `use_session=False` só ao provider web (em `gallery_dl` é descartado). Propriedade `resolve_post_authenticated`: a do provider que atende a estratégia (`gallery_dl` -> True;
   `web`/`auto` -> False). **Exceção à regra de `auto`: `resolve_post` NUNCA faz fallback.** Em `auto` a publicação
   por link é atendida só pelo provider web; nenhum erro dele (nem `contract_changed`, nem `unsupported_media`) vira
   uma segunda consulta pelo gallery-dl com a sessão do dono: o erro sobe como está. Só a estratégia `gallery_dl`
@@ -834,7 +909,8 @@ conhecido) ou `post_shape_unknown` (o envelope veio, mas a mídia mudou de forma
    elementos/atributos observados (testes: `tests/test_dash_manifest.py`, `tests/test_normalize_dash.py`,
    `tests/test_import_links_dash.py`).
 4. Se a página passar a exigir login (redirect ou tela de login em 200), não há ajuste de constante que resolva: o
-   Media Tool não usa a sessão salva para abrir publicações por link. Registre o caso e decida com o dono.
+   documento anônimo não traz a publicação e o Media Tool só usa a sessão salva na 2a tentativa de uma publicação
+   que o documento público declara restrita (`gated`). Registre o caso e decida com o dono.
 5. Confira com a POC do documento público (1 GET anônimo), com autorização do dono.
 
 Se o root field mudar, edite `root_field` em `PROFILE_POSTS` e as fixtures/testes que o usam

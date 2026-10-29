@@ -198,16 +198,27 @@ class _Ops:
 
 
 POST_DOCUMENT_STAGE = "post_document"
+# 2a tentativa de um link restrito: o MESMO documento da publicação aberto com a sessão do dono (nunca GraphQL/POST).
+SESSION_DOCUMENT_STAGE = "session_document"
+SESSION_DOCUMENT_VIA = "session_document"
 POST_PATH_KINDS = ("p", "reel")
+# Redirect seguido na 2a tentativa (só /p/): Location relativo ou exatamente nestas origens.
+_SAME_SITE_ORIGINS = ("", "https://www.instagram.com", "https://instagram.com")
 _MSG_POST_ENVELOPE_MISSING = ("O Instagram abriu a página da publicação, mas sem os dados dela no formato que o "
                               "Media Tool conhece. Nada foi importado deste link.")
-_MSG_POST_GATED = ("A publicação exige login ou está restrita. O Media Tool não usa a sessão salva para abrir "
-                   "publicações por link.")
+_MSG_POST_GATED = ("A publicação exige login ou está restrita, e não há sessão do Instagram salva para tentar "
+                   "abri-la. Salve a sessão em Configurações e importe este link de novo.")
+_MSG_POST_GATED_WITH_SESSION = ("A publicação continua indisponível mesmo com a sessão: pode ser de conta privada que "
+                                "você não segue, removida ou restrita por região/idade.")
+_MSG_POST_GATED_SESSION_OFF = ("A publicação exige login ou está restrita. Nesta importação o Instagram recusou a "
+                               "tentativa com a sessão salva (ou ela falhou), então o Media Tool não usa mais a "
+                               "sessão para os links restritos deste lote. Para tentar de novo com a sessão, importe "
+                               "este link em uma nova importação.")
 
 
 class InstagramWebDownloader(InstagramDownloader):
-    # `resolve_post` lê o documento público sem a sessão do dono: uma publicação entregue NÃO prova a sessão (quem
-    # chama não registra sucesso de autenticação).
+    # `resolve_post` lê o documento público sem a sessão do dono; só um link restrito ganha a 2a tentativa com a
+    # sessão. Quem chama não registra sucesso de autenticação por uma publicação entregue.
     resolve_post_authenticated: bool = False
 
     def __init__(
@@ -317,25 +328,39 @@ class InstagramWebDownloader(InstagramDownloader):
         return self._iter_media(username, content, limit, cancel, resume, on_checkpoint)
 
     def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
-                     path_kind: str | None = None) -> list[RemoteMedia]:
+                     path_kind: str | None = None, use_session: bool = True) -> list[RemoteMedia]:
         """UM GET ANÔNIMO do documento público da publicação (``/p/<código>/`` ou ``/reel/<código>/``, conforme
-        ``path_kind``, que vem do link de quem chama) + leitura do envelope embutido (web/post_document.py). Não usa
-        a sessão do dono: o cliente é criado sem cookies e descartado ao fim. Redirect nunca é seguido.
+        ``path_kind``, que vem do link de quem chama) + leitura do envelope embutido (web/post_document.py). O cliente
+        é criado sem cookies e descartado ao fim. Redirect nunca é seguido.
+
+        Publicação restrita no documento público (``gated``), e SÓ nesse caso: UMA 2a tentativa abrindo o MESMO
+        documento com a sessão salva, pelo cliente autenticado da importação por perfil (``http_factory``: mesmos
+        headers de navegador, mesmo portão, mesmo teto por hora), lido pelo MESMO parser. Nunca GraphQL/POST. Só
+        acontece com ``use_session`` (quem chama passa False quando a sessão já foi recusada no lote), sessão salva
+        com ``sessionid`` e portão sem pausa publicada (pausa -> ``InstagramPaused`` sem requisição). Erros dessa
+        tentativa têm ``diagnostic["via"] = "session_document"``; os do GET (resposta ou transporte: recusa, 429,
+        checkpoint, login, 401/403, rede) têm stage ``session_document`` e seguem ``classify_session_document`` (a
+        classificação da importação por perfil, sem nova tentativa). ``session_off = True`` na exceção (quem chama
+        desliga a sessão no resto do lote): esses erros do GET (menos o 404) e as falhas de formato da leitura
+        (``post_envelope_missing``, ``post_gated_with_session``, ``post_mismatch``, ``post_shape_unknown``).
 
         VERIFICADO no Instagram real (2026-10-10, sem login): UM Reel público em ``/reel/<código>/``.
-        NÃO VERIFICADO: foto, carrossel, o caminho ``/p/``, publicação restrita (forma de ``gating_ruling``), qual
-        ``type`` de ``video_versions`` é a melhor qualidade (as versões vêm sem largura/altura; fica a primeira com
-        URL https), o host do CDN das URLs sem login (fora de ``.cdninstagram.com``/``.fbcdn.net`` o download falha
-        com ``invalid_url``) e a qualidade de foto sem login (a capa do Reel veio com no máximo 640 px de largura).
+        NÃO VERIFICADO: foto, carrossel, o caminho ``/p/``, publicação restrita (forma de ``gating_ruling``), o
+        documento aberto com a sessão (se traz o mesmo envelope; formato diferente falha como
+        ``post_envelope_missing``), qual ``type`` de ``video_versions`` é a melhor qualidade (as versões vêm sem
+        largura/altura; fica a primeira com URL https), o host do CDN das URLs sem login (fora de
+        ``.cdninstagram.com``/``.fbcdn.net`` o download falha com ``invalid_url``) e a qualidade de foto sem login (a
+        capa do Reel veio com no máximo 640 px de largura).
 
         Devolve TODAS as mídias da publicação (carrossel inteiro, na ordem), sem filtro de conteúdo, com
-        ``listing_ref=None`` e ``source_profile`` = dono da publicação ("" se ausente). Cada post conta como uma
-        página no teto global por hora. Cancelado antes do GET -> lista vazia (quem chama confere o cancelamento).
+        ``listing_ref=None`` e ``source_profile`` = dono da publicação ("" se ausente). Cada GET conta como uma
+        página no teto global por hora. Cancelado antes de um GET -> lista vazia (quem chama confere o cancelamento).
         ``path_kind`` fora de "p"/"reel" -> ``invalid_input`` sem requisição (nunca há tipo padrão).
-        Erros do documento (stage ``post_document``): redirect/401/403 -> ``access_refused``; 429 ->
+        Erros do documento público (stage ``post_document``): redirect/401/403 -> ``access_refused``; 429 ->
         ``rate_limited``; 404 -> ``content_unavailable``; documento sem o envelope -> ``contract_changed`` com detail
-        ``post_envelope_missing``; publicação restrita -> ``content_unavailable`` com ``post_gated_logged_out``.
-        Nunca levanta código de sessão (``session_*``, ``request_auth_failed``, ``checkpoint_required``).
+        ``post_envelope_missing``; nunca código de sessão. Publicação restrita -> ``content_unavailable`` com
+        ``post_gated_logged_out`` (sem sessão salva), ``post_gated_session_off`` (``use_session=False``) ou
+        ``post_gated_with_session`` (continua restrita no documento com a sessão).
         Sem mídia: só tipo não suportado -> ``unsupported_media``; objeto sem código de publicação ->
         ``contract_changed``; demais (itens sem URL utilizável) -> ``content_unavailable``.
         Resposta cujo shortcode não é EXATAMENTE o pedido (outra publicação, ou só maiúsculas diferentes) ->
@@ -348,51 +373,51 @@ class InstagramWebDownloader(InstagramDownloader):
             raise InstagramError("invalid_input", "Tipo do link da publicação desconhecido (esperado /p/ ou /reel/).")
         from app.integrations.instagram.web.errors import InstagramWebError, classify_public_document
         from app.integrations.instagram.web.normalize import NormalizeStats, normalize_post, post_code
-        from app.integrations.instagram.web.post_document import MAX_DOCUMENT_BYTES, parse_post_document
 
         if cancel is not None and cancel.is_set():
             return []
         safe_path = f"/{path_kind}/"   # token fixo para log/diagnóstico: o path real carrega o shortcode
-        http = self._public_http_factory()
-        if cancel is not None and hasattr(http, "cancel"):
-            http.cancel = cancel   # a espera pela vaga no portão respeita o cancelamento da operação
-        try:
-            wait_page = getattr(self._gate, "wait_listing_page", None)
-            if wait_page is not None:
-                per_hour = page_rate_limit(self._env)
-                if per_hour > 0:
-                    wait_page(cancel, max_per_hour=per_hour)
-                    if cancel is not None and cancel.is_set():
-                        return []
-            try:
-                resp = http.get_document(f"/{path_kind}/{shortcode}/", max_bytes=MAX_DOCUMENT_BYTES,
-                                         diagnostic_path=safe_path)
-            except InstagramWebError as exc:
-                if exc.diagnostic.get("detail") == "document_too_large":
-                    exc.stage = POST_DOCUMENT_STAGE
-                raise
-            error = classify_public_document(resp, stage=POST_DOCUMENT_STAGE)
-            if error is not None:
-                error.diagnostic["path"] = safe_path
-                raise error
-            root, parse = parse_post_document(resp.text, shortcode)
-            del resp
-        finally:
-            _close_http(http)
+        fetched = self._fetch_post_document(self._public_http_factory(), shortcode, path_kind, cancel,
+                                            classify_public_document, POST_DOCUMENT_STAGE)
+        if fetched is None:
+            return []
+        root, parse, _ = fetched
+        via = "public_document"
+        stage = POST_DOCUMENT_STAGE
         log.info("Publicação (documento público): outcome=%s scripts=%d envelopes=%d preloader_observado=%s "
                  "typename=%s", parse.outcome, parse.scripts, parse.envelopes, parse.preloader_observed,
                  parse.typename or "-")
-        mismatch = parse.outcome == "mismatch"
-        if parse.outcome in ("no_scripts", "envelope_missing"):
-            raise InstagramWebError(
-                "contract_changed", _MSG_POST_ENVELOPE_MISSING, stage=POST_DOCUMENT_STAGE,
-                diagnostic={"detail": "post_envelope_missing", "path": safe_path, "scripts": parse.scripts,
-                            "envelopes": parse.envelopes})
         if parse.outcome == "gated":
             # Forma NÃO verificada no real: `gating_ruling` não nulo ou a mídia ausente no envelope do shortcode.
-            raise InstagramWebError(
-                "content_unavailable", _MSG_POST_GATED, stage=POST_DOCUMENT_STAGE,
-                diagnostic={"detail": "post_gated_logged_out", "path": safe_path})
+            del root
+            fetched = self._session_post_document(shortcode, path_kind, cancel, use_session)
+            if fetched is None:
+                return []
+            root, parse, safe_path = fetched   # diagnóstico: o caminho realmente pedido (ex.: /reels/)
+            via = SESSION_DOCUMENT_VIA
+            stage = SESSION_DOCUMENT_STAGE
+            log.info("Publicação (documento com a sessão): outcome=%s scripts=%d envelopes=%d "
+                     "preloader_observado=%s typename=%s via=%s", parse.outcome, parse.scripts, parse.envelopes,
+                     parse.preloader_observed, parse.typename or "-", via)
+        extra_diag = {"via": via} if via == SESSION_DOCUMENT_VIA else {}
+
+        def fail(error: InstagramWebError) -> InstagramWebError:
+            # Falha de formato do documento aberto com a sessão: a sessão é desligada no resto do lote já na 1a.
+            if extra_diag:
+                error.session_off = True
+            return error
+
+        mismatch = parse.outcome == "mismatch"
+        if parse.outcome in ("no_scripts", "envelope_missing"):
+            raise fail(InstagramWebError(
+                "contract_changed", _MSG_POST_ENVELOPE_MISSING, stage=stage,
+                diagnostic={"detail": "post_envelope_missing", "path": safe_path, "scripts": parse.scripts,
+                            "envelopes": parse.envelopes, **extra_diag}))
+        if parse.outcome == "gated":
+            # Só chega aqui o documento aberto com a sessão (o público restrito foi tratado acima).
+            raise fail(InstagramWebError(
+                "content_unavailable", _MSG_POST_GATED_WITH_SESSION, stage=stage,
+                diagnostic={"detail": "post_gated_with_session", "path": safe_path, **extra_diag}))
         if not mismatch:
             answered = post_code(root)
             mismatch = answered is not None and answered != shortcode   # defesa dupla (já conferido na leitura)
@@ -402,31 +427,136 @@ class InstagramWebDownloader(InstagramDownloader):
             # `post_shape_unknown`). Nenhum dos dois shortcodes vai para o log nem para o diagnóstico.
             del root
             log.warning("Publicação resolvida (web): a resposta é de outra publicação; descartada")
-            raise InstagramWebError(
+            raise fail(InstagramWebError(
                 "contract_changed", "O Instagram respondeu com outra publicação, diferente da pedida. Nada foi "
-                "importado deste link.", stage="normalize", diagnostic={"detail": "post_mismatch"})
+                "importado deste link.", stage="normalize", diagnostic={"detail": "post_mismatch", **extra_diag}))
         stats = NormalizeStats()
         items = normalize_post(root, stats=stats)
         del root
-        log.info("Publicação resolvida (web): %d mídias, %d sem URL, %d não suportadas, dash=%s dash_escolhido=%d",
-                 len(items), stats.skipped_no_url, stats.skipped_unsupported,
+        log.info("Publicação resolvida (web): %d mídias, %d sem URL, %d não suportadas, dash=%s dash_escolhido=%d "
+                 "via=%s", len(items), stats.skipped_no_url, stats.skipped_unsupported,
                  ",".join(f"{outcome}:{count}" for outcome, count in sorted(stats.dash.items())) or "-",
-                 stats.dash_chosen)
+                 stats.dash_chosen, via)
         if items:
             return items
-        diagnostic = {"skipped_unsupported": stats.skipped_unsupported, "skipped_no_url": stats.skipped_no_url}
+        diagnostic = {"skipped_unsupported": stats.skipped_unsupported, "skipped_no_url": stats.skipped_no_url,
+                      **extra_diag}
         if stats.skipped_unsupported and not stats.skipped_no_url:
             raise InstagramWebError(
                 "unsupported_media", "A publicação só tem mídia de um tipo que o Media Tool ainda não sabe baixar.",
                 stage="normalize", diagnostic={**diagnostic, "detail": "unsupported_media"})
         if stats.skipped_invalid_node:
             # Objeto sem código de publicação: a resposta veio num formato que o Media Tool não reconhece.
-            raise InstagramWebError(
+            raise fail(InstagramWebError(
                 "contract_changed", "O Instagram mudou a forma de responder e o Media Tool precisa ser atualizado.",
-                stage="normalize", diagnostic={**diagnostic, "detail": "post_shape_unknown"})
+                stage="normalize", diagnostic={**diagnostic, "detail": "post_shape_unknown"}))
         raise InstagramWebError(
             "content_unavailable", "A publicação não trouxe nenhuma foto ou vídeo que possa ser baixado.",
             stage="normalize", diagnostic={**diagnostic, "detail": "post_no_media"})
+
+    def _fetch_post_document(self, http: Any, shortcode: str, path_kind: str, cancel: threading.Event | None,
+                             classify: Callable[..., Any], stage: str, parser: Callable[..., Any] | None = None,
+                             follow_kinds: tuple[str, ...] = ()) -> tuple[Any, Any] | None:
+        """GET de ``/<path_kind>/<shortcode>/`` pelo cliente ``http`` (fechado ao fim), depois do teto por hora,
+        classificado por ``classify`` e lido por ``parser`` (padrão ``parse_post_document``) -> (nó, leitura, token do
+        caminho realmente pedido). None = cancelado antes de um GET. ``follow_kinds``: redirect (sem ``sessionid`` apagado) cujo caminho é ``/<tipo>/<MESMO código>/``
+        de um desses tipos, com ``Location`` relativo ou em ``https://www.instagram.com``/``https://instagram.com``, é
+        seguido UMA vez (2o GET, de novo pelo teto e pelo portão); qualquer outro redirect vai
+        para ``classify``. Vazio (o documento público) = redirect nunca é seguido."""
+        from app.integrations.instagram.web.errors import InstagramWebError
+        from app.integrations.instagram.web.post_document import MAX_DOCUMENT_BYTES, parse_post_document
+
+        parser = parser or parse_post_document
+        path = f"/{path_kind}/{shortcode}/"
+        safe_path = f"/{path_kind}/"
+        targets = {f"/{kind}/{shortcode}/": f"/{kind}/" for kind in follow_kinds}
+        if cancel is not None and hasattr(http, "cancel"):
+            http.cancel = cancel   # a espera pela vaga no portão respeita o cancelamento da operação
+        try:
+            for hop in range(2 if targets else 1):
+                wait_page = getattr(self._gate, "wait_listing_page", None)
+                if wait_page is not None:
+                    per_hour = page_rate_limit(self._env)
+                    if per_hour > 0:
+                        wait_page(cancel, max_per_hour=per_hour)
+                        if cancel is not None and cancel.is_set():
+                            return None
+                if hop and cancel is not None and cancel.is_set():
+                    return None
+                try:
+                    resp = http.get_document(path, max_bytes=MAX_DOCUMENT_BYTES, diagnostic_path=safe_path)
+                except InstagramWebError as exc:
+                    if exc.diagnostic.get("detail") == "document_too_large":
+                        exc.stage = stage
+                    raise
+                same_site = getattr(resp, "location_origin", "") in _SAME_SITE_ORIGINS
+                target = (resp.location_path if 300 <= resp.status < 400 and not resp.sessionid_deleted
+                          and same_site else None)
+                if hop == 0 and target in targets and target != path:
+                    log.info("Documento da publicação: redirect para a mesma publicação (%s -> %s) seguido uma vez",
+                             safe_path, targets[target])
+                    path, safe_path = target, targets[target]
+                    del resp
+                    continue
+                break
+            error = classify(resp, stage=stage)
+            if error is not None:
+                error.diagnostic["path"] = safe_path
+                raise error
+            root, parse = parser(resp.text, shortcode)
+            del resp
+            return root, parse, safe_path
+        finally:
+            _close_http(http)
+
+    def _session_post_document(self, shortcode: str, path_kind: str, cancel: threading.Event | None,
+                               use_session: bool) -> tuple[Any, Any] | None:
+        """2a tentativa de um link restrito: o documento da publicação com a sessão salva, sem retry. Reel -> direto
+        ``/reels/<código>/`` (VERIFICADO 2026-10-29: ``/reel/`` logado responde 302 para ``/reels/``); ``/p/`` (NÃO
+        verificado) -> ``/p/<código>/``, seguindo UMA vez o redirect para ``/reels/``, ``/reel/`` ou ``/p/`` do mesmo
+        código (no máximo 2 GETs). None = cancelado antes do GET."""
+        from app.integrations.instagram.web.errors import InstagramWebError, classify_session_document
+        from app.integrations.instagram.web.post_document import parse_session_post_document
+        from app.services.instagram_gate import InstagramPaused
+
+        safe_path = f"/{path_kind}/"
+        if not use_session:
+            log.info("Publicação restrita no documento público; a sessão já foi desligada neste lote e não é usada")
+            error = InstagramWebError("content_unavailable", _MSG_POST_GATED_SESSION_OFF, stage=POST_DOCUMENT_STAGE,
+                                      diagnostic={"detail": "post_gated_session_off", "path": safe_path})
+            error.session_off = True   # consequência da sessão desligada: não conta no disjuntor `links_failing`
+            raise error
+        if cancel is not None and cancel.is_set():
+            return None   # cancelado: a sessão salva nem é lida
+        session = self._provider.get()
+        if session is None or not session.cookies().get("sessionid"):
+            log.info("Publicação restrita no documento público; sem sessão salva, nenhuma 2a tentativa")
+            raise InstagramWebError("content_unavailable", _MSG_POST_GATED, stage=POST_DOCUMENT_STAGE,
+                                    diagnostic={"detail": "post_gated_logged_out", "path": safe_path})
+        paused_scope = getattr(self._gate, "paused_scope", None)
+        scope = paused_scope() if paused_scope is not None else None
+        if scope is not None:
+            # Pausa publicada: nenhuma requisição (o link continua pendente e é pedido de novo depois da pausa).
+            del session
+            log.info("Publicação restrita no documento público; Instagram em pausa, 2a tentativa não feita")
+            raise InstagramPaused(scope)
+        log.info("Publicação restrita no documento público; 2a tentativa pelo documento com a sessão (via=%s)",
+                 SESSION_DOCUMENT_VIA)
+        http = self._http_factory(session)
+        del session
+        request_kind, follow = ("reels", ()) if path_kind == "reel" else ("p", ("reels", "reel", "p"))
+        try:
+            return self._fetch_post_document(http, shortcode, request_kind, cancel, classify_session_document,
+                                             SESSION_DOCUMENT_STAGE, parse_session_post_document, follow)
+        except InstagramWebError as exc:
+            exc.stage = SESSION_DOCUMENT_STAGE
+            exc.diagnostic["via"] = SESSION_DOCUMENT_VIA
+            exc.diagnostic.setdefault("path", f"/{request_kind}/")
+            if exc.code != "content_unavailable":
+                # Recusa/limite/verificação do Instagram ou falha do transporte: sem nova tentativa; quem chama
+                # aplica a política existente e para de usar a sessão no resto do lote.
+                exc.session_off = True
+            raise
 
     def download(
         self,

@@ -131,10 +131,14 @@ global, o teto de páginas por hora, as pausas e a exportação. Não há downlo
 - **Documento sem o envelope** (`contract_changed` com `detail = post_envelope_missing`: o HTML veio, mas sem os
   dados da publicação no formato conhecido; inclui uma eventual tela de login respondida com 200, caso NÃO
   observado): também é erro DO LINK (`LINK_CONTRACT_DETAILS`), sem fallback para o gallery-dl em `auto`. Se o
-  formato mudou para todos, o disjuntor de 3 links falhos seguidos para o lote. **Publicação restrita**
-  (`content_unavailable` com `post_gated_logged_out`): o link falha com "A publicação exige login ou está restrita.
-  O Media Tool não usa a sessão salva para abrir publicações por link." e NÃO arma a recusa em espera (não é recusa
-  da requisição). Publicação inexistente (404): `content_unavailable` (`post_http_404`).
+  formato mudou para todos, o disjuntor de 3 links falhos seguidos para o lote. **Publicação restrita** no
+  documento público: UMA 2a tentativa pelo mesmo documento aberto com a sessão salva (só com sessão salva e sem
+  pausa; `docs/INSTAGRAM_WEB_CONTRACT.md`, "2a tentativa de uma publicação restrita"). Sem sessão salva
+  (`post_gated_logged_out`), ainda restrita com a sessão (`post_gated_with_session`) ou com a sessão já desligada no
+  lote (`post_gated_session_off`): o link falha com `content_unavailable` e NÃO arma a recusa em espera (não é recusa
+  da requisição). Recusa da 2a tentativa (429, checkpoint, login, 401/403, rede...): a política de sempre para o
+  código (pausa, recusa em espera, backoff; link `pending`), sem nova tentativa, e a sessão deixa de ser usada no
+  resto do lote. Publicação inexistente (404): `content_unavailable` (`post_http_404`).
 - **Erro do link** (`content_unavailable`, `profile_private`, `profile_not_found`, `unsupported_media`,
   `invalid_input`, ou resposta sem nenhuma mídia): o link fica `failed` com o código e a mensagem, e o runner segue
   para o próximo. Não muda o estado dos outros links nem pausa nada.

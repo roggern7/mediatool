@@ -317,15 +317,22 @@ def test_document_without_the_envelope_is_a_link_contract_error(body):
     envelope(media_node("video", CODE), gating={"fake_ruling": "FAKE"}),
     envelope(None, code=CODE),
 ], ids=["gating_not_null", "media_null"])
-def test_gated_post_is_content_unavailable_and_says_the_session_is_not_used(media):
-    dl, server, _ = build(html(post_html([data_sjs_script(media_payload(media))])))
+def test_gated_post_without_saved_session_is_content_unavailable_and_asks_for_the_session(media):
+    """Sem sessão salva não há 2a tentativa (os casos com a sessão: test_web_provider_post_session.py)."""
+    class NoSession:
+        def get(self):
+            return None
+
+    server = Server(html(post_html([data_sjs_script(media_payload(media))])))
+    dl = InstagramWebDownloader(NoSession(), transport=httpx.MockTransport(server.handle))
     with pytest.raises(InstagramWebError) as info:
         dl.resolve_post(CODE, path_kind="p")
     error = info.value
     assert (error.code, error.stage, error.retryable) == ("content_unavailable", "post_document", False)
     assert error.diagnostic == {"detail": "post_gated_logged_out", "path": "/p/"}
-    assert error.message == ("A publicação exige login ou está restrita. O Media Tool não usa a sessão salva para "
-                             "abrir publicações por link.")
+    assert error.message == ("A publicação exige login ou está restrita, e não há sessão do Instagram salva para "
+                             "tentar abri-la. Salve a sessão em Configurações e importe este link de novo.")
+    assert len(server.requests) == 1
 
 
 def test_answer_for_another_post_is_post_mismatch():

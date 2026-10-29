@@ -199,6 +199,27 @@ def links_query_lock(ctx: Any, batch_id: int, cancel: threading.Event):
     return _page_refresh_lock((id(ctx), batch_id, "post"), cancel)
 
 
+def links_resolve_options(ctx: Any, batch_id: int) -> dict[str, Any]:
+    """Argumentos extras de `resolve_post` num lote por link: ``use_session=False`` depois que a 2a tentativa de um
+    link restrito com a sessão foi recusada no lote (`note_links_session_refusal`); senão nada (o padrão do provider:
+    tenta com a sessão só a publicação restrita no documento público)."""
+    return {"use_session": False} if batch_id in getattr(ctx, "links_session_off", ()) else {}
+
+
+def note_links_session_refusal(ctx: Any, batch_id: int, exc: BaseException) -> None:
+    """A 2a tentativa com a sessão (provider web, ``session_off``) foi recusada pelo Instagram, falhou ou veio num
+    formato que o Media Tool não lê: a sessão não é mais usada para os links restritos deste lote (sem nova
+    tentativa). A política do erro (pausa, recusa em espera, backoff, link falho) continua com quem chamou."""
+    if getattr(exc, "session_off", False) is not True:
+        return
+    off = getattr(ctx, "links_session_off", None)
+    if off is None or batch_id in off:
+        return
+    off.add(batch_id)
+    logger.warning("Lote %s: a tentativa com a sessão de um link restrito foi recusada ou falhou (%s); os links "
+                   "restritos seguintes deste lote não usam mais a sessão", batch_id, getattr(exc, "code", "-"))
+
+
 class JobExecutor:
     def __init__(self, ctx: AppContext, worker: Worker, job: dict[str, Any], cancel: threading.Event):
         self.ctx = ctx
@@ -844,12 +865,14 @@ class JobExecutor:
         try:
             # O tipo do caminho (/p/ ou /reel/) vem da URL de origem gravada no job.
             items = downloader.resolve_post(shortcode, cancel=self.cancel,
-                                            path_kind=post_path_kind(job.get("source_url") or ""))
+                                            path_kind=post_path_kind(job.get("source_url") or ""),
+                                            **links_resolve_options(self.ctx, job["batch_id"]))
             if any(item.source_post_id != shortcode for item in items):
                 # Resposta de OUTRA publicação (comparação exata): nenhum job recebe URL dela. O provider web já
                 # recusa antes (`post_mismatch`); isto cobre os demais. Conta como renovação falha (abaixo).
                 raise JobFailure("contract_changed", POST_MISMATCH_MESSAGE)
         except BaseException as exc:
+            note_links_session_refusal(self.ctx, job["batch_id"], exc)
             refused = isinstance(exc, InstagramError) and exc.code == LINKS_REFRESH_REFUSED_CODE
             if refused:
                 # Recusa: arma a espera do lote AGORA, ainda sob a trava (o runner e as outras renovações a veem

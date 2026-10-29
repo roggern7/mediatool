@@ -102,7 +102,7 @@ class CompositeInstagramDownloader(InstagramDownloader):
         return bool(getattr(source, "resolve_post_authenticated", True))
 
     def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
-                     path_kind: str | None = None) -> list[RemoteMedia]:
+                     path_kind: str | None = None, use_session: bool = True) -> list[RemoteMedia]:
         # cancel/path_kind só são repassados quando informados (providers antigos não os conhecem).
         extra: dict = {} if cancel is None else {"cancel": cancel}
         if path_kind is not None:
@@ -110,6 +110,9 @@ class CompositeInstagramDownloader(InstagramDownloader):
         # Em `auto` não há fallback: NENHUMA falha do documento público (lido sem sessão) vira uma segunda consulta
         # pelo gallery-dl com a sessão do dono. Só a estratégia `gallery_dl` explícita usa o legado.
         source = self.fallback if self.strategy == "gallery_dl" else self.primary
+        if not use_session and source is self.primary:
+            # Só o provider web conhece a 2a tentativa com a sessão (documento da publicação); o legado não.
+            extra["use_session"] = False
         return source.resolve_post(shortcode, **extra)
 
     def download(

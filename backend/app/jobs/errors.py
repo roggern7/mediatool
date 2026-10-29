@@ -74,7 +74,7 @@ _DIAG_CONTENT_TYPES = frozenset({
 })
 # Paths FIXOS das requisições do provider web (sem query, sem shortcode/usuário/id). Qualquer outro é omitido.
 # `/p/` e `/reel/`: token do documento público de uma publicação (o provider já tirou o shortcode do path).
-_DIAG_SAFE_PATHS = frozenset({"/", "/graphql/query", "/web/search/topsearch/", "/p/", "/reel/"})
+_DIAG_SAFE_PATHS = frozenset({"/", "/graphql/query", "/web/search/topsearch/", "/p/", "/reel/", "/reels/"})
 _DIAG_STATUS_RANGE = (100, 599)
 _DIAG_SIZE_RANGE = (0, 10**12)
 

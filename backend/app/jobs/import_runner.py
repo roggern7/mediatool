@@ -54,7 +54,13 @@ from app.integrations.instagram.downloader import (
 from app.integrations.instagram.validation import post_path_kind
 from app.jobs.dash_ref import dash_json
 from app.jobs.errors import JobCancelled, message_with_diagnostic, safe_diagnostic, safe_message
-from app.jobs.pipeline import LINKS_HOLD_DONE_MESSAGE, instagram_paused, links_query_lock
+from app.jobs.pipeline import (
+    LINKS_HOLD_DONE_MESSAGE,
+    instagram_paused,
+    links_query_lock,
+    links_resolve_options,
+    note_links_session_refusal,
+)
 from app.services import disk
 from app.services.instagram_gate import DEFAULT_MAX_PAGES_PER_HOUR, PAGES_STATE_KEY, InstagramPaused
 
@@ -812,6 +818,9 @@ class ImportRunner:
                 return
             chunk.link_position = link["position"]  # se o trecho parar por erro, foi neste link
             failure: tuple[str, str] | None = None
+            # Falha de formato do documento aberto com a sessão (`session_off`): o link falha, mas não conta no
+            # disjuntor `links_failing` (a sessão já foi desligada no lote; os links públicos seguem).
+            breaker = True
             items: list[RemoteMedia] = []
             try:
                 # Trava ÚNICA das consultas do lote (a mesma da renovação de URL): confere a recusa em espera sob
@@ -824,15 +833,20 @@ class ImportRunner:
                         return
                     try:
                         # O tipo do caminho (/p/ ou /reel/) vem do link colado; o provider nunca escolhe sozinho.
+                        # Publicação restrita: o provider web tenta UMA vez com a sessão, menos depois de uma recusa
+                        # dessa tentativa neste lote (os links seguintes ficam só no documento público).
                         items = downloader.resolve_post(link["shortcode"], cancel=cancel,
-                                                        path_kind=post_path_kind(link["url"]))
+                                                        path_kind=post_path_kind(link["url"]),
+                                                        **links_resolve_options(self.ctx, batch_id))
                     except InstagramError as exc:
+                        note_links_session_refusal(self.ctx, batch_id, exc)
                         if exc.code == LINKS_REFUSED_CODE:
                             # Vale mesmo com o trecho cancelado/encerrando durante a consulta: a recusa aconteceu.
                             batches.arm_links_hold(batch_id, LINKS_REFUSED_MESSAGE)
                         if cancel.is_set() or not _is_link_error(exc):
                             raise
                         failure = (exc.code, safe_message(exc.message))
+                        breaker = getattr(exc, "session_off", False) is not True
                         # Só a posição do link no lote: o shortcode nunca vai para o log.
                         logger.warning("Lote %s: link %s não pôde ser importado (%s)%s", batch_id, link["position"],
                                        exc.code, _diagnostic_suffix(safe_diagnostic(exc)))
@@ -852,7 +866,7 @@ class ImportRunner:
             if failure is None and not items:
                 failure = ("content_unavailable", LINK_EMPTY_MESSAGE)
             if failure is not None:
-                if self._fail_link(batch, link["position"], *failure):
+                if self._fail_link(batch, link["position"], *failure, breaker=breaker):
                     chunk.stop = "links_failing"
                     return
                 continue
@@ -883,11 +897,15 @@ class ImportRunner:
             if created:
                 self.ctx.wake_worker()
 
-    def _fail_link(self, batch: dict[str, Any], position: int, code: str, message: str) -> bool:
+    def _fail_link(self, batch: dict[str, Any], position: int, code: str, message: str, *,
+                   breaker: bool = True) -> bool:
         """Marca o link como falho e conta a sequência de links falhos. True se o disjuntor disparou: é a
-        `LINK_FAIL_BREAKER`-ésima falha seguida e ainda há link pendente (sem pendentes o lote conclui normal)."""
+        `LINK_FAIL_BREAKER`-ésima falha seguida e ainda há link pendente (sem pendentes o lote conclui normal).
+        `breaker=False`: o link falha sem mexer na sequência (nunca dispara)."""
         batches = self.ctx.batches
         batches.fail_link(batch["id"], position, code=code, message=message)
+        if not breaker:
+            return False
         streak = int(batch.get("link_fail_streak") or 0) + 1
         tripped = streak >= LINK_FAIL_BREAKER and batches.next_pending_link(batch["id"]) is not None
         batch["link_fail_streak"] = 0 if tripped else streak   # disparou: a retomada começa do zero
