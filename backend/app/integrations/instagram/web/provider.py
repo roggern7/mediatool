@@ -316,6 +316,8 @@ class InstagramWebDownloader(InstagramDownloader):
         cancel: threading.Event | None = None,
         resume: ListingCheckpoint | None = None,
         on_checkpoint: Callable[[ListingCheckpoint], None] | None = None,
+        min_views: int | None = None,
+        posted_after: str | None = None,
     ) -> Iterator[RemoteMedia]:
         username = self._username(username)
         if content not in CONTENT_TYPES:
@@ -324,8 +326,13 @@ class InstagramWebDownloader(InstagramDownloader):
             raise InstagramError("invalid_input", "Limite inválido.")
         if resume is not None and not isinstance(resume, ListingCheckpoint):
             raise InstagramError("invalid_input", "Ponto de retomada da listagem inválido.")
+        if min_views is not None and (isinstance(min_views, bool) or not isinstance(min_views, int) or min_views < 1):
+            raise InstagramError("invalid_input", "Mínimo de visualizações inválido.")
+        cutoff = None if posted_after is None else _cutoff_timestamp(posted_after)
+        if posted_after is not None and cutoff is None:
+            raise InstagramError("invalid_input", "Corte do período de postagem inválido.")
         # ``limit=None`` ("Todos"): até o fim real do perfil, sem teto de quantidade nem de páginas.
-        return self._iter_media(username, content, limit, cancel, resume, on_checkpoint)
+        return self._iter_media(username, content, limit, cancel, resume, on_checkpoint, min_views, cutoff)
 
     def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
                      path_kind: str | None = None, use_session: bool = True) -> list[RemoteMedia]:
@@ -782,6 +789,7 @@ class InstagramWebDownloader(InstagramDownloader):
     def _iter_media(
         self, username: str, content: str, limit: int | None, cancel: threading.Event | None,
         resume: ListingCheckpoint | None, on_checkpoint: Callable[[ListingCheckpoint], None] | None,
+        min_views: int | None = None, cutoff: int | None = None,
     ) -> Iterator[RemoteMedia]:
         """Lista página a página (gerador; nada de respostas/nós/itens acumulados).
 
@@ -789,7 +797,21 @@ class InstagramWebDownloader(InstagramDownloader):
         cancelamento > erro (inclusive fim anômalo da paginação, que NÃO é fim do perfil) > fim real do perfil
         (``has_next_page=false``). Páginas sem item compatível com o filtro e rendimento baixo NÃO encerram a
         listagem: ela segue até a quantidade ou o fim real. ``on_checkpoint`` é chamado depois que todos os itens de
-        uma página foram entregues; ``resume`` continua de um checkpoint (contadores totais continuam valendo)."""
+        uma página foram entregues; ``resume`` continua de um checkpoint (contadores totais continuam valendo).
+
+        Filtros da importação por perfil (desligados = nada muda), depois do filtro de conteúdo e nesta ordem:
+
+        ``cutoff`` (período de postagem; epoch UTC): publicação com ``taken_at`` anterior ao corte (ou sem data) não
+        vira item ("out_of_period"). A listagem vem da mais nova para a mais antiga: a primeira publicação NÃO fixada
+        mais antiga que o corte ENCERRA a listagem (checkpoint com ``has_next=False`` e ``period_end=True``). Fixada
+        (``timeline_pinned_user_ids`` não vazio) é pulada sem encerrar. Sem esse campo no nó (não se sabe se é fixada)
+        encerra só depois de ``PERIOD_STOP_STREAK`` publicações seguidas mais antigas que o corte (o Instagram fixa no
+        máximo 3); publicação dentro do período zera a sequência.
+
+        ``min_views`` (visualizações mínimas): só vídeos com ``play_count`` >= ``min_views`` na aba Reels SEM login
+        (web/reels_tab.py, casado pelo código, páginas buscadas sob demanda) são entregues; abaixo ("below"), fora da
+        aba Reels ou sem contagem ("no_count") não viram item, e item que não é vídeo também não ("no_count"). Erro da
+        aba Reels sobe como erro da listagem (nunca entrega sem o filtro). ``limit`` conta só os aprovados."""
         from app.integrations.instagram.web.errors import InstagramWebError
         from app.integrations.instagram.web.normalize import (
             DEGRADED_REASONS,
@@ -820,6 +842,14 @@ class InstagramWebDownloader(InstagramDownloader):
         count = 0
         streak = resume.unproductive_streak if resume else 0
         page_compatible = 0
+        # Vereditos dos filtros na página aberta (só totais; zerados no fim de cada página).
+        filters_on = min_views is not None or cutoff is not None
+        page_views: dict[str, int] | None = _views_zero() if filters_on else None
+        if filters_on:
+            st.update(views_approved=0, views_below=0, views_no_count=0, views_out_of_period=0)
+        old_streak = 0   # publicações seguidas mais antigas que o corte sem saber se são fixadas
+        reels: Any = None   # mapa de visualizações da aba Reels (criado na 1a consulta)
+        reels_http: Any = None
         closed_page = 0   # índice da última página que chegou ao fim (on_page_end): os descartes dela já saíram
         self.last_account_confirmation = None
 
@@ -830,7 +860,7 @@ class InstagramWebDownloader(InstagramDownloader):
                 self._on_page(meta)
 
         def on_page_end(reason: str | None) -> bool:
-            nonlocal streak, page_compatible, closed_page
+            nonlocal streak, page_compatible, closed_page, page_views
             streak = 0 if page_compatible else streak + 1
             page_compatible = 0
             st["stop_reason"] = reason
@@ -844,7 +874,10 @@ class InstagramWebDownloader(InstagramDownloader):
                     # Só o fim real do perfil zera `has_next`; o teto de páginas do trecho (testes/POC) não.
                     unproductive_streak=streak, has_next=reason != "end_of_profile",
                     page_counts=_page_counts(getattr(page, "report", None), DEGRADED_REASONS),
+                    page_views=None if page_views is None else dict(page_views),
                 ))
+            if page_views is not None:
+                page_views = _views_zero()
             return reason is None
 
         # Teto global de páginas de listagem por hora (seção 9, A2), aplicado no portão antes de cada POST.
@@ -860,6 +893,28 @@ class InstagramWebDownloader(InstagramDownloader):
                     _rate_limit_disabled_logged = True
                     log.warning("Teto de páginas por hora DESABILITADO por %s=0 (configuração de teste); as demais "
                                    "proteções continuam ativas", ENV_PAGE_RATE_LIMIT)
+
+        def before_reels_request() -> bool:
+            """Teto de páginas por hora e cancelamento antes de cada requisição da aba Reels."""
+            if cancel is not None and cancel.is_set():
+                return False
+            if wait_page is not None:
+                per_hour = page_rate_limit(self._env)
+                if per_hour > 0:
+                    wait_page(cancel, max_per_hour=per_hour)
+            return not (cancel is not None and cancel.is_set())
+
+        def views_of(item: RemoteMedia) -> int | None:
+            nonlocal reels, reels_http
+            if reels is None:
+                from app.integrations.instagram.web.reels_tab import ReelsViews
+
+                reels_http = self._public_http_factory()   # anônimo (jar vazio), mesmo portão
+                if cancel is not None and hasattr(reels_http, "cancel"):
+                    reels_http.cancel = cancel
+                reels = ReelsViews(reels_http, username, before_request=before_reels_request,
+                                   overrides=self._overrides, env=self._env)
+            return reels.lookup(item.source_post_id, item.post_id)
 
         completed = False
         with self._ops(cancel, shared=True) as ops:
@@ -901,7 +956,49 @@ class InstagramWebDownloader(InstagramDownloader):
                             dropped_so_far = _dropped_until(report.events, edge, DEGRADED_REASONS)
                     node_index += 1
                     del normalized
+                    if cutoff is not None:
+                        taken = _node_timestamp(node)
+                        if taken is None or taken < cutoff:
+                            # Fora do período (ou sem data): nenhuma mídia da publicação é baixada.
+                            page_views["out_of_period"] += len(items)
+                            st["views_out_of_period"] += len(items)
+                            pinned = _node_pinned(node)
+                            if taken is not None and pinned is not True:
+                                old_streak = PERIOD_STOP_STREAK if pinned is False else old_streak + 1
+                            if old_streak >= PERIOD_STOP_STREAK:
+                                st["stop_reason"] = "period_end"
+                                if on_checkpoint is not None and page is not None:
+                                    closed_page = page.index
+                                    on_checkpoint(ListingCheckpoint(
+                                        resume_cursor=page.end_cursor, next_page_index=page.index + 1,
+                                        pages=st["pages"], posts_seen=st["posts_seen"],
+                                        items_compatible=st["items_compatible"], unproductive_streak=streak,
+                                        has_next=False, page_counts=_page_counts(report, DEGRADED_REASONS),
+                                        page_views=dict(page_views), period_end=True,
+                                    ))
+                                completed = True
+                                return
+                            continue
+                        old_streak = 0
                     for item in items:
+                        if page_views is not None:
+                            if min_views is None:
+                                verdict = "approved"
+                            elif item.media_type != "video":
+                                verdict = "no_count"   # foto/carrossel sem vídeo: nunca aprovado pelo filtro
+                            else:
+                                views = views_of(item)
+                                if reels.cancelled or (cancel is not None and cancel.is_set()):
+                                    st["stop_reason"] = "cancelled"
+                                    completed = True
+                                    return
+                                verdict = "no_count" if views is None else (
+                                    "approved" if views >= min_views else "below")
+                            page_views[verdict] += 1      # antes do yield, como `count`
+                            st[f"views_{verdict}"] += 1
+                            if verdict != "approved":
+                                continue
+                            item.listing_views = dict(page_views)
                         item.listing_ref = ref
                         item.listing_dropped = dropped_so_far
                         count += 1   # antes do yield: conta o item mesmo se o consumidor fechar o gerador nele
@@ -951,6 +1048,13 @@ class InstagramWebDownloader(InstagramDownloader):
                             exc.listing_dropped = pending
                         except Exception:  # noqa: BLE001 - exceção sem atributos: fica só no log da página
                             pass
+                # Vereditos do filtro de visualizações da página aberta (zerados no fim de cada página): vão junto do
+                # erro como estado da página, igual aos descartes.
+                if page_views is not None and any(page_views.values()):
+                    try:
+                        exc.listing_views = dict(page_views)
+                    except Exception:  # noqa: BLE001 - exceção sem atributos
+                        pass
                 raise
             finally:
                 if completed and st["stop_reason"] is None:
@@ -958,6 +1062,8 @@ class InstagramWebDownloader(InstagramDownloader):
                 close = getattr(posts, "close", None)
                 if close is not None:
                     close()
+                if reels_http is not None:
+                    _close_http(reels_http)
                 self.last_account_confirmation = _listing_confirmation(ops)
                 log.info(
                     "Listagem web de %s: %s posts, %s mídias normalizadas, %s entregues, %s sem URL, "
@@ -969,6 +1075,11 @@ class InstagramWebDownloader(InstagramDownloader):
                     "stop_reason=%s", st["pages"], st["posts_seen"], st["items_compatible"],
                     st["items_skipped_filter"], st["duplicates"], st["stop_reason"],
                 )
+                if filters_on:
+                    # Só totais do trecho; nenhuma contagem individual nem id.
+                    log.info("Listagem web (filtros): views_approved=%s views_below=%s views_no_count=%s "
+                             "out_of_period=%s reels_pages=%s", st["views_approved"], st["views_below"],
+                             st["views_no_count"], st["views_out_of_period"], reels.pages if reels is not None else 0)
                 self.last_listing_anomalies = anomalies = _listing_anomalies(ops, stats.reasons, EXPECTED_REASONS,
                                                                                  st)
                 if anomalies["pages_with_errors"] or anomalies["dropped_unexpected"]:
@@ -978,6 +1089,49 @@ class InstagramWebDownloader(InstagramDownloader):
                         anomalies["pages_with_errors"], anomalies["errors"],
                         _counts(anomalies["dropped_unexpected"]), _counts(anomalies["skipped_expected"]),
                     )
+
+
+# Período de postagem sem sinal de "fixada" no nó: publicações seguidas mais antigas que o corte para encerrar (o
+# Instagram fixa no máximo 3 no perfil; a 4a antiga seguida não pode ser fixada).
+PERIOD_STOP_STREAK = 4
+# Campo de fixação do nó v1 da listagem. NÃO verificado na resposta real do PolarisProfilePostsQuery (inferido do
+# formato v1; a aba Reels traz o análogo `clips_tab_pinned_user_ids`, verificado). Ausente = não se sabe.
+LISTING_PINNED_FIELD = "timeline_pinned_user_ids"
+
+
+def _views_zero() -> dict[str, int]:
+    return {"approved": 0, "below": 0, "no_count": 0, "out_of_period": 0}
+
+
+def _cutoff_timestamp(value: object) -> int | None:
+    """``"AAAA-MM-DDTHH:MM:SSZ"`` (UTC, como o lote grava) -> epoch; None se inválido."""
+    from datetime import datetime, timezone
+
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
+def _node_timestamp(node: Mapping) -> int | None:
+    """``taken_at`` nos MESMOS formatos aceitos por ``normalize._taken_at`` (int, texto numérico, decimal...); None se
+    ele não aceitar (sem data)."""
+    from app.integrations.instagram.web.normalize import _taken_at
+
+    value = node.get("taken_at")
+    if _taken_at(value) is None:
+        return None
+    return int(value)
+
+
+def _node_pinned(node: Mapping) -> bool | None:
+    """True = fixada; False = o nó diz que não é; None = campo ausente (não se sabe)."""
+    value = node.get(LISTING_PINNED_FIELD)
+    if isinstance(value, list):
+        return bool(value)
+    return None
 
 
 def _counts(counts: Mapping[str, int]) -> str:

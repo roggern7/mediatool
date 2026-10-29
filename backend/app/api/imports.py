@@ -98,6 +98,8 @@ def create_import(ctx: Ctx, body: ImportRequest) -> dict[str, Any]:
         preset_id=body.preset_id,
         process=body.process,
         edit=body.edit,
+        min_views=body.min_views,
+        posted_within_days=body.posted_within_days,
     )
     return batch_single(ctx, batch_id)
 
@@ -124,6 +126,8 @@ def create_import_group(
         preset_id=body.preset_id,
         process=body.process,
         edit=body.edit,
+        min_views=body.min_views,
+        posted_within_days=body.posted_within_days,
     )
     detail = group_detail(ctx, ctx.batches.get_group(group_id), children_limit=children_limit)
     return {**detail, "skipped": skipped, "duplicates": duplicates}
@@ -175,9 +179,14 @@ def preview_import_links(body: LinksPreviewRequest) -> dict[str, Any]:
     return {"valid": valid, "invalid": invalid, "duplicates": duplicates}
 
 
+FILTERS_PROFILE_ONLY_MESSAGE = "O filtro de período/visualizações vale só para importação por perfil."
+
+
 @router.post("/import-links", response_model=ImportLinksOut, status_code=202)
 def create_import_links(ctx: Ctx, body: ImportLinksRequest) -> dict[str, Any]:
     """Um lote com todos os links (um job por mídia de cada publicação); o import runner resolve um link por vez."""
+    if body.min_views is not None or body.posted_within_days is not None:
+        raise AppError(422, "filters_profile_only", FILTERS_PROFILE_ONLY_MESSAGE)
     batch_id, duplicates = import_service.create_import_links(
         ctx, links=body.links, preset_id=body.preset_id, process=body.process, edit=body.edit)
     return {**batch_single(ctx, batch_id), "duplicates": duplicates}

@@ -507,3 +507,55 @@ def test_no_listing_anomaly_detail_triggers_the_fallback():
             list(dl.iter_profile_media("perfil_teste", "reels", 5))
         assert info.value.code == "contract_changed" and info.value.diagnostic["detail"] == detail
         assert gallery.calls == [], detail
+
+
+# --------------------------------------------------------------------------- filtro de visualizações só no web
+
+
+def test_min_views_is_web_only_and_forwarded_only_when_given():
+    from app.integrations.instagram.composite import web_only
+
+    assert web_only("reels", 10) is False and web_only("reels", 10, None) is False
+    assert web_only("reels", 10, 1) is True and web_only("videos", 10, 500_000) is True
+    seen = []
+
+    class Web(Recording):
+        def iter_profile_media(self, username, content, limit, *, cancel=None, **kwargs):
+            seen.append(dict(kwargs))
+            return iter(())
+
+    dl = CompositeInstagramDownloader(Web("web"), Recording("gallery"), "web")
+    list(dl.iter_profile_media("perfil_teste", "reels", 10))
+    list(dl.iter_profile_media("perfil_teste", "reels", 10, min_views=None))
+    list(dl.iter_profile_media("perfil_teste", "reels", 10, min_views=500_000))
+    assert seen == [{}, {}, {"min_views": 500_000}]
+    # Fake com assinatura explícita antiga (sem `min_views`): sem filtro a chamada continua funcionando.
+    old = CompositeInstagramDownloader(Recording("web", items=[remote("ABCDE1")]), Recording("gallery"), "web")
+    assert len(list(old.iter_profile_media("perfil_teste", "reels", 10, min_views=None))) == 1
+
+
+def test_gallery_dl_strategy_refuses_min_views_clearly():
+    web = Recording("web", items=[remote("ABCDE1")])
+    gallery = Recording("gallery", items=[remote("ABCDE1")])
+    dl = CompositeInstagramDownloader(web, gallery, strategy="gallery_dl")
+    with pytest.raises(InstagramError) as info:
+        list(dl.iter_profile_media("perfil_teste", "reels", 10, min_views=1000))
+    assert info.value.code == "invalid_input" and "visualizações mínimas" in info.value.message
+    assert gallery.calls == [] and web.calls == []
+
+
+@pytest.mark.parametrize("code", sorted(FALLBACK_CODES))
+def test_auto_never_falls_back_to_gallery_dl_with_min_views(code):
+    seen = []
+
+    class Web(Recording):
+        def iter_profile_media(self, username, content, limit, *, cancel=None, **kwargs):
+            seen.append(dict(kwargs))
+            raise web_error(code)
+            yield  # pragma: no cover - gerador
+
+    gallery = Recording("gallery", items=[remote("ABCDE1")])
+    dl = CompositeInstagramDownloader(Web("web"), gallery, strategy="auto")
+    with pytest.raises(InstagramError) as info:
+        list(dl.iter_profile_media("perfil_teste", "reels", 10, min_views=1000))
+    assert info.value.code == code and gallery.calls == [] and seen == [{"min_views": 1000}]

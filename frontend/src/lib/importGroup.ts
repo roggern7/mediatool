@@ -2,12 +2,20 @@
 // Contrato: docs/CONTRACTS.md, seção 8.1.
 
 import { describeErrorCode } from "../api/errors";
-import type { BatchProgress, BatchStatus, ContentType, GroupChildState, GroupProfiles } from "../api/types";
+import type {
+  BatchProgress,
+  BatchStatus,
+  ContentType,
+  GroupChildState,
+  GroupProfiles,
+  ViewsFilter,
+} from "../api/types";
 import { type BatchStateLike, isBatchPaused, listingDropped, rateLimitRemainingText } from "./batchState";
 import { formatCount } from "./format";
 import { profilesCountText } from "./importOptions";
 import { CONTENT_LABEL, RATE_LIMIT_WAIT_LABEL, type Tone } from "./labels";
 import { formatPauseTime } from "./pause";
+import { viewsFilterText } from "./viewsFilter";
 
 /** Campos de um lote filho usados aqui. */
 export interface GroupChildLike extends BatchStateLike {
@@ -15,7 +23,7 @@ export interface GroupChildLike extends BatchStateLike {
   process?: boolean;
   requested_limit: number | null;
   progress: Pick<BatchProgress, "found" | "downloaded" | "failed"> & { skipped?: number };
-  listing_end?: "profile_end" | "limit" | null;
+  listing_end?: "profile_end" | "limit" | "period_end" | null;
   group_state?: GroupChildState | null;
 }
 
@@ -138,6 +146,7 @@ export interface GroupLike {
   profiles: GroupProfiles;
   progress: Pick<BatchProgress, "found" | "downloaded" | "processed"> & { skipped?: number };
   listing_dropped_total: number;
+  views_filter?: ViewsFilter | null;
 }
 
 /** "Importação • 37 perfis". */
@@ -193,6 +202,11 @@ export function groupSummary(g: GroupLike): string {
   return [...groupProfileCounts(g.profiles), groupMediaText(g), groupDroppedText(g)]
     .filter((part): part is string => part !== null)
     .join(" • ");
+}
+
+/** Linha do filtro de visualizações do grupo (soma dos perfis, com os baixados do grupo); null sem filtro. */
+export function groupViewsText(g: Pick<GroupLike, "views_filter" | "progress">): string | null {
+  return viewsFilterText(g.views_filter, g.progress.downloaded);
 }
 
 /** Opções do grupo: "Reels · Últimos 1.000 por perfil · Somente originais". */

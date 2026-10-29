@@ -43,7 +43,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from app.db.connection import utc_now
-from app.db.repositories.batches import LINKS_PARTIAL_MESSAGE
+from app.db.repositories.batches import LINKS_PARTIAL_MESSAGE, VIEWS_KEYS, load_listing_counts
 from app.db.repositories.common import canonical_json
 from app.integrations.instagram.downloader import (
     LISTING_ANOMALY_DETAILS,
@@ -141,6 +141,11 @@ def _diagnostic_suffix(diagnostic: str) -> str:
     return f" [{diagnostic}]" if diagnostic else ""
 
 
+def _filters_on(batch: dict[str, Any]) -> bool:
+    """Lote com filtro de visualizações mínimas (0017) e/ou período de postagem (0019)."""
+    return batch.get("min_views") is not None or batch.get("posted_after") is not None
+
+
 def _is_link_error(exc: InstagramError) -> bool:
     """Erro DO LINK: os códigos de `LINK_ERROR_CODES` e o `contract_changed` de UMA publicação específica (detail
     `post_shape_unknown`: formato desconhecido; `post_mismatch`: a resposta é de outra publicação)."""
@@ -175,6 +180,8 @@ class _Chunk:
 
 class ImportRunner:
     def __init__(self, ctx: AppContext):
+        # Lotes que já registraram "filtro de visualizações desativado" (uma linha por lote e execução).
+        self._views_off_logged: set[int] = set()
         self.ctx = ctx
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -413,9 +420,11 @@ class ImportRunner:
         created_before = self.ctx.jobs.count_for_batch(batch_id)
         remaining = None if limit is None else max(0, limit - created_before)
         logger.info(
-            "Lote %s: listando perfil %s (conteúdo=%s, limite=%s, %s)",
+            "Lote %s: listando perfil %s (conteúdo=%s, limite=%s, %s%s)",
             batch_id, batch["source_profile"], batch["content_type"], limit,
             "retomada" if resume is not None else "início",
+            ("" if batch.get("min_views") is None else f", min_views={batch['min_views']}")
+            + ("" if batch.get("posted_after") is None else f", publicadas desde {batch['posted_after']}"),
         )
         # Transição condicional e atômica: se o lote foi cancelado depois de escolhido (`_next_eligible`) e antes
         # daqui, nada é listado. `_current` já está registrado: um cancelamento posterior aciona `cancel`.
@@ -525,6 +534,14 @@ class ImportRunner:
             if partial != batch.get("listing_dropped_partial"):
                 self.ctx.batches.update_listing(batch_id, listing_dropped_partial=partial)
                 batch["listing_dropped_partial"] = partial
+        # Idem para os vereditos do filtro de visualizações da página aberta (até o último nó consumido).
+        pending_views = getattr(failure, "listing_views", None)
+        if (_filters_on(batch) and isinstance(pending_views, dict) and pending_views
+                and not self._is_cancelled(batch_id)):
+            partial = canonical_json(pending_views)
+            if partial != batch.get("listing_views_partial"):
+                self.ctx.batches.update_listing(batch_id, listing_views_partial=partial)
+                batch["listing_views_partial"] = partial
         self._after_chunk(batch, chunk, error, yielded, chunk_limit)
 
     def _consume(
@@ -535,9 +552,24 @@ class ImportRunner:
         batch_id = batch["id"]
         limit = batch["requested_limit"]
         yielded = 0
+        # Filtros (migrations 0017 e 0019): o kwarg só é repassado quando o lote o tem (providers e fakes antigos não o
+        # conhecem; sem filtro a chamada é idêntica à de antes). O corte do período é o GRAVADO na criação.
+        extra: dict[str, Any] = {}
+        if batch.get("min_views") is not None:
+            from app.services.import_service import MIN_VIEWS_ENABLED
+
+            if MIN_VIEWS_ENABLED:
+                extra["min_views"] = batch["min_views"]
+            elif batch_id not in self._views_off_logged:
+                # Lote criado com o filtro antes de ele ser desligado: lista SEM ele (nenhuma requisição à aba Reels).
+                self._views_off_logged.add(batch_id)
+                logger.warning("Lote %s: filtro de visualizações desativado nesta versão; a listagem segue sem ele",
+                               batch_id)
+        if batch.get("posted_after") is not None:
+            extra["posted_after"] = batch["posted_after"]
         items = self.ctx.downloader_factory().iter_profile_media(
             batch["source_profile"], batch["content_type"], chunk_limit, cancel=cancel, resume=resume,
-            on_checkpoint=on_checkpoint,
+            on_checkpoint=on_checkpoint, **extra,
         )
         try:
             for item in items:
@@ -589,6 +621,7 @@ class ImportRunner:
                 self.ctx.batches.update_listing(batch_id, listing_state="cancelled", listing_cursor=None)
                 # Página aberta gravada entre o cancelamento e o fim do trecho: soma uma vez (o parcial é apagado).
                 self.ctx.batches.add_listing_dropped(batch_id, merge_partial=True)
+                self.ctx.batches.add_listing_views(batch_id, merge_partial=True)
                 self.ctx.batches.refresh_status(batch_id)  # jobs criados no último trecho: recongela
             for job_id in running:
                 if self.ctx.worker is not None:
@@ -631,6 +664,10 @@ class ImportRunner:
             # ÚNICO fim de perfil: o provider encerrou sem erro e o último checkpoint diz que não há próxima página
             # (has_next_page=false). Sem checkpoint nenhum = provider que não pagina por checkpoint (gallery-dl).
             message = END_OF_PROFILE_MESSAGE.format(found=found) if limit is not None and found < limit else None
+            if current.get("listing_period_end"):
+                # Fim pelo corte do período de postagem (checkpoint `period_end`): não é o fim do perfil.
+                message = None
+                logger.info("Lote %s: listagem chegou às publicações anteriores ao período pedido", batch_id)
             self._finish_listing(batch_id, None, message, listing_end="profile_end")
             return
         if chunk.pages_ok > 0 or (chunk_limit is not None and yielded >= chunk_limit and chunk.progressed):
@@ -725,6 +762,7 @@ class ImportRunner:
             # Página final sem checkpoint (limite no meio dela): os descartes até o último item gravado entram agora,
             # uma única vez (a coluna parcial é apagada na mesma instrução).
             batches.add_listing_dropped(batch_id, merge_partial=True)
+            batches.add_listing_views(batch_id, merge_partial=True)
             batches.update_listing(batch_id, listing_state="done", listing_cursor=None, listing_end=listing_end)
             batches.sync_found(batch_id)
             found = batches.get(batch_id)["found"]
@@ -745,7 +783,23 @@ class ImportRunner:
             logger.warning("Lote %s: listagem parcial (%s itens) com erro %s%s", batch_id, found, error[0],
                            _diagnostic_suffix(diagnostic))
         logger.info("Lote %s: listagem concluída com %s itens", batch_id, found)
+        self._log_views(batch_id)
         self.ctx.wake_worker()
+
+    def _log_views(self, batch_id: int) -> None:
+        """Totais dos filtros no fim da listagem (só totais, nunca contagem individual). Lote com filtro de
+        visualizações que fecha sem nenhum aprovado e com vídeos sem contagem: UM aviso."""
+        current = self.ctx.batches.get(batch_id)
+        if current is None or not _filters_on(current):
+            return
+        totals = load_listing_counts(current.get("listing_views"))
+        approved, below, no_count, out_of_period = (int(totals.get(key) or 0) for key in VIEWS_KEYS)
+        logger.info("Lote %s: filtros: %s analisados, %s aprovados, %s abaixo do mínimo, %s sem contagem, %s fora do "
+                    "período", batch_id, approved + below + no_count + out_of_period, approved, below, no_count,
+                    out_of_period)
+        if current.get("min_views") is not None and approved == 0 and no_count > 0:
+            logger.warning("Lote %s: nenhum vídeo com contagem de visualizações aprovado (%s sem contagem); verifique "
+                           "se a consulta do Instagram traz esse campo", batch_id, no_count)
 
     # ---- importação por link (migration 0014) ------------------------------------------------------------------
     def _run_links(self, batch: dict[str, Any]) -> None:
@@ -1070,6 +1124,15 @@ class ImportRunner:
                 if page_counts:
                     self.ctx.batches.add_listing_dropped(batch_id, page_counts)
                 batch["listing_dropped_partial"] = None
+                if _filters_on(batch):
+                    # Vereditos dos filtros da página, idem (o parcial dela é apagado junto).
+                    self.ctx.batches.update_listing(batch_id, listing_views_partial=None)
+                    self.ctx.batches.add_listing_views(batch_id, getattr(checkpoint, "page_views", None))
+                    batch["listing_views_partial"] = None
+                if getattr(checkpoint, "period_end", False):
+                    # Fim pelo corte do período (migration 0019), na mesma transação do checkpoint `has_next = False`.
+                    self.ctx.batches.update_listing(batch_id, listing_period_end=1)
+                    batch["listing_period_end"] = 1
             elif last is not None:
                 # Página ainda sem checkpoint: guarda (como estado, sem somar) os descartes dela até o último item
                 # gravado. Página refeita sobrescreve; só entra no total se a listagem terminar aqui.
@@ -1078,6 +1141,12 @@ class ImportRunner:
                 if partial != batch.get("listing_dropped_partial"):
                     self.ctx.batches.update_listing(batch_id, listing_dropped_partial=partial)
                     batch["listing_dropped_partial"] = partial
+                if _filters_on(batch):
+                    views = getattr(last, "listing_views", None)
+                    partial = canonical_json(views) if views else None
+                    if partial != batch.get("listing_views_partial"):
+                        self.ctx.batches.update_listing(batch_id, listing_views_partial=partial)
+                        batch["listing_views_partial"] = partial
             self.ctx.batches.sync_found(batch_id)
         buffer.clear()
         if created:

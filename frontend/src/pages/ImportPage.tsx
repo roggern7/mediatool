@@ -63,6 +63,22 @@ import {
   profileEndText,
 } from "../lib/importGroup";
 import { compactProfileEntries, parseProfileList } from "../lib/profile";
+import {
+  MIN_VIEWS_DISABLED_HINT,
+  MIN_VIEWS_HINT,
+  MIN_VIEWS_PRESETS,
+  type MinViewsMode,
+  PERIOD_HINT,
+  PERIOD_PRESETS,
+  type PeriodMode,
+  minViewsAllowed,
+  periodSummary,
+  resolveMinViews,
+  resolvePeriod,
+  VIEWS_FILTER_ENABLED,
+  viewsFilterText,
+  visibleFilter,
+} from "../lib/viewsFilter";
 import { describeSessionTest } from "../lib/sessionTest";
 import { isPaused, useNow } from "../lib/pause";
 import { PauseBanner } from "../components/PauseBanner";
@@ -126,6 +142,12 @@ export function ImportPage() {
   const [content, setContent] = useState<ContentType>("all");
   const [limitMode, setLimitMode] = useState<LimitMode>("last");
   const [limitText, setLimitText] = useState(DEFAULT_LIMIT_TEXT);
+  // Filtro de visualizações mínimas (só Reels/Vídeos): toda visita começa em "Sem filtro".
+  const [minViewsMode, setMinViewsMode] = useState<MinViewsMode>("off");
+  const [minViewsText, setMinViewsText] = useState("");
+  // Período de postagem (perfil e vários perfis): toda visita começa em "Qualquer data".
+  const [periodMode, setPeriodMode] = useState<PeriodMode>("any");
+  const [periodText, setPeriodText] = useState("");
   const [presetChoice, setPresetChoice] = useState<number | null>(null);
   // Só estado da tela: toda visita começa em "Só baixar".
   const [post, setPost] = useState<PostProcessing>(POST_PROCESSING_DEFAULT);
@@ -182,6 +204,11 @@ export function ImportPage() {
   const singleProfile = preview && preview.valid.length === 1 ? (preview.valid[0] ?? null) : null;
 
   const limitChoice = resolveLimit(limitMode, limitText);
+  const minViewsChoice = VIEWS_FILTER_ENABLED
+    ? resolveMinViews(content, minViewsMode, minViewsText)
+    : ({ ok: true, minViews: null } as const);
+  const minViewsOn = minViewsAllowed(content);
+  const periodChoice = resolvePeriod(periodMode, periodText);
   const sessionOk = settings.data?.instagram.session_configured ?? false;
   const now = useNow();
   const igStatus = settings.data?.instagram ?? null;
@@ -191,20 +218,28 @@ export function ImportPage() {
   const presetId = presetChoice ?? defaultPresetId(presets.data, settings.data?.default_preset_id);
   const editProblem = editProblemOf(post, editForm);
   const postOptions = postProcessingOptions(post, presetId, editForm);
-  const providerProblem = providerBlocker(settings.data?.instagram_provider, content, limitMode === "all");
+  const providerProblem = providerBlocker(
+    settings.data?.instagram_provider,
+    content,
+    limitMode === "all",
+    minViewsChoice.ok ? minViewsChoice.minViews : null,
+    periodChoice.ok ? periodChoice.days : null,
+  );
   const blocker = startBlocker({
     sessionOk,
     paused,
     submitting,
     preview,
     limit: limitChoice,
+    minViews: minViewsChoice,
+    period: periodChoice,
     process: processAfter,
     presetId,
     editProblem,
     providerProblem,
   });
   const canSubmit = blocker === null;
-  const summary = startSummary({ preview, limit: limitChoice, content });
+  const summary = startSummary({ preview, limit: limitChoice, content, minViews: minViewsChoice, period: periodChoice });
 
   const [recentPoll, setRecentPoll] = useState<number | null>(5_000);
   const recent = useQuery(
@@ -253,6 +288,8 @@ export function ImportPage() {
       content,
       limit: limitChoice,
       ...postOptions,
+      minViews: minViewsChoice,
+      period: periodChoice,
     });
     if (!canSubmit || !plan) return;
     setSubmitting(true);
@@ -496,7 +533,12 @@ export function ImportPage() {
                   id="imp-content"
                   className="select"
                   value={content}
-                  onChange={(e) => setContent(e.target.value as ContentType)}
+                  onChange={(e) => {
+                    const next = e.target.value as ContentType;
+                    setContent(next);
+                    // O filtro de visualizações só vale para vídeos: outro conteúdo volta a "Sem filtro".
+                    if (!minViewsAllowed(next)) setMinViewsMode("off");
+                  }}
                 >
                   {CONTENT_CHOICES.map((c) => (
                     <option key={c.value} value={c.value}>
@@ -547,6 +589,82 @@ export function ImportPage() {
                         ))}
                       </div>
                     </>
+                  ) : null}
+                </div>
+              </Field>
+              {VIEWS_FILTER_ENABLED ? (
+              <Field
+                label="Filtro: visualizações mínimas (só vídeos)"
+                htmlFor="imp-min-views"
+                error={minViewsChoice.ok ? null : minViewsChoice.error}
+                hint={minViewsOn ? MIN_VIEWS_HINT : MIN_VIEWS_DISABLED_HINT}
+              >
+                <div className="row" style={{ flexWrap: "wrap" }}>
+                  <select
+                    id="imp-min-views"
+                    className="select"
+                    value={minViewsOn ? minViewsMode : "off"}
+                    disabled={!minViewsOn}
+                    onChange={(e) => setMinViewsMode(e.target.value as MinViewsMode)}
+                  >
+                    <option value="off">Sem filtro</option>
+                    {MIN_VIEWS_PRESETS.map((n) => (
+                      <option key={n} value={String(n)}>
+                        {formatCount(n)}
+                      </option>
+                    ))}
+                    <option value="custom">Personalizado…</option>
+                  </select>
+                  {minViewsOn && minViewsMode === "custom" ? (
+                    <input
+                      id="imp-min-views-custom"
+                      className={`input${minViewsChoice.ok ? "" : " invalid"}`}
+                      style={{ width: 120 }}
+                      inputMode="numeric"
+                      aria-label="Mínimo de visualizações por vídeo"
+                      aria-invalid={!minViewsChoice.ok}
+                      value={minViewsText}
+                      onChange={(e) => setMinViewsText(e.target.value)}
+                      autoComplete="off"
+                    />
+                  ) : null}
+                </div>
+              </Field>
+              ) : null}
+              <Field
+                label="Filtro: período de postagem"
+                htmlFor="imp-period"
+                error={periodChoice.ok ? null : periodChoice.error}
+                hint={PERIOD_HINT}
+              >
+                <div className="row" style={{ flexWrap: "wrap" }}>
+                  <select
+                    id="imp-period"
+                    className="select"
+                    value={periodMode}
+                    onChange={(e) => setPeriodMode(e.target.value as PeriodMode)}
+                  >
+                    <option value="any">Qualquer data</option>
+                    {PERIOD_PRESETS.map((n) => (
+                      <option key={n} value={String(n)}>
+                        {periodSummary(n)}
+                      </option>
+                    ))}
+                    <option value="custom">Personalizado…</option>
+                  </select>
+                  {periodMode === "custom" ? (
+                    <input
+                      id="imp-period-custom"
+                      className={`input${periodChoice.ok ? "" : " invalid"}`}
+                      style={{ width: 90 }}
+                      inputMode="numeric"
+                      aria-label="Últimos N dias"
+                      aria-invalid={!periodChoice.ok}
+                      placeholder="dias"
+                      value={periodText}
+                      onChange={(e) => setPeriodText(e.target.value)}
+                      autoComplete="off"
+                    />
                   ) : null}
                 </div>
               </Field>
@@ -998,6 +1116,11 @@ function BatchSummary({ batch }: { batch: Batch }) {
       ) : batch.status === "listing" ? (
         <div className="muted small">
           {byLinks ? "Resolvendo os links, um de cada vez." : "Coletando a lista de mídias do perfil."}
+        </div>
+      ) : null}
+      {viewsFilterText(visibleFilter(batch.views_filter), p.downloaded) ? (
+        <div className="muted small" style={{ marginTop: 5 }}>
+          {viewsFilterText(visibleFilter(batch.views_filter), p.downloaded)}
         </div>
       ) : null}
       {profileEnd ? (

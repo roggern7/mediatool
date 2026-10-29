@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.db.connection import parse_utc, utc_now
-from app.db.repositories.batches import load_listing_counts
+from app.db.repositories.batches import VIEWS_KEYS, load_listing_counts
 from app.db.repositories.common import JOB_STATUSES
 from app.services.context import AppContext
 
@@ -89,6 +89,40 @@ def _listing_dropped(batch: dict[str, Any]) -> dict[str, Any]:
             "pending": pending}
 
 
+def _filters_on(row: dict[str, Any]) -> bool:
+    return row.get("min_views") is not None or row.get("posted_after") is not None
+
+
+def _filter_settings(row: dict[str, Any]) -> dict[str, Any]:
+    return {"min_views": None if row.get("min_views") is None else int(row["min_views"]),
+            "posted_within_days": None if row.get("posted_within_days") is None else int(row["posted_within_days"]),
+            "posted_after": row.get("posted_after")}
+
+
+def _views_filter(batch: dict[str, Any]) -> dict[str, Any] | None:
+    """Filtros da importação por perfil (migrations 0017 e 0019): totais por veredito + a página aberta (`pending`),
+    como em `_listing_dropped`. None = lote sem filtro."""
+    if not _filters_on(batch):
+        return None
+
+    def counts(value: Any) -> dict[str, int]:
+        data = load_listing_counts(value)
+        return {key: v if isinstance(v := data.get(key), int) and not isinstance(v, bool) and v > 0 else 0
+                for key in VIEWS_KEYS}
+
+    total, partial = counts(batch.get("listing_views")), counts(batch.get("listing_views_partial"))
+    merged = {key: total[key] + partial[key] for key in VIEWS_KEYS}
+    return {**_filter_settings(batch), "analyzed": sum(merged.values()), **merged, "pending": sum(partial.values())}
+
+
+def _group_views_filter(group: dict[str, Any], row: dict[str, Any]) -> dict[str, Any] | None:
+    """Soma dos filhos (group_aggregates); None = grupo sem filtro."""
+    if not _filters_on(group):
+        return None
+    merged = {key: int(row.get(f"views_{key}") or 0) for key in VIEWS_KEYS}
+    return {**_filter_settings(group), "analyzed": sum(merged.values()), **merged, "pending": 0}
+
+
 def _last_export(export: dict[str, Any] | None) -> dict[str, Any] | None:
     if export is None:
         return None
@@ -142,9 +176,11 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
             "status": status,
             "attention": counts["attention"] + counts["failed"] > 0,
             "profiles": {"total": total, **counts},
-            "profile_end_count": int(row.get("profile_end", 0)),
+            "profile_end_count": int(row.get("profile_end") or 0),
+            "period_end_count": int(row.get("period_end") or 0),
             "progress": {"found": found, **{key: int(row.get(key, 0)) for key in _PROGRESS_KEYS}},
             "listing_dropped_total": int(row.get("dropped", 0)),
+            "views_filter": _group_views_filter(group, row),
             "last_export": _last_export(exports.get(group["id"])),
         })
     return result
@@ -191,7 +227,10 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
         # needs_attention): já aparece no total para não ficar invisível, e vira definitiva (ou é substituída pela
         # contagem da página refeita) sem somar duas vezes.
         data["listing_dropped"] = _listing_dropped(batch)
-        data["listing_end"] = batch.get("listing_end")
+        # Listagem encerrada pelo corte do período (migration 0019): a coluna da 0012 guarda 'profile_end'.
+        data["listing_end"] = ("period_end" if batch.get("listing_end") == "profile_end"
+                               and batch.get("listing_period_end") else batch.get("listing_end"))
+        data["views_filter"] = _views_filter(batch)
         if batch.get("import_mode") == "links":
             data["import_mode"] = "links"
             data["links"] = link_counts.get(batch["id"], {"total": 0, "pending": 0, "resolved": 0, "failed": 0})

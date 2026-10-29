@@ -181,3 +181,30 @@ def test_full_import_with_real_threads(harness_factory):
     result = harness.batch(batch["id"])
     assert result["progress"] == {"found": 6, "downloaded": 6, "processed": 6, "skipped": 0, "failed": 0,
                                   "pending": 0, "active": 0}
+
+
+def test_without_min_views_the_import_is_identical(harness_factory, caplog):
+    """Filtro de visualizações desligado = comportamento de antes: o fake com a assinatura antiga de
+    `iter_profile_media` (sem `min_views`) quebraria se o kwarg fosse repassado; corpo sem a chave e com `null` dão
+    exatamente os mesmos jobs e lotes; colunas novas NULL; `views_filter` null; nenhuma linha de log do filtro."""
+    snapshots = []
+    for extra in ({}, {"min_views": None}):
+        harness = harness_factory(downloader=FakeInstagramDownloader(
+            items=[remote(f"POST{i:02d}", media_type="video" if i % 2 else "image") for i in range(6)]))
+        single = harness.import_profile(content_type="reels", limit=4, **extra)
+        group = harness.client.post("/api/import-groups", json={"profiles": ["perfil_dois"], "content_type": "videos",
+                                                                "limit": None, **extra})
+        assert group.status_code == 202 and group.json()["group"]["views_filter"] is None
+        harness.run_all()
+        assert harness.batch(single["id"])["views_filter"] is None
+        batches = [dict(r) for r in harness.ctx.db.fetchall("SELECT * FROM batches ORDER BY id")]
+        assert all(b.pop("min_views") is None and b.pop("listing_views") is None
+                   and b.pop("listing_views_partial") is None for b in batches)
+        jobs = [dict(r) for r in harness.ctx.db.fetchall("SELECT * FROM jobs ORDER BY id")]
+        assert jobs and harness.ctx.db.scalar("SELECT min_views FROM import_groups") is None
+        volatile = ("created_at", "updated_at", "started_at", "finished_at", "lease_until", "heartbeat_at",
+                    "next_attempt_at", "lease_owner", "elapsed_seconds")
+        snapshots.append([{k: v for k, v in row.items() if k not in volatile} for row in batches + jobs])
+    assert snapshots[0] == snapshots[1]
+    messages = [r.getMessage() for r in caplog.records]
+    assert not [m for m in messages if "filtro de visualizações" in m or "min_views=" in m or ", min_views " in m]

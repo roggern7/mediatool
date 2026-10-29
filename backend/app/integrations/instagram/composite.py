@@ -41,15 +41,18 @@ FALLBACK_CODES: frozenset[str] = frozenset({"contract_changed", "unsupported_med
 NO_FALLBACK_DETAILS: frozenset[str] = frozenset({"cursor_missing_with_errors"}) | LISTING_ANOMALY_DETAILS
 
 
-# "Todos" (limit None) e `photos_carousels` só existem no provider web: o gallery-dl truncaria em 5.000 itens
-# (fingindo fim de perfil) e recusa o filtro. Nunca são atendidos pelo legado, nem por fallback.
-WEB_ONLY_MESSAGE = ("\"Todos\", \"Publicações do feed\" e quantidades acima de 5.000 exigem o método de importação web; "
-                    "o método gallery-dl não lista o perfil até o fim, para em 5.000 mídias e não conhece esse "
-                    "filtro.")
+# "Todos" (limit None), `photos_carousels` e os filtros de visualizações mínimas e de período de postagem só existem
+# no provider web: o gallery-dl truncaria em 5.000 itens (fingindo fim de perfil), recusa o filtro de conteúdo, não
+# expõe contagem de visualizações e não encerra a listagem pelo período. Nunca são atendidos pelo legado, nem por
+# fallback.
+WEB_ONLY_MESSAGE = ("\"Todos\", \"Publicações do feed\", quantidades acima de 5.000 e os filtros de visualizações "
+                    "mínimas e de período de postagem exigem o método de importação web; o método gallery-dl não "
+                    "lista o perfil até o fim, para em 5.000 mídias e não conhece esses filtros.")
 
 
-def web_only(content: str, limit: int | None) -> bool:
-    return limit is None or limit > LEGACY_MAX_ITEMS or content == "photos_carousels"
+def web_only(content: str, limit: int | None, min_views: int | None = None, posted_after: str | None = None) -> bool:
+    return (limit is None or limit > LEGACY_MAX_ITEMS or content == "photos_carousels" or min_views is not None
+            or posted_after is not None)
 
 
 def _no_fallback(exc: InstagramError) -> bool:
@@ -151,24 +154,30 @@ class CompositeInstagramDownloader(InstagramDownloader):
         cancel: threading.Event | None = None,
         resume: ListingCheckpoint | None = None,
         on_checkpoint: Callable[[ListingCheckpoint], None] | None = None,
+        min_views: int | None = None,
+        posted_after: str | None = None,
     ) -> Iterator[RemoteMedia]:
-        # resume/on_checkpoint só são repassados quando informados (providers antigos não os conhecem).
+        # resume/on_checkpoint/min_views/posted_after só são repassados quando informados (providers antigos não os conhecem).
         extra: dict = {}
         if resume is not None:
             extra["resume"] = resume
         if on_checkpoint is not None:
             extra["on_checkpoint"] = on_checkpoint
+        if min_views is not None:
+            extra["min_views"] = min_views
+        if posted_after is not None:
+            extra["posted_after"] = posted_after
         if self.strategy == "gallery_dl":
-            if web_only(content, limit):
+            if web_only(content, limit, min_views, posted_after):
                 # Erro claro em vez de truncar em 5.000 ou falhar de forma obscura (a API já recusa na criação).
                 raise InstagramError("invalid_input", WEB_ONLY_MESSAGE)
             self._listing_source = self.fallback
             return self.fallback.iter_profile_media(username, content, limit, cancel=cancel, **extra)
         self._listing_source = self.primary
         primary = self.primary.iter_profile_media(username, content, limit, cancel=cancel, **extra)
-        if self.strategy == "web" or resume is not None or web_only(content, limit):
+        if self.strategy == "web" or resume is not None or web_only(content, limit, min_views, posted_after):
             # Seção 9 (M5): com resume não há fallback (o gallery-dl recomeçaria do início, fora do checkpoint).
-            # "Todos"/`photos_carousels`: sem fallback em `auto`; o erro do web fica visível no lote.
+            # "Todos"/`photos_carousels`/filtro de visualizações: sem fallback em `auto`; o erro do web fica visível.
             return primary
         return self._iter_auto(primary, username, content, limit, cancel, extra)
 

@@ -73,19 +73,36 @@ interface ImportOptionsInput {
   presetId?: number | null;
   /** "Editar após baixar": manda `edit` com `process: false` e `preset_id: null` (exclusivo com o preset). */
   edit?: EditSettings | null;
+  /** Visualizações mínimas (só vídeos); null/ausente = sem filtro. */
+  minViews?: number | null;
+  /** Período de postagem: últimos N dias; null/ausente = qualquer data. */
+  postedWithinDays?: number | null;
+}
+
+/** Filtros da importação por perfil: sem filtro a chave nem aparece (o corpo fica idêntico ao de antes). */
+function withFilters<T extends object>(body: T, input: ImportOptionsInput) {
+  return {
+    ...body,
+    ...(typeof input.minViews === "number" ? { min_views: input.minViews } : {}),
+    ...(typeof input.postedWithinDays === "number" ? { posted_within_days: input.postedWithinDays } : {}),
+  };
 }
 
 function commonBody(input: ImportOptionsInput) {
   if (input.edit) {
-    return { content_type: input.content, limit: input.limit, preset_id: null, process: false, edit: input.edit };
+    return withFilters(
+      { content_type: input.content, limit: input.limit, preset_id: null, process: false, edit: input.edit },
+      input,
+    );
   }
   const process = input.processAfterDownload ?? PROCESS_AFTER_DOWNLOAD_DEFAULT;
-  return {
+  const body = {
     content_type: input.content,
     limit: input.limit,
     preset_id: process ? (input.presetId ?? null) : null,
     process,
   };
+  return withFilters(body, input);
 }
 
 /**
