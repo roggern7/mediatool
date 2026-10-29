@@ -529,6 +529,13 @@ EDIT = {"metadata_cleanup": False, "trim_start": 0.0, "mirror": False, "speed": 
     ({"max_duration": 60.03, "speed": 1.25, "sharpen": True}, "_editado_60s_1.25x_nitido"),
     ({"sharpen": True}, "_editado_nitido"),
     ({}, "_editado"),   # só converter para MP4, sem outra mudança
+    # recorte manual: início-fim (2 casas) no lugar do limite de duração
+    ({"trim_start": 3.25, "cut_end": 12.8, "speed": 1.05}, "_editado_3.25-12.8_1.05x"),
+    ({"trim_start": 2.5, "cut_end": 7.125}, "_editado_2.5-7.125"),   # milissegundos não colidem com 7.12
+    ({"trim_start": 2.5, "cut_end": 7.12}, "_editado_2.5-7.12"),
+    ({"trim_start": 0.0, "cut_end": 9.999, "sharpen": True}, "_editado_0-9.999_nitido"),
+    ({"trim_start": 7199.875, "cut_end": 7200.0, "speed": 1.5, "sharpen": True},
+     "_editado_7199.875-7200_1.5x_nitido"),
 ])
 def test_rendition_tag_for_edits(changes, expected):
     assert rendition_tag({"preset_id": None, "preset_name": "Edição", "params": {**EDIT, **changes}}) == expected

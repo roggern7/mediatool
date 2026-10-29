@@ -1287,3 +1287,313 @@ details.more > summary:hover {
 .edit-job:first-child {
   border-top: 0;
 }
+
+/* ---------- Editor de recorte (tela cheia) ---------- */
+
+.trim-overlay {
+  padding: 16px;
+  align-items: stretch;
+}
+.trim-editor {
+  width: min(1400px, 100%);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 12px 16px;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+.trim-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.trim-head h2 {
+  font-size: 15px;
+  flex: 1;
+  min-width: 0;
+}
+.trim-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 180px;
+  background: #000;
+  border-radius: 4px;
+  display: flex;
+  justify-content: center;
+}
+.trim-video {
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+  cursor: pointer;
+  position: absolute;
+  inset: 0;
+}
+.trim-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.trim-readout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 13px;
+}
+.trim-readout strong {
+  font-weight: 600;
+  margin-left: 4px;
+}
+.trim-timeline-scroll {
+  flex: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+.trim-timeline-empty {
+  height: 98px;
+}
+/* Margem interna = largura do puxador (HANDLE_PAD em TrimTimeline.tsx): puxadores em 0 e na duração ficam inteiros
+   dentro da área visível; overflow escondido evita rolagem lateral a 1x (rótulos, agulha). */
+.trim-timeline {
+  position: relative;
+  box-sizing: border-box;
+  min-width: 100%;
+  height: 96px;
+  padding: 0 16px;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  cursor: pointer;
+}
+.trim-track {
+  position: relative;
+  height: 100%;
+}
+.trim-timeline.dragging {
+  cursor: grabbing;
+}
+.trim-ruler {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 20px;
+  border-bottom: 1px solid var(--border);
+  background-image: linear-gradient(to right, var(--border-strong) 1px, transparent 1px);
+  background-repeat: repeat-x;
+  background-position: left bottom;
+}
+.trim-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding-left: 3px;
+  border-left: 1px solid var(--text-dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.trim-tick.last {
+  transform: translateX(-100%);
+  padding: 0 3px 0 0;
+  border-left: none;
+  border-right: 1px solid var(--text-dim);
+}
+.trim-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 24px;
+  bottom: 6px;
+  display: flex;
+  background: var(--surface-3);
+  border-radius: 3px;
+}
+.trim-strip-cell {
+  height: 100%;
+  overflow: hidden;
+  border-right: 1px solid rgba(0, 0, 0, 0.35);
+}
+.trim-strip-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+.trim-shade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.62);
+  pointer-events: none;
+}
+.trim-region {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  border-top: 2px solid var(--warn);
+  border-bottom: 2px solid var(--warn);
+  pointer-events: none;
+}
+.trim-handle {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 16px;
+  background: var(--warn);
+  cursor: ew-resize;
+  z-index: 2;
+}
+.trim-handle.start {
+  transform: translateX(-100%);
+  border-radius: 4px 0 0 4px;
+}
+.trim-handle.end {
+  border-radius: 0 4px 4px 0;
+}
+.trim-handle::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 35%;
+  bottom: 35%;
+  border-left: 1px solid rgba(0, 0, 0, 0.6);
+  border-right: 1px solid rgba(0, 0, 0, 0.6);
+}
+.trim-handle:focus-visible,
+.trim-playhead:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.trim-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--err);
+  z-index: 3;
+  cursor: ew-resize;
+}
+.trim-playhead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -6px;
+  width: 14px;
+  height: 14px;
+  background: var(--err);
+  clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%);
+}
+.trim-playhead::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  right: -6px;
+}
+.trim-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+}
+.trim-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.trim-play {
+  min-width: 40px;
+  justify-content: center;
+}
+.trim-zoom {
+  min-width: 28px;
+  text-align: center;
+}
+.trim-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.trim-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: flex-start;
+}
+.trim-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.trim-field label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.trim-field .input {
+  width: 130px;
+}
+.trim-field .field-hint.err {
+  color: var(--err);
+  max-width: 260px;
+}
+.trim-help {
+  flex: 1 1 320px;
+  margin: 0;
+}
+.trim-actions {
+  margin-top: 0;
+}
+.table tr.edit-row-trimmed td {
+  border-bottom: none;
+}
+.table tr.edit-trim-row td {
+  padding-top: 0;
+}
+.edit-trim-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  color: var(--warn);
+}
+.edit-trim-info .btn {
+  color: var(--text);
+}
+@media (max-width: 760px) {
+  .trim-overlay {
+    padding: 0;
+  }
+  .trim-editor {
+    border-radius: 0;
+    padding: 10px;
+  }
+  .trim-stage {
+    min-height: 160px;
+  }
+}

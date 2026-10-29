@@ -20,6 +20,7 @@ import {
   validateEditForm,
 } from "../lib/editSettings";
 import { useToast } from "../lib/toast";
+import type { Trim } from "../lib/trim";
 import { useUploadQueue } from "../lib/useUploadQueue";
 
 /** Edição de vídeos: escolher (biblioteca e arquivos locais), configurar e acompanhar o lote. */
@@ -29,6 +30,8 @@ export function EditPage() {
   // Cópia atual da seleção para os retornos assíncronos dos envios (sem depender do render).
   const selectionRef = useRef<Media[]>([]);
   const [form, setForm] = useState<EditForm>(DEFAULT_EDIT_FORM);
+  // Recorte manual por vídeo da seleção (id da mídia); vídeo que sai da seleção perde o recorte.
+  const [trims, setTrims] = useState<ReadonlyMap<number, Trim>>(() => new Map());
   const [starting, setStarting] = useState(false);
   const [running, setRunning] = useState<{ batchId: number; names: Map<number, string> } | null>(null);
   // Sobe a cada envio local pronto (novo ou duplicado): a lista da biblioteca recarrega.
@@ -37,6 +40,19 @@ export function EditPage() {
   function commitSelection(next: Media[]) {
     selectionRef.current = next;
     setSelection(next);
+    const kept = new Set(next.map((m) => m.id));
+    setTrims((prev) =>
+      [...prev.keys()].every((id) => kept.has(id)) ? prev : new Map([...prev].filter(([id]) => kept.has(id))),
+    );
+  }
+
+  function setTrim(id: number, trim: Trim | null) {
+    setTrims((prev) => {
+      const next = new Map(prev);
+      if (trim) next.set(id, trim);
+      else next.delete(id);
+      return next;
+    });
   }
 
   function add(items: Media[]) {
@@ -81,7 +97,7 @@ export function EditPage() {
     if (blocker || starting) return;
     setStarting(true);
     try {
-      const batch = await api.startEdit(toEditRequest(selection.map((m) => m.id), form));
+      const batch = await api.startEdit(toEditRequest(selection.map((m) => m.id), form, trims));
       setRunning({ batchId: batch.id, names: new Map(selection.map((m) => [m.id, mediaName(m)])) });
       toast.push("ok", `Edição iniciada para ${selection.length} ${selection.length === 1 ? "vídeo" : "vídeos"}.`);
     } catch (err) {
@@ -137,6 +153,8 @@ export function EditPage() {
             <EditSelectionList
               items={selection}
               form={form}
+              trims={trims}
+              onTrim={setTrim}
               onRemove={removeFromSelection}
               onClear={() => commitSelection([])}
             />
@@ -144,7 +162,7 @@ export function EditPage() {
         </div>
 
         <aside className="panel edit-aside">
-          <EditSettingsForm form={form} onChange={setForm} />
+          <EditSettingsForm form={form} onChange={setForm} trimCount={trims.size} />
           <div className="edit-start">
             <button
               type="button"

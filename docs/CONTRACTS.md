@@ -349,7 +349,7 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET | /api/renditions/{id}/file | | arquivo |
 | POST | /api/media/{id}/process | `{preset_id}` | `Job` 202 |
 | POST | /api/media/process | `{media_ids, preset_id}` | `Batch` 202 |
-| POST | /api/edits | `{media_ids: id[] (1..500), settings: EditSettings}` (seção 8.4) | `Batch` 202 (`preset_id: null`, `preset_name: "Edição"`); 404 `media_not_found`; 422 `edit_requires_video`\|`edit_no_changes`\|`validation_error` |
+| POST | /api/edits | `{media_ids: id[] (1..500), settings: EditSettings, trims?: EditTrim[]}` (seção 8.4) | `Batch` 202 (`preset_id: null`, `preset_name: "Edição"`); 404 `media_not_found`; 422 `edit_requires_video`\|`edit_no_changes`\|`edit_trim_out_of_range`\|`validation_error` |
 | DELETE | /api/renditions/{id} | | 204 |
 | DELETE | /api/media/{id} | `?delete_original=true` obrigatório | 204 |
 | POST | /api/media/{id}/open | `{target:"file"\|"folder", rendition_id?}` | `{ok}` |
@@ -807,7 +807,10 @@ criado. Não há teto numérico de ids: o limite é o corpo de 1 MB da requisiç
 não grava nada: o registro, o total, os nomes e o ZIP são os de antes; registro antigo sem a chave = `originals`.
 `"edited"`: só as versões (renditions); `"both"`: o original de cada mídia e depois as versões dela; `total` = arquivos
 (mídias + versões). Quais versões entram: `batch` = as das mídias do lote com `renditions.preset_id IS lote.preset_id`
-e `renditions.params = lote.params` (JSON canônico dos dois lados; são as saídas daquele lote, inclusive as
+e `renditions.params` = params do job `process` daquela mídia no lote (o primeiro); sem o job (apagado pela
+retenção), os guardados em `batch_media.params` (migration 0020: o purge copia os params do job `process` concluído
+junto com o par lote -> mídia); sem nenhum dos dois, `lote.params` (nos lotes sem recorte manual os três são iguais;
+na Edição com recorte o job de um vídeo recortado tem params próprios, seção 8.4) (JSON canônico dos dois lados; são as saídas daquele lote, inclusive as
 reaproveitadas de um job anterior; uma por mídia, a de MENOR id, a mesma que a dedupe do processamento
 (`find_rendition`) devolve e para a qual o job reaproveitado aponta); `group` = a mesma regra em cada filho;
 `library` = TODAS as versões das mídias selecionadas (edições e presets), em ordem de id. Uma versão é lida só pelo
@@ -842,8 +845,9 @@ nem código: `midia_{12 primeiros caracteres do SHA-256}`. Vídeo enviado do PC 
 original enviado (`original_filename`) sem a extensão, sanitizado (dois `clip.mp4` -> `clip.mp4` e `clip (2).mp4`
 pela colisão comum); sem nome enviado, a regra acima. Extensão = a do arquivo no storage (da versão, para uma
 versão). Versão editada/processada: o nome base ganha a marca da versão antes do sufixo de colisão e da extensão
-(`{nome}{marca}[ (n)].{ext}`): Edição (`preset_id` nulo E nome "Edição") = `_editado` + `_{N}s` (limite de duração
-sem a margem de 0,03 s) + `_{V}x` (velocidade diferente de 1) + `_nitido`, ex. `_editado_15s_1.5x`; preset =
+(`{nome}{marca}[ (n)].{ext}`): Edição (`preset_id` nulo E nome "Edição") = `_editado` + `_{início}-{fim}` (recorte
+manual: `trim_start` e `cut_end` com até 3 casas, sem zeros à direita, ex. `_3.25-12.8`, `_2.5-7.125`) ou `_{N}s` (limite de duração sem a margem de
+0,03 s) + `_{V}x` (velocidade diferente de 1) + `_nitido`, ex. `_editado_15s_1.5x`; preset =
 `_{nome do preset sanitizado}` (sem nome: `_processado`; vale também para preset excluído, cujo `preset_id` virou
 nulo); até 40 caracteres; o corte de 120 caracteres é no nome
 base, nunca na marca. Duas versões com a mesma marca caem na colisão comum (` (2)`). Sanitização: Unicode
@@ -1249,6 +1253,11 @@ EditSettings = {
   sharpen: boolean,                // nitidez leve
   output_type: "mp4" | "auto"      // "mp4": sempre recodifica (H.264 + AAC); "auto": copia os fluxos quando nada exige recodificar
 }
+EditTrim = {                       // recorte manual de UM vídeo (editor de recorte da página Editar)
+  media_id: id,                    // precisa estar em media_ids; no máximo um recorte por vídeo
+  start: number,                   // segundos do original, 0..86400
+  end: number                      // segundos do original, 0..86400; end - start >= 0,1; fim exclusivo [start, end)
+}
 ```
 
 - Params gravados (validados por `PresetParams`, neutros omitidos como nos presets): `metadata_cleanup: false`,
@@ -1256,19 +1265,47 @@ EditSettings = {
   `max_duration` = limite + **0,03 s** (`EDIT_DURATION_MARGIN`, somado no backend; 15 -> 15,03) quando há limite e
   `sharpen` quando ligado, e sempre `audio_sync_start: true`. `auto_adjust: false` preserva dimensões, SAR e rotação (metadado de exibição); a única
   mudança de resolução possível é o recorte de 1 px em largura/altura ímpar exigido pelo yuv420p ao recodificar.
+- Recorte manual (`trims`, opcional; ausente ou `[]` = pedido de antes). Vídeo com recorte: o job dele grava os params
+  acima SEM `max_duration` (a duração geral é ignorada para ele) e com `trim_start` = `start` e `cut_end` = `end`
+  (segundos, arredondados ao milissegundo; `trim_start` pode passar dos 30 s dos presets porque é gravado depois da
+  validação do `PresetParams`; `cut_end` não existe em presets). O corte é exato, sem a margem de 0,03 s; velocidade e
+  nitidez gerais valem sobre o trecho: duração final = `(end - start) / speed`. Vídeos sem recorte e os params do
+  lote seguem iguais aos de antes. Com recorte, `edit_no_changes` não se aplica (recortar já é uma edição).
+  Validação: `start`/`end` fora de 0..86400, `end - start < 0,1`, recorte de vídeo fora de `media_ids`, dois
+  recortes do mesmo vídeo, chave extra ou tipo errado -> 422 `validation_error`; `end` maior que a duração conhecida
+  da mídia + 1 ms -> 422 `edit_trim_out_of_range` (lista até 20 ids; duração desconhecida não é checada). Nada é
+  criado em nenhum desses erros.
 - Erros: mídia inexistente -> 404 `media_not_found` (lista até 20 ids); mídia que não é vídeo -> 422
   `edit_requires_video` (lista até 20 ids, nada é criado); `output_type: "auto"` com duração original, velocidade 1,0
   e sem nitidez -> 422 `edit_no_changes` ("Nenhuma edição selecionada."). Só "MP4" sem outras edições é válido
   (normalização para H.264/AAC). Chave extra, tipo errado (strict) ou fora da faixa -> 422 `validation_error`.
 - Ids repetidos contam uma vez. Falha de um item (ex.: duração final fora da tolerância) não interrompe o lote.
 - Dedupe: mesma mídia com os mesmos params reaproveita a rendition existente (job termina `skipped` com o
-  `rendition_id` dela, sem arquivo novo); configuração diferente gera outra rendition.
+  `rendition_id` dela, sem arquivo novo); configuração diferente gera outra rendition. O recorte faz parte dos params:
+  o mesmo recorte (igual ao milissegundo) reaproveita; outro recorte, ou o vídeo sem recorte, gera outra versão.
 - Duração: com limite, a saída fica em limite + 0,03 s (vídeo quantizado por quadro, ver seção 9); vídeo cuja duração
   de saída (depois da velocidade) já cabe no limite não é cortado nem prolongado; vídeo sem áudio continua sem áudio.
 - Exportar editados: pelo fluxo da seção 8.2 com `source: {kind: "batch", id: <lote da edição>}` e
-  `content: "edited"` (ZIP `editados-...zip` ou pasta; nomes `..._editado_15s_1.5x.mp4`). Na página Editar, o painel
+  `content: "edited"` (ZIP `editados-...zip` ou pasta; nomes `..._editado_15s_1.5x.mp4`, com recorte
+  `..._editado_3.25-12.8_1.05x.mp4`). Na página Editar, o painel
   do lote encerrado com saídas oferece "Baixar ZIP dos editados" e "Exportar editados para pasta"; não há exportação
   automática ao concluir.
+
+#### Editor de recorte (página Editar)
+
+Cada vídeo da lista "Selecionados" (e a prévia dele) tem o botão "Recortar", que abre o editor em tela cheia: player
+grande, linha do tempo com régua, tira de 10 a 20 miniaturas geradas no navegador (`<video>` escondido + canvas, um
+quadro por vez), região do recorte com puxadores de início e fim, agulha arrastável (varredura: posição lida uma vez
+por quadro de tela e um seek por vez, sempre para o último ponto pedido) e zoom de 1x a 16x. Tempos em `mm:ss.mmm`
+(milissegundo para baixo); campos de início e fim aceitam `mm:ss.mmm`, `h:mm:ss.mmm` ou segundos (vírgula ou ponto).
+Atalhos: Espaço tocar/pausar, I/O marcar início/fim na agulha, ←/→ 1 quadro (1/fps da mídia ou 1/30 s), Shift+←/→
+1 s, Home/End início/fim do recorte, Esc fecha sem aplicar; nos puxadores focados, ←/→ movem o próprio puxador.
+Mínimo de 0,1 s, puxadores não se cruzam, tudo em `[0, duração]` (a menor entre a do banco e a do navegador). Com fps
+conhecido, agulha e puxadores ficam na grade de quadros e o vídeo é levado ao meio do quadro (primeiro quadro do
+recorte ao mexer no início, último ao mexer no fim). "Aplicar" guarda o recorte só naquele vídeo (linha "Recorte
+00:03.250 → 00:12.800 (9,55 s)" com "Editar recorte"/"Remover recorte"; recorte do vídeo inteiro = sem recorte); a
+coluna "Prevista" mostra `(fim - início) / velocidade` e, com duração geral escolhida, a linha avisa que ela é
+ignorada. O pedido manda `trims` com início e fim no milissegundo para baixo; vídeo que sai da seleção perde o recorte.
 
 #### Editar após baixar (importação)
 
@@ -1415,7 +1452,7 @@ from media_processor import (MediaProcessor, ProcessingOptions, ProbeResult, Pro
 @dataclass(frozen=True) class ProcessingOptions: metadata_cleanup=True; trim_start=0.5; mirror=True; speed=1.05;
     auto_adjust=True; reencode=True;
     zoom=0.0; brightness=0.0; contrast=1.0; saturation=1.0; trim_end=0.0; pitch_shift=0.0; grain=0.0;  # opcionais
-    max_duration=0.0; sharpen=False; audio_sync_start=False;   # edição (opcionais)
+    max_duration=0.0; sharpen=False; audio_sync_start=False; cut_end=0.0;   # edição (opcionais)
     @classmethod from_params(cls, params: dict)   # chave desconhecida ou valor fora da faixa -> ValueError
 @dataclass class ToolInfo: found: bool; path: str|None; version: str|None; error: str|None
 @dataclass class ProbeResult: media_type: "video"|"image"; format_name; duration|None; width|None; height|None; fps|None;
@@ -1458,6 +1495,16 @@ conta como filtro ativo e entra na duração esperada do progresso):
   natural da saída `(duração - trim_start - trim_end efetivo) / speed` passa de `T`; senão é ignorado (vídeo menor não
   é prolongado nem cortado). Com corte o plano é sempre `encode` (stream copy só corta em keyframe) e a duração
   esperada do progresso é `min(natural, T)`. A margem de 0,03 s é do backend (seção 8.4), não do processor.
+- `cut_end` (0..86400 s, 0 = desligado; precisa ser maior que `trim_start`): recorte manual da edição, trecho
+  `[trim_start, cut_end)` da origem. O início é o `trim_start` de sempre (`trim=start=S`/`atrim=start=S` na entrada e
+  o mesmo deslocamento constante `setpts=(PTS-S/TB)[/speed]` e `asetpts=PTS-S/TB` nas duas streams, o que mantém a
+  sincronia; não usa `PTS-STARTPTS` por stream). O fim vira um alvo de saída `T = (cut_end - trim_start) / speed`
+  tratado exatamente como `max_duration` (mesmo `trim=end=T`/`atrim=end=T` depois de `setpts`/`fps`/`atempo`, mesmo
+  `-enc_time_base:v filter`, mesma verificação por stream); com os dois ligados vale o menor alvo. Fim no fim do vídeo
+  (ou depois) = só o corte inicial. Sem `cut_end` o comando é idêntico ao de antes (presets e edições sem recorte;
+  `tests/test_edit_cut.py` compara o hash dos argumentos com os gerados no commit 9648098). Exato por quadro: ficam os
+  quadros com PTS em `[S, cut_end)`; o áudio é exato por amostra. Duração desconhecida no probe: o fim não é aplicado
+  (como o `max_duration`).
 - Com corte, o encoder de vídeo recebe `-enc_time_base:v filter`: sem isso o PTS do vídeo é arredondado para a grade
   1/fps e um vídeo que começa fora da grade (ex.: MPEG-TS com start_time alto) desloca até meio quadro e termina além
   do alvo.
@@ -1468,7 +1515,9 @@ conta como filtro ativo e entra na duração esperada do progresso):
   entre as streams da origem é preservado, nada é "puxado" para 0) e fim = `min(T, fim natural daquela stream)` (nenhuma stream é prolongada:
   áudio mais curto que o vídeo termina onde terminava). Com `frame = 1/fps` do vídeo de saída (ou da origem; 0,1 s se
   desconhecido): fim do vídeo a no máximo `frame + 5 ms` do esperado; fim do áudio a no máximo 25 ms; fim do container
-  a no máximo `frame + 5 ms` do maior fim esperado; início de cada stream a no máximo 50 ms do esperado; deslocamento
+  a no máximo `frame + 5 ms` do maior fim esperado; início de cada stream a no máximo 50 ms do esperado (vídeo:
+  `max(50 ms, frame + 5 ms)`, porque depois de um corte inicial fora da grade o primeiro quadro começa até um quadro
+  depois; só muda algo abaixo de ~22 fps); deslocamento
   vídeo - áudio a no máximo `frame + 25 ms` do esperado. Stream sem duração informada na origem: só o limite superior
   do fim. Violação -> `ProcessingFailedError("duração final fora da tolerância: ...")` e o `.part` é apagado.
 - Medido (FFmpeg 9, testsrc2 + seno 48 kHz, T = 15,03): áudio 15,030 em todos os casos; vídeo 15,033 (30 e 60 fps),

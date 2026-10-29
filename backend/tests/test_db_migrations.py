@@ -354,8 +354,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
 
-    assert apply_migrations(db) == [v for v in (17, 18, 19) if v > applied_until]
-    assert schema_version(db) == 19
+    assert apply_migrations(db) == [v for v in (17, 18, 19, 20) if v > applied_until]
+    assert schema_version(db) == 20
     added = {"import_groups": ("posted_within_days", "posted_after", "history_hidden_at"),
              "batches": ("posted_within_days", "posted_after", "listing_period_end", "history_hidden_at")}
     if applied_until < 17:
@@ -382,7 +382,26 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
 
 
 def test_new_database_gets_17_18_and_19(db):
-    assert apply_migrations(db)[-3:] == [17, 18, 19]
-    assert schema_version(db) == 19
+    assert apply_migrations(db)[-4:] == [17, 18, 19, 20]
+    assert schema_version(db) == 20
     columns = {row["name"] for row in db.fetchall("PRAGMA table_info(batches)")}
     assert {"min_views", "history_hidden_at", "posted_after", "posted_within_days", "listing_period_end"} <= columns
+
+
+def test_batch_media_params_migration_is_additive(tmp_path, db):
+    """Migration 0020 (params do job no batch_media, recorte manual da Edição): pares antigos ficam com NULL."""
+    apply_migrations(db, _migrations_until(tmp_path, 19))
+    _bank_with_rows(db)
+    now = "2026-01-01T00:00:00.000Z"
+    db.execute("INSERT INTO media (id, source_platform, media_type, original_path, original_sha256, file_size,"
+               " created_at, updated_at) VALUES (7, 'local', 'video', 'x', ?, 1, ?, ?)", ("a" * 64, now, now))
+    db.execute("INSERT INTO batch_media (batch_id, media_id) VALUES (1, 7)")
+    before = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
+    assert before
+    assert apply_migrations(db) == [20]
+    rows = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
+    assert all(row.pop("params") is None for row in rows) and rows == before
+    db.execute("UPDATE batch_media SET params = '{\"speed\": 1.0}'")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE batch_media SET params = 'x'")
+    assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"

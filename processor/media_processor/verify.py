@@ -1,4 +1,5 @@
-"""Verificação pura (sem FFmpeg) da duração da saída quando há corte por duração alvo (max_duration)."""
+"""Verificação pura (sem FFmpeg) da duração da saída quando há corte por duração alvo (max_duration) ou recorte
+manual (cut_end)."""
 
 from __future__ import annotations
 
@@ -31,8 +32,9 @@ def check_output_duration(out_probe: ProbeResult, spans: dict[str, StreamSpan], 
     Tudo na linha do tempo de saída (frame = 1/fps do vídeo de saída, ou `fps_hint`, ou 0,1 s):
     - fim do vídeo a no máximo frame + 5 ms do esperado; fim do áudio a no máximo 25 ms;
     - fim do container (start + duração) a no máximo frame + 5 ms do maior fim esperado;
-    - início de cada stream a no máximo 50 ms do esperado e o deslocamento vídeo - áudio a no máximo frame + 25 ms
-      do deslocamento esperado (sincronia preservada);
+    - início de cada stream a no máximo 50 ms do esperado (vídeo: max(50 ms, frame + 5 ms), porque depois de um
+      corte inicial fora da grade de quadros o primeiro quadro começa até um quadro depois) e o deslocamento
+      vídeo - áudio a no máximo frame + 25 ms do deslocamento esperado (sincronia preservada);
     - stream cuja duração a origem não informa: só o limite superior do fim.
     Duração ausente de uma stream de saída usa o fim do container.
     """
@@ -65,7 +67,7 @@ def check_output_duration(out_probe: ProbeResult, spans: dict[str, StreamSpan], 
         low = span.end - tol if span.end_known else start
         if not low <= end <= span.end + tol:
             return f"{NAMES[kind]} termina em {end:.3f}s, esperado {span.end:.3f}s (±{tol:.3f}s)"
-        if abs(start - span.start) > MAX_START:
+        if abs(start - span.start) > (max(MAX_START, frame + VIDEO_SLACK) if kind == "video" else MAX_START):
             return f"{NAMES[kind]} começa em {start:.3f}s, esperado {span.start:.3f}s"
 
     expected_end = max(span.end for span in spans.values())

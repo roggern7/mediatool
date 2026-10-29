@@ -665,10 +665,19 @@ export interface EditSettings {
   output_type: EditOutputType;
 }
 
+/** Recorte manual de um vídeo (segundos do original): trecho [start, end), end - start >= 0,1. */
+export interface EditTrim {
+  media_id: number;
+  start: number;
+  end: number;
+}
+
 export interface EditRequest {
   /** 1 a 500 vídeos. */
   media_ids: number[];
   settings: EditSettings;
+  /** Opcional: no máximo um por vídeo de `media_ids`; para eles a duração geral é ignorada. */
+  trims?: EditTrim[];
 }
 
 export interface UploadResult {

@@ -83,13 +83,19 @@ def effective_max_duration(probe: ProbeResult, opts: ProcessingOptions) -> float
 
     None em imagens, com max_duration desligado e quando a duração natural da saída (depois dos cortes e da
     velocidade) já cabe no alvo: vídeo menor não é prolongado nem recortado.
+    Recorte manual (cut_end): o alvo é a duração do trecho depois da velocidade, (cut_end - trim_start) / speed, sem
+    margem; com max_duration também ligado vale o menor dos dois.
     """
-    if probe.media_type != "video" or opts.max_duration <= EPS or not probe.duration:
+    targets = [opts.max_duration] if opts.max_duration > EPS else []
+    if opts.cut_end > EPS:
+        targets.append((opts.cut_end - opts.trim_start) / opts.speed)
+    if probe.media_type != "video" or not targets or not probe.duration:
         return None
+    target = min(targets)
     natural = (probe.duration - opts.trim_start - effective_trim_end(probe, opts)) / opts.speed
-    if natural <= opts.max_duration + EPS:
+    if natural <= target + EPS:
         return None
-    return opts.max_duration
+    return target
 
 
 @dataclass(frozen=True)
@@ -103,7 +109,7 @@ class StreamSpan:
 
 
 def expected_spans(probe: ProbeResult, opts: ProcessingOptions) -> dict[str, StreamSpan] | None:
-    """Spans esperados de vídeo e áudio quando há corte por duração alvo (None sem corte).
+    """Spans esperados de vídeo e áudio quando há corte por duração alvo ou recorte manual (None sem corte).
 
     Cada stream mantém o próprio início (o ffmpeg só desconta o start_time do container, então o deslocamento entre
     as streams é preservado) e termina em min(alvo, fim natural daquela stream): nenhuma é prolongada.

@@ -1,5 +1,6 @@
 import type { EditDurationMode, EditOutputType, EditRequest, Media } from "../api/types";
 import { formatSeconds, parseDecimal } from "./format";
+import { type Trim, toTrimRequest, trimLength } from "./trim";
 
 // Configurações da página Editar (POST /api/edits): padrões, validação, pedido e duração prevista.
 
@@ -27,6 +28,8 @@ export const AUTO_SAVE_TEXT =
 export const EXPORT_AFTER_HINT = "Ao terminar, baixe o ZIP das versões editadas no painel do lote.";
 export const OUTPUT_AUTO_NOTE = "Corte, velocidade ou nitidez sempre recodificam o vídeo.";
 export const NO_CHANGES_TEXT = "Nenhuma edição selecionada.";
+/** Vídeo com recorte manual: a duração geral não vale para ele. */
+export const TRIM_IGNORES_DURATION_TEXT = "Duração geral ignorada: o corte é exato no recorte marcado.";
 
 export const OUTPUT_OPTIONS: { value: EditOutputType; label: string }[] = [
   { value: "mp4", label: "MP4 (H.264 + AAC)" },
@@ -117,8 +120,13 @@ export function validateEditForm(form: EditForm): string | null {
   return null;
 }
 
-/** Corpo de POST /api/edits. Só chame com o formulário válido. */
-export function toEditRequest(mediaIds: number[], form: EditForm): EditRequest {
+/** Corpo de POST /api/edits. Só chame com o formulário válido. `trims`: recortes manuais por vídeo (só os dos
+ * vídeos de `mediaIds` vão no corpo; sem nenhum, a chave `trims` não é enviada). */
+export function toEditRequest(mediaIds: number[], form: EditForm, trims?: ReadonlyMap<number, Trim>): EditRequest {
+  const items = trims ? mediaIds.flatMap((id) => {
+    const trim = trims.get(id);
+    return trim ? [toTrimRequest(id, trim)] : [];
+  }) : [];
   return {
     media_ids: mediaIds,
     settings: {
@@ -128,13 +136,20 @@ export function toEditRequest(mediaIds: number[], form: EditForm): EditRequest {
       sharpen: form.sharpen,
       output_type: form.outputType,
     },
+    ...(items.length > 0 ? { trims: items } : {}),
   };
 }
 
-/** Duração prevista da saída: duração / velocidade, cortada em limite + 0,03 s quando passar disso. */
-export function predictedDuration(duration: number | null | undefined, form: EditForm): number | null {
-  if (duration === null || duration === undefined || !Number.isFinite(duration) || duration <= 0) return null;
+/** Duração prevista da saída: duração / velocidade, cortada em limite + 0,03 s quando passar disso. Com recorte
+ * manual: (fim - início) / velocidade, sem limite nem margem. */
+export function predictedDuration(
+  duration: number | null | undefined,
+  form: EditForm,
+  trim?: Trim | null,
+): number | null {
   const speed = Number.isFinite(form.speed) && form.speed > 0 ? form.speed : SPEED_MIN;
+  if (trim) return trimLength(trim) / speed;
+  if (duration === null || duration === undefined || !Number.isFinite(duration) || duration <= 0) return null;
   const natural = duration / speed;
   const limit = durationLimit(form);
   if (limit === null) return natural;

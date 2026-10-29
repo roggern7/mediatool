@@ -14,6 +14,7 @@ OPTIONAL_RANGES = {
     "pitch_shift": (-3.0, 3.0),
     "grain": (0.0, 4.0),
     "max_duration": (0.0, 86400.0),
+    "cut_end": (0.0, 86400.0),
 }
 
 
@@ -40,6 +41,9 @@ class ProcessingOptions:
     # Com velocidade, escala também o início do áudio (o atempo mantém o PTS inicial): áudio que começa depois do
     # vídeo continua sincronizado. Desligado = comando idêntico ao de antes (presets).
     audio_sync_start: bool = False
+    # Recorte manual (edição): fim do trecho na linha do tempo da origem, em segundos (0 = desligado). O início do
+    # trecho é o próprio trim_start; a saída é [trim_start, cut_end) / speed, sem margem.
+    cut_end: float = 0.0
 
     def __post_init__(self) -> None:
         for name in ("metadata_cleanup", "mirror", "auto_adjust", "reencode", "sharpen", "audio_sync_start"):
@@ -57,6 +61,8 @@ class ProcessingOptions:
         for name, (low, high) in OPTIONAL_RANGES.items():
             if not low <= getattr(self, name) <= high:
                 raise ValueError(f"{name} deve ficar entre {low:g} e {high:g}")
+        if self.cut_end > 0 and self.cut_end <= self.trim_start:
+            raise ValueError("cut_end deve ser maior que trim_start")
 
     @classmethod
     def from_params(cls, params: dict) -> "ProcessingOptions":

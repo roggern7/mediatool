@@ -88,9 +88,15 @@ def export_extension(original_path: str | None) -> str:
     return ext if _EXTENSION.match(ext) else ""
 
 
+def _seconds(value: float) -> str:
+    """Segundos do recorte no nome: até 3 casas (milissegundo), sem zeros à direita ("2.5", "7.125", "10")."""
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
 def rendition_tag(rendition: dict[str, Any]) -> str:
     """Marca da versão no nome exportado (vem antes do sufixo de colisão). Edição (preset_id NULL e nome "Edição"):
-    `_editado` + `_{N}s` (limite de duração, sem a margem) + `_{V}x` (velocidade diferente de 1) + `_nitido`.
+    `_editado` + `_{início}-{fim}` (recorte manual, segundos com até 3 casas, sem zeros à direita) ou `_{N}s` (limite
+    de duração, sem a margem) + `_{V}x` (velocidade diferente de 1) + `_nitido`.
     Preset (inclusive preset excluído, que fica com preset_id NULL): `_{nome do preset}` (sem nome: `_processado`).
     Sempre segura para nome de arquivo e com até
     MAX_TAG_LENGTH caracteres."""
@@ -98,7 +104,10 @@ def rendition_tag(rendition: dict[str, Any]) -> str:
     if rendition.get("preset_id") is None and rendition.get("preset_name") == EDIT_PRESET_NAME:
         parts = ["_editado"]
         limit = float(params.get("max_duration") or 0)
-        if limit > 0:
+        cut_end = float(params.get("cut_end") or 0)
+        if cut_end > 0:
+            parts.append(f"_{_seconds(float(params.get('trim_start') or 0))}-{_seconds(cut_end)}")
+        elif limit > 0:
             seconds = round(limit - EDIT_DURATION_MARGIN, 3) if limit > EDIT_DURATION_MARGIN else limit
             parts.append(f"_{seconds:g}s")
         speed = float(params.get("speed") or 1)

@@ -21,7 +21,7 @@ FolderKey = Annotated[str, Path(pattern=edit_folders.FOLDER_KEY_PATTERN)]
 @router.post("/edits", response_model=BatchOut, status_code=202)
 def start_edit(ctx: Ctx, body: EditRequest) -> dict[str, Any]:
     """Edita vídeos da biblioteca em lote (seção 8). Progresso por GET /api/batches/{id}."""
-    batch_id = edit_service.start(ctx, body.media_ids, body.settings)
+    batch_id = edit_service.start(ctx, body.media_ids, body.settings, body.trims)
     return batch_single(ctx, batch_id)
 
 

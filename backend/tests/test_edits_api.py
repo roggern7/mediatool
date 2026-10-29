@@ -239,3 +239,170 @@ def test_edit_batch_exports_the_edited_versions_as_zip(lib):
                  for r in renditions}
     originals = {harness.ctx.storage.resolve(harness.ctx.media.get(i)["original_path"]).read_bytes() for i in ids}
     assert contents == processed and not contents & originals
+
+
+# ---------------- recorte manual por vídeo ----------------
+
+def _post_trims(harness, media_ids, trims, **settings):
+    return harness.client.post("/api/edits", json={"media_ids": media_ids, "settings": {**SETTINGS, **settings},
+                                                   "trims": trims})
+
+
+def test_trim_goes_to_job_params_and_ignores_duration(lib):
+    harness, media = lib
+    response = _post_trims(harness, [media["V1"], media["V2"]],
+                           [{"media_id": media["V1"], "start": 0.25, "end": 1.8}])
+    assert response.status_code == 202, response.text
+    batch = response.json()
+    jobs = {j["media_id"]: harness.ctx.jobs.get(j["id"])["params"] for j in harness.batch(batch["id"])["jobs"]}
+    # vídeo recortado: sem max_duration (duração geral ignorada), início e fim exatos, velocidade e nitidez gerais
+    assert jobs[media["V1"]] == {"metadata_cleanup": False, "trim_start": 0.25, "mirror": False, "speed": 1.25,
+                                 "auto_adjust": False, "reencode": True, "sharpen": True, "audio_sync_start": True,
+                                 "cut_end": 1.8}
+    # vídeo sem recorte: como antes; os params do lote são os gerais
+    assert jobs[media["V2"]]["max_duration"] == 15.03 and "cut_end" not in jobs[media["V2"]]
+    assert harness.ctx.batches.get(batch["id"])["params"] == jobs[media["V2"]]
+
+    harness.run_jobs()  # o pipeline monta ProcessingOptions.from_params com o recorte
+    done = harness.batch(batch["id"])
+    assert done["status"] == "completed" and done["counts"]["completed"] == 2
+
+
+def test_trim_without_other_changes_is_a_change(lib):
+    harness, media = lib
+    response = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 0.5, "end": 1.5}],
+                           duration_mode="original", speed=1.0, sharpen=False, output_type="auto")
+    assert response.status_code == 202, response.text
+    params = harness.ctx.jobs.get(harness.batch(response.json()["id"])["jobs"][0]["id"])["params"]
+    assert (params["trim_start"], params["cut_end"], params["reencode"]) == (0.5, 1.5, False)
+
+
+def test_trim_rounds_to_millisecond_and_accepts_long_start(lib):
+    harness, media = lib
+    with harness.ctx.db.transaction():
+        harness.ctx.db.execute("UPDATE media SET duration = 4000 WHERE id = ?", (media["V1"],))
+    response = _post_trims(harness, [media["V1"]],
+                           [{"media_id": media["V1"], "start": 3600.12349, "end": 3700.0004}])
+    assert response.status_code == 202, response.text
+    params = harness.ctx.jobs.get(harness.batch(response.json()["id"])["jobs"][0]["id"])["params"]
+    assert (params["trim_start"], params["cut_end"]) == (3600.123, 3700.0)
+
+
+@pytest.mark.parametrize("trim", [
+    {"start": 1.0, "end": 1.05},        # menos de 0,1 s
+    {"start": 1.0, "end": 0.5},         # fim antes do início
+    {"start": -0.1, "end": 1.0},
+    {"start": 0.0, "end": 86400.5},
+    {"start": "0", "end": 1.0},
+    {"start": 0.0, "end": None},
+    {"start": 0.0},
+    {"start": 0.0, "end": 1.0, "extra": 1},
+])
+def test_trim_validation(lib, trim):
+    harness, media = lib
+    response = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], **trim}])
+    assert response.status_code == 422 and response.json()["code"] == "validation_error", trim
+    assert harness.ctx.batches.list(limit=50, offset=0, source="library")[1] == 0
+
+
+def test_trim_minimum_is_accepted(lib):
+    harness, media = lib
+    response = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 1.2, "end": 1.3}])
+    assert response.status_code == 202, response.text
+
+
+def test_trim_must_match_selection(lib):
+    harness, media = lib
+    outside = _post_trims(harness, [media["V1"]], [{"media_id": media["V2"], "start": 0.0, "end": 1.0}])
+    twice = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 0.0, "end": 1.0},
+                                                 {"media_id": media["V1"], "start": 0.5, "end": 1.0}])
+    for response in (outside, twice):
+        assert response.status_code == 422 and response.json()["code"] == "validation_error"
+    assert harness.ctx.batches.list(limit=50, offset=0, source="library")[1] == 0
+
+
+def test_trim_end_beyond_known_duration(lib):
+    harness, media = lib
+    with harness.ctx.db.transaction():
+        harness.ctx.db.execute("UPDATE media SET duration = 2.0 WHERE id = ?", (media["V1"],))
+    # até 1 ms além da duração é aceito (duração medida pelo navegador, recorte arredondado ao milissegundo)
+    ok = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 0.0, "end": 2.001}])
+    assert ok.status_code == 202, ok.text
+    response = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 0.0, "end": 2.5}])
+    assert response.status_code == 422 and response.json()["code"] == "edit_trim_out_of_range"
+    assert str(media["V1"]) in response.json()["detail"]
+    assert harness.ctx.batches.list(limit=50, offset=0, source="library")[1] == 1
+
+
+def test_trim_dedup(lib):
+    harness, media = lib
+    first = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 0.25, "end": 1.75}])
+    harness.run_jobs()
+    files = _processed_files(harness)
+    rendition = harness.batch(first.json()["id"])["jobs"][0]["rendition_id"]
+    # mesmo recorte (igual ao milissegundo) e mesmas configurações: reaproveita a versão
+    again = _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 0.2500004, "end": 1.75}])
+    harness.run_jobs()
+    job = harness.batch(again.json()["id"])["jobs"][0]
+    assert (job["stage"], job["rendition_id"]) == ("skipped", rendition) and _processed_files(harness) == files
+    # outro recorte (ou sem recorte) gera outra versão
+    _post_trims(harness, [media["V1"]], [{"media_id": media["V1"], "start": 0.5, "end": 1.75}])
+    _post(harness, [media["V1"]])
+    harness.run_jobs()
+    assert len(_processed_files(harness)) == 3
+
+
+def test_trimmed_edit_exports_with_trim_in_name(lib):
+    import io
+    import zipfile
+
+    harness, media = lib
+    batch_id = _post_trims(harness, [media["V1"], media["V2"]],
+                           [{"media_id": media["V1"], "start": 0.25, "end": 1.8}]).json()["id"]
+    harness.run_jobs()
+    response = harness.client.post("/api/exports", json={
+        "source": {"kind": "batch", "id": batch_id}, "destination": {"zip": True}, "content": "edited"})
+    assert response.status_code == 202, response.text
+    while harness.ctx.export_runner.run_next():
+        pass
+    export = harness.client.get(f"/api/exports/{response.json()['id']}").json()
+    with zipfile.ZipFile(io.BytesIO(harness.client.get(export["download_url"]).content)) as archive:
+        names = sorted(archive.namelist())
+    assert len(names) == 2
+    assert sum(name.endswith("_editado_0.25-1.8_1.25x_nitido.mp4") for name in names) == 1
+    assert sum(name.endswith("_editado_15s_1.25x_nitido.mp4") for name in names) == 1
+
+
+def _zip_names(harness, batch_id):
+    import io
+    import zipfile
+
+    response = harness.client.post("/api/exports", json={
+        "source": {"kind": "batch", "id": batch_id}, "destination": {"zip": True}, "content": "edited"})
+    assert response.status_code == 202, response.text
+    while harness.ctx.export_runner.run_next():
+        pass
+    export = harness.client.get(f"/api/exports/{response.json()['id']}").json()
+    with zipfile.ZipFile(io.BytesIO(harness.client.get(export["download_url"]).content)) as archive:
+        return sorted(archive.namelist())
+
+
+def test_trimmed_edit_export_survives_job_retention(lib):
+    from app.db.connection import utc_now
+
+    harness, media = lib
+    ids = [media["V1"], media["V2"]]
+    batch_id = _post_trims(harness, ids, [{"media_id": media["V1"], "start": 0.25, "end": 1.8}]).json()["id"]
+    harness.run_jobs()
+    before = _zip_names(harness, batch_id)
+    # lote posterior nas mesmas mídias: os jobs do primeiro deixam de ser "o último de cada mídia" e a retenção apaga
+    _post(harness, ids, speed=1.5)
+    harness.run_jobs()
+    assert harness.ctx.jobs.purge_finished_before(utc_now(60)) >= 2
+    assert harness.ctx.db.scalar("SELECT COUNT(*) FROM jobs WHERE batch_id = ?", (batch_id,)) == 0
+    stored = {row["media_id"]: row["params"] for row in harness.ctx.db.fetchall(
+        "SELECT media_id, params FROM batch_media WHERE batch_id = ?", (batch_id,))}
+    assert set(stored) == set(ids) and '"cut_end":1.8' in stored[media["V1"]].replace(" ", "")
+    after = _zip_names(harness, batch_id)
+    assert after == before and len(after) == 2
+    assert sum(name.endswith("_editado_0.25-1.8_1.25x_nitido.mp4") for name in after) == 1

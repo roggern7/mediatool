@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 import {
   AUTO_SAVE_TEXT,
   DURATION_NOTE,
@@ -57,10 +57,13 @@ function SpeedControl({ id, value, onChange }: { id: string; value: number; onCh
   const shown = formatEditSpeed(value).replace("x", "");
   const [text, setText] = useState(shown);
   const [invalid, setInvalid] = useState(false);
-  useEffect(() => {
+  // Valor mudou por fora (barra, atalho, botões): o campo acompanha (ajuste de estado durante o render).
+  const [synced, setSynced] = useState(shown);
+  if (synced !== shown) {
+    setSynced(shown);
     setText(shown);
     setInvalid(false);
-  }, [shown]);
+  }
   const set = (speed: number) => onChange(snapSpeed(speed));
   const commit = () => {
     const parsed = parseSpeedInput(text);
@@ -155,7 +158,16 @@ function SpeedControl({ id, value, onChange }: { id: string; value: number; onCh
 }
 
 /** Configurações da edição (a saída é sempre MP4 H.264 + AAC), nesta ordem: duração, velocidade, nitidez e salvamento automático. */
-export function EditSettingsForm({ form, onChange }: { form: EditForm; onChange: (next: EditForm) => void }) {
+export function EditSettingsForm({
+  form,
+  onChange,
+  trimCount = 0,
+}: {
+  form: EditForm;
+  onChange: (next: EditForm) => void;
+  /** Vídeos da seleção com recorte manual (a duração geral não vale para eles). */
+  trimCount?: number;
+}) {
   const base = useId();
   const customId = `${base}-custom`;
   const speedId = `${base}-speed`;
@@ -187,6 +199,13 @@ export function EditSettingsForm({ form, onChange }: { form: EditForm; onChange:
           </div>
         ) : null}
         <div className="field-hint">{DURATION_NOTE}</div>
+        {trimCount > 0 ? (
+          <div className="field-hint">
+            {trimCount === 1 ? "1 vídeo tem recorte manual" : `${trimCount} vídeos têm recorte manual`}: para{" "}
+            {trimCount === 1 ? "ele" : "eles"} a duração acima é ignorada e o corte é exato no trecho marcado (sem os
+            0,03 s); velocidade e nitidez valem sobre o trecho.
+          </div>
+        ) : null}
       </section>
 
       <section className="edit-group">

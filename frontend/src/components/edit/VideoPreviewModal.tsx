@@ -1,3 +1,4 @@
+import { Scissors } from "lucide-react";
 import { useLayoutEffect, useState } from "react";
 import type { Media } from "../../api/types";
 import { versionCountText } from "../../lib/editFolders";
@@ -7,8 +8,8 @@ import { Modal } from "../ui";
 
 /**
  * Player maior de um vídeo (original, com controles e som), com nome, perfil e data. Pode adicionar à edição e
- * apagar (vídeo inteiro ou só as versões editadas) quando os callbacks vêm. Esc ou clique fora fecham; o foco volta
- * para onde estava.
+ * apagar (vídeo inteiro ou só as versões editadas) quando os callbacks vêm; com `onTrim`, abre o editor de recorte.
+ * Esc ou clique fora fecham; o foco volta para onde estava.
  */
 export function VideoPreviewModal({
   media,
@@ -17,6 +18,7 @@ export function VideoPreviewModal({
   onAdd,
   onDeleteMedia,
   onDeleteVersions,
+  onTrim,
 }: {
   media: Media;
   inSelection: boolean;
@@ -24,6 +26,7 @@ export function VideoPreviewModal({
   onAdd?: () => void;
   onDeleteMedia?: () => void;
   onDeleteVersions?: () => void;
+  onTrim?: () => void;
 }) {
   const [duration, setDuration] = useState<number | null>(media.duration);
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
@@ -54,6 +57,12 @@ export function VideoPreviewModal({
             </button>
           ) : null}
           <span className="grow" />
+          {onTrim ? (
+            <button type="button" className="btn" onClick={onTrim}>
+              <Scissors size={14} strokeWidth={1.75} aria-hidden="true" />
+              Recortar
+            </button>
+          ) : null}
           <button type="button" className="btn" onClick={onClose} autoFocus>
             Fechar
           </button>

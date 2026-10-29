@@ -29,10 +29,15 @@ _ITEMS = "SELECT i.media_id FROM export_items i WHERE i.export_id = ?"
 # Versões (renditions) de um lote: as das mídias do lote geradas com o MESMO preset e os MESMOS params do lote (as
 # saídas daquele lote, inclusive as reaproveitadas de um job anterior); uma por mídia, a de MENOR id, a mesma que
 # `MediaRepository.find_rendition` devolve e que o job reaproveitado aponta. No grupo, a mesma regra em cada lote
-# filho (`b` é o lote filho na subconsulta correlacionada).
+# filho (`b` é o lote filho na subconsulta correlacionada). No lote, a mídia com job `process` usa os params DO JOB
+# (ou, depois de a retenção apagar o job, os guardados em `batch_media.params`): na Edição com recorte manual eles
+# diferem dos params do lote (nos outros lotes são iguais aos do lote).
 _BATCH_RENDITIONS = (
     "SELECT MIN(r.id) FROM renditions r JOIN batches b ON b.id = ? WHERE r.preset_id IS b.preset_id"
-    f" AND r.params = b.params AND r.media_id IN ({_BATCH_MEDIA}) GROUP BY r.media_id"
+    " AND r.params = COALESCE((SELECT j.params FROM jobs j WHERE j.batch_id = b.id AND j.media_id = r.media_id"
+    " AND j.kind = 'process' AND j.params IS NOT NULL ORDER BY j.id LIMIT 1),"
+    " (SELECT bm.params FROM batch_media bm WHERE bm.batch_id = b.id AND bm.media_id = r.media_id), b.params)"
+    f" AND r.media_id IN ({_BATCH_MEDIA}) GROUP BY r.media_id"
 )
 _CHILD_MEDIA = (
     "SELECT j.media_id FROM jobs j WHERE j.batch_id = b.id AND j.kind IN ('ingest', 'process')"

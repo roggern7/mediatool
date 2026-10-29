@@ -743,7 +743,9 @@ class JobRepository:
         Biblioteca) e os jobs de lotes ainda abertos (listing/running). Em trechos curtos de escrita.
 
         Antes de apagar, na mesma transação, a relação lote -> mídia dos ingests/process concluídos do trecho vai para
-        `batch_media` (migration 0013): a exportação de um lote antigo continua completa depois da retenção."""
+        `batch_media` (migration 0013): a exportação de um lote antigo continua completa depois da retenção. Do job
+        `process` vão também os params (migration 0020): o vídeo recortado de um lote de Edição continua achando a
+        versão dele."""
         removed = 0
         while True:
             with self.db.transaction() as conn:
@@ -764,9 +766,12 @@ class JobRepository:
                     part = tuple(ids[start:start + 500])
                     marks = placeholders(len(part))
                     conn.execute(
-                        "INSERT OR IGNORE INTO batch_media (batch_id, media_id) SELECT batch_id, media_id FROM jobs"
+                        "INSERT INTO batch_media (batch_id, media_id, params)"
+                        " SELECT batch_id, media_id, CASE WHEN kind = 'process' THEN params END FROM jobs"
                         f" WHERE id IN ({marks}) AND kind IN ('ingest', 'process') AND status = 'completed'"
-                        " AND media_id IS NOT NULL AND batch_id IS NOT NULL",
+                        " AND media_id IS NOT NULL AND batch_id IS NOT NULL"
+                        " ON CONFLICT (batch_id, media_id) DO UPDATE"
+                        " SET params = COALESCE(batch_media.params, excluded.params)",
                         part,
                     )
                     conn.execute(f"DELETE FROM jobs WHERE id IN ({marks})", part)
