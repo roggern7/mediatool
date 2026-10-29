@@ -137,9 +137,11 @@ class BatchRepository:
         return decode_batch(self.db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
 
     def list(self, *, limit: int, offset: int, source: str | None = None, group_id: int | None = None,
-             ungrouped: bool = False) -> tuple[list[dict[str, Any]], int]:
+             ungrouped: bool = False, history: bool = False) -> tuple[list[dict[str, Any]], int]:
         conditions: list[str] = []
         values: list[Any] = []
+        if history:   # histórico de importações: sem os itens removidos dele (migration 0018)
+            conditions.append("history_hidden_at IS NULL")
         if source:
             conditions.append("source = ?")
             values.append(source)
@@ -339,10 +341,14 @@ class BatchRepository:
     def get_group(self, group_id: int) -> dict[str, Any] | None:
         return row_dict(self.db.fetchone("SELECT * FROM import_groups WHERE id = ?", (group_id,)))
 
-    def list_groups(self, *, limit: int, before_id: int | None = None) -> tuple[list[dict[str, Any]], int, int | None]:
-        """Grupos em ordem id DESC. `before_id` (keyset): só ids menores; `next_before_id` é None no fim."""
-        total = int(self.db.scalar("SELECT COUNT(*) FROM import_groups"))
-        where, params = ("WHERE id < ?", (before_id,)) if before_id is not None else ("", ())
+    def list_groups(self, *, limit: int, before_id: int | None = None,
+                    history: bool = False) -> tuple[list[dict[str, Any]], int, int | None]:
+        """Grupos em ordem id DESC. `before_id` (keyset): só ids menores; `next_before_id` é None no fim. `history`:
+        sem os grupos removidos do histórico (migration 0018)."""
+        hidden = "history_hidden_at IS NULL" if history else "1 = 1"
+        total = int(self.db.scalar(f"SELECT COUNT(*) FROM import_groups WHERE {hidden}"))
+        where, params = ((f"WHERE id < ? AND {hidden}", (before_id,)) if before_id is not None
+                         else (f"WHERE {hidden}", ()))
         rows = self.db.fetchall(
             f"SELECT * FROM import_groups {where} ORDER BY id DESC LIMIT ?", (*params, limit + 1))
         next_before_id = rows[limit - 1]["id"] if len(rows) > limit else None
@@ -551,3 +557,8 @@ class BatchRepository:
             " WHERE id = ? AND status IN ('completed', 'cancelled', 'failed')",
             (utc_now(), batch_id),
         )
+        # Lote reaberto volta ao histórico de importações (migration 0018), e o grupo dele também.
+        self.db.execute("UPDATE batches SET history_hidden_at = NULL WHERE id = ? AND history_hidden_at IS NOT NULL",
+                        (batch_id,))
+        self.db.execute("UPDATE import_groups SET history_hidden_at = NULL WHERE history_hidden_at IS NOT NULL"
+                        " AND id = (SELECT group_id FROM batches WHERE id = ?)", (batch_id,))

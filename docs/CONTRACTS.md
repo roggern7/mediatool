@@ -323,14 +323,15 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET/PUT/DELETE | /api/presets/{id} | PUT `{name?, params?}` | `Preset` / 204 (409 builtin) |
 | POST | /api/presets/{id}/duplicate | `{name?}` | `Preset` 201 |
 | POST | /api/instagram/profile | `{profile}` | `ProfileInfo` (preview); prazo 50 s no backend: 504 `timeout`; 429 `rate_limited`; 403 `action_blocked`/`access_refused`; 502 `contract_changed`/`unsupported_media`/`network_error`; 409 `profile_preview_in_progress`; 409 `instagram_paused` |
-| POST | /api/imports | `{profile, content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool}` (`limit: null` = "Todos", até o fim real do perfil; `content_type`: `all`\|`reels`\|`photos_carousels` e os antigos `posts`\|`videos`\|`images`; `process` padrão `false` = download-only; `preset_id` padrão `null`; `process: true` sem `preset_id` usa o preset padrão) | `Batch` 202; 409 `session_missing`; 409 `instagram_paused`; 409 `profile_already_importing`; 422 `invalid_input` |
+| POST | /api/imports | `{profile, content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool}` (`limit: null` = "Todos", até o fim real do perfil; `content_type`: `all`\|`reels`\|`photos_carousels` e os antigos `posts`\|`videos`\|`images`; `process` padrão `false` = download-only; `preset_id` padrão `null`; `process: true` sem `preset_id` usa o preset padrão; `edit?: EditSettings\|null` = "Editar após baixar", seção 8.4) | `Batch` 202; 409 `session_missing`; 409 `instagram_paused`; 409 `profile_already_importing`; 422 `invalid_input`\|`edit_with_preset`\|`edit_no_changes` |
 | POST | /api/import-groups/preview | `{entries?: string[], text?: string}` | `ProfilesPreview` (sem efeitos, sem Instagram); 422 `too_many_profiles` |
-| POST | /api/import-groups | `{profiles: string[], content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool}`, query `children_limit` | `ImportGroupDetail` 202 (com `skipped`, `duplicates`); 422 `invalid_profiles`\|`no_profiles`\|`too_many_profiles`; 409 `profile_already_importing`\|`session_missing`\|`instagram_paused`; 404 `preset_not_found` |
+| POST | /api/import-groups | `{profiles: string[], content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool, edit?: EditSettings\|null}`, query `children_limit` | `ImportGroupDetail` 202 (com `skipped`, `duplicates`); 422 `invalid_profiles`\|`no_profiles`\|`too_many_profiles`\|`edit_with_preset`\|`edit_no_changes`; 409 `profile_already_importing`\|`session_missing`\|`instagram_paused`; 404 `preset_not_found` |
 | GET | /api/import-groups | `limit`<=200, `before_id` | `{items: ImportGroup[], total, next_before_id}` |
 | GET | /api/import-groups/{id} | `children_limit`<=500 (100), `after_position` | `ImportGroupDetail`; 404 `group_not_found` |
 | POST | /api/import-groups/{id}/cancel | query `children_limit` | `ImportGroupDetail`; 409 `group_finished`; 404 `group_not_found` |
 | POST | /api/import-links/preview | `{entries?: string[], text?: string}` | `LinksPreview` `{valid: [{shortcode, url}], invalid: [{entry, reason}], duplicates}` (sem efeitos, sem Instagram); 422 `too_many_links` (seção 8.3) |
-| POST | /api/import-links | `{links: string[], preset_id?\|null, process?: bool}` | `Batch` 202 (com `duplicates`); 422 `invalid_links`\|`no_links`\|`too_many_links`; 409 `session_missing`\|`instagram_paused`; 404 `preset_not_found` (seção 8.3) |
+| POST | /api/import-links | `{links: string[], preset_id?\|null, process?: bool, edit?: EditSettings\|null}` | `Batch` 202 (com `duplicates`); 422 `invalid_links`\|`no_links`\|`too_many_links`\|`edit_with_preset`\|`edit_no_changes`; 409 `session_missing`\|`instagram_paused`; 404 `preset_not_found` (seção 8.3) |
+| POST | /api/imports/history/hide | `{batch_ids?: id[] (lotes avulsos), group_ids?: id[]}` OU `{all_finished: true}`, mais `delete_media?: bool`, `dry_run?: bool` (seção 8.1, "Histórico") | `{batches, groups, video_count, total_bytes, shared_count, dry_run, deleted: MediaDeleteResult\|null}` (`shared_count`: vídeos que também estão em outra importação ainda visível); 409 `import_in_progress`; 422 `batch_in_group`\|`validation_error`; 404 `batch_not_found`\|`group_not_found` |
 | GET | /api/batches | `limit, offset, source?=instagram_import\|library, group_id?, ungrouped?=true` | `{items: Batch[], total}` (padrão: todos os lotes, inclusive filhos de grupo) |
 | GET | /api/batches/{id} | | `Batch` + `jobs: Job[]` |
 | GET | /api/batches/{id}/links | `limit`<=500 (200), `offset` | `{items: BatchLink[], total}`; 404 `batch_not_found` (seção 8.3) |
@@ -621,6 +622,26 @@ conta própria (`attention`, pausa do lote). Erro em um perfil não afeta os out
 (`GET /api/settings` -> `instagram.paused_until`) segura todos e a listagem retoma do checkpoint. Depois de reiniciar
 o app a fila continua de onde parou, na mesma ordem.
 
+#### Histórico de "Importações recentes" (remover e limpar)
+
+`POST /api/imports/history/hide` tira itens da lista de importações recentes SEM apagar o lote: grava
+`history_hidden_at` (migration 0018, aditiva: `batches.history_hidden_at` e `import_groups.history_hidden_at`, NULL =
+visível; não existe 0017 neste código). `GET /api/batches?history=true` e `GET /api/import-groups?history=true` (usados
+pela página Importar em "recentes" e "ver todas") deixam de fora os ocultos, inclusive no `total`; sem `history` as
+listas, `GET /api/batches/{id}`, a Fila, exportações (antigas e novas), "Abrir pasta" e as pastas da página Editar
+(derivadas dos lotes) continuam iguais.
+- Item: `batch_ids` (lote avulso, `source = instagram_import`, sem grupo; filho de grupo -> 422 `batch_in_group`) e/ou
+  `group_ids` (o grupo inteiro). Em andamento (lote `listing`/`running`, inclusive pausado ou aguardando ação; grupo
+  com algum filho assim) -> 409 `import_in_progress` ("Cancele ou aguarde terminar"), nada muda. Cancelado, concluído
+  ou falho pode sair. Repetir num item já oculto é aceito.
+- `all_finished: true`: todos os lotes avulsos e grupos terminados ainda visíveis; os em andamento ficam.
+- Contagem: `video_count`/`total_bytes` (original + versões) dos VÍDEOS dessas importações, pela mesma regra das
+  pastas da página Editar. `dry_run: true` só devolve a contagem (a confirmação da tela mostra quantos vídeos e o
+  espaço).
+- `delete_media: true` (desmarcado por padrão na tela): depois de ocultar, apaga esses vídeos com a mesma rotina de
+  `POST /api/media/delete` (item a item; job ou exportação em andamento -> pulado com o motivo em `deleted.skipped`).
+  Fotos não são apagadas. Um vídeo que também está em outra importação some dela também.
+
 ### 8.2 Exportar para pasta
 
 Camada de exportação amigável sobre a Biblioteca. O armazenamento interno (`storage\originals`, SHA-256, dedupe,
@@ -741,8 +762,8 @@ reaproveitadas de um job anterior; uma por mídia, a de MENOR id, a mesma que a 
 nenhuma versão: 409 `export_empty` ("Este lote não tem versões editadas ou processadas."; grupo/Biblioteca com texto
 equivalente); lote só de download com `both`: só os originais. A regra "uma exportação aberta por origem e modo" vale
 independentemente de `content`. A pasta e o ZIP continuam PLANOS também em `both`; cada arquivo do storage entra uma
-vez. ZIP só de versões: `editados-AAAA-MM-DD-HHMM.zip`; lote de Edição com originais ou os dois:
-`edicao-AAAA-MM-DD-HHMM.zip`. Mudança de comportamento: um lote "Processar com preset" da Biblioteca (só jobs
+vez. ZIP só de versões: `editados-AAAA-MM-DD-HHMM.zip`; lote de Edição da Biblioteca com originais ou os dois:
+`edicao-AAAA-MM-DD-HHMM.zip` (importação com "Editar após baixar" continua `importacao-...zip`). Mudança de comportamento: um lote "Processar com preset" da Biblioteca (só jobs
 `process`) antes dava 409 `export_empty` e agora exporta (os originais das mídias processadas, ou as versões com
 `content`).
 
@@ -1169,6 +1190,26 @@ EditSettings = {
   `content: "edited"` (ZIP `editados-...zip` ou pasta; nomes `..._editado_15s_1.5x.mp4`). Na página Editar, o painel
   do lote encerrado com saídas oferece "Baixar ZIP dos editados" e "Exportar editados para pasta"; não há exportação
   automática ao concluir.
+
+#### Editar após baixar (importação)
+
+`POST /api/imports`, `/api/import-groups` e `/api/import-links` aceitam `edit?: EditSettings | null` (mesmo schema e
+mesmas validações de `POST /api/edits`). Ausente ou `null`: nada muda (download puro ou preset, como antes). Com
+`edit`, o lote (e, no grupo, o `import_groups` e TODOS os filhos) é gravado como lote de Edição nas colunas que já
+existiam, sem migração: `preset_id = null`, `preset_name = "Edição"`, `params` = params da edição (os mesmos de
+`POST /api/edits` para as mesmas configurações) e `process = true`. A resposta mostra `process: true` e
+`preset_name: "Edição"`.
+- Exclusivo: `edit` junto com `process: true` ou com `preset_id` -> 422 `edit_with_preset` (nada é criado). O corpo
+  esperado é `{..., process: false, preset_id: null, edit: {...}}`. Nenhuma mudança (`auto`, original, 1,0x, sem
+  nitidez) -> 422 `edit_no_changes`; chave extra/fora da faixa -> 422 `validation_error`.
+- Cada VÍDEO listado vira um ingest com `preset_id = null`, `preset_name = "Edição"` e os params da edição: depois do
+  download o pool de FFmpeg gera a versão editada pelo mesmo caminho do job `process` (mesmas opções, mesmo comando
+  FFmpeg, mesma verificação de duração; dedupe por mídia + `preset_id` nulo + params, então editar depois pela
+  página Editar com as mesmas configurações reaproveita a versão). FOTO (e qualquer item que a listagem não diga ser
+  vídeo) é só baixada: ingest download-only sem preset (`preset_name = null`, `params = null`); não falha o lote.
+- Progresso, fila, cancelar, repetir falhos, retomar listagem e reinício funcionam como no lote com preset (a
+  configuração fica no lote e em cada job). Exportar `content: "edited"` do lote ou do grupo leva as versões editadas
+  daquele lote (mesma regra `preset_id IS lote.preset_id AND params = lote.params`).
 
 #### Pastas da página Editar (somente leitura)
 

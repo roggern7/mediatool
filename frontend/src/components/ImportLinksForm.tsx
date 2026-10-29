@@ -1,6 +1,6 @@
 import { type ReactNode, useDeferredValue, useMemo, useState } from "react";
 import { ApiError, api } from "../api/client";
-import type { Batch } from "../api/types";
+import type { Batch, EditSettings } from "../api/types";
 import { formatCount } from "../lib/format";
 import { invalidCountText, startLabel } from "../lib/importOptions";
 import {
@@ -36,6 +36,8 @@ export function ImportLinksForm({
   paused,
   process,
   presetId,
+  edit,
+  editProblem,
   processing,
   onCreated,
   onFailed,
@@ -48,6 +50,9 @@ export function ImportLinksForm({
   paused: boolean;
   process: boolean;
   presetId: number | null;
+  /** "Editar após baixar": configurações da edição (null nas outras escolhas) e problema do formulário. */
+  edit: EditSettings | null;
+  editProblem: string | null;
   /** Bloco "Processamento" da tela, o mesmo do modo por perfil. */
   processing: ReactNode;
   onCreated: (batch: Batch) => void;
@@ -79,16 +84,16 @@ export function ImportLinksForm({
     : null;
   const previewError = hasText && !checking && !preview ? previewQuery.error : null;
   const invalidCount = preview ? preview.invalid.length : 0;
-  const canSubmit = linksStartBlocker({ sessionOk, paused, submitting, preview, process, presetId }) === null;
+  const canSubmit = linksStartBlocker({ sessionOk, paused, submitting, preview, process, presetId, editProblem }) === null;
   const summary = linksStartSummary(preview);
 
   async function submit() {
-    const body = buildLinksRequest(preview, { processAfterDownload: process, presetId });
+    const body = buildLinksRequest(preview, { processAfterDownload: process, presetId, edit });
     if (!canSubmit || !body) return;
     setSubmitting(true);
     try {
       const batch = await api.createLinksImport(body);
-      toast.push("ok", linksCreatedMessage(batch, body.links.length, process));
+      toast.push("ok", linksCreatedMessage(batch, body.links.length, process, edit !== null));
       onCreated(batch);
     } catch (err) {
       const failure = interpretLinksStartError(err instanceof ApiError ? err : null);
@@ -183,7 +188,7 @@ export function ImportLinksForm({
       <div className="row" style={{ marginTop: 16, flexWrap: "wrap" }}>
         <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
           {submitting ? <Spinner /> : null}
-          {startLabel({ process, invalid: invalidCount })}
+          {startLabel({ process, invalid: invalidCount, edit: edit !== null })}
         </button>
       </div>
     </form>

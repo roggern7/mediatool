@@ -15,6 +15,8 @@ from app.schemas.batches import (
     BatchLinkList,
     BatchList,
     BatchOut,
+    HistoryHideRequest,
+    HistoryHideResult,
     ImportGroupDetail,
     ImportGroupList,
     ImportGroupRequest,
@@ -28,7 +30,7 @@ from app.schemas.batches import (
     RestartListingRequest,
 )
 from app.schemas.instagram import ProfileInfoOut, ProfileRequest
-from app.services import import_service
+from app.services import import_history, import_service
 from app.services.deadline import CallInProgress, DeadlineExceeded, run_with_deadline
 from app.services.instagram_gate import InstagramPaused
 from app.services.instagram_pause import ensure_not_paused, raise_paused
@@ -95,6 +97,7 @@ def create_import(ctx: Ctx, body: ImportRequest) -> dict[str, Any]:
         limit=body.limit,
         preset_id=body.preset_id,
         process=body.process,
+        edit=body.edit,
     )
     return batch_single(ctx, batch_id)
 
@@ -120,6 +123,7 @@ def create_import_group(
         limit=body.limit,
         preset_id=body.preset_id,
         process=body.process,
+        edit=body.edit,
     )
     detail = group_detail(ctx, ctx.batches.get_group(group_id), children_limit=children_limit)
     return {**detail, "skipped": skipped, "duplicates": duplicates}
@@ -130,9 +134,11 @@ def list_import_groups(
     ctx: Ctx,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+    history: bool = False,
 ) -> dict[str, Any]:
-    """Ordem id DESC. Paginação keyset: `before_id` + `next_before_id` (null no fim)."""
-    groups, total, next_before_id = ctx.batches.list_groups(limit=limit, before_id=before_id)
+    """Ordem id DESC. Paginação keyset: `before_id` + `next_before_id` (null no fim). `history=true`: sem os grupos
+    removidos do histórico."""
+    groups, total, next_before_id = ctx.batches.list_groups(limit=limit, before_id=before_id, history=history)
     return {"items": groups_out(ctx, groups), "total": total, "next_before_id": next_before_id}
 
 
@@ -173,8 +179,15 @@ def preview_import_links(body: LinksPreviewRequest) -> dict[str, Any]:
 def create_import_links(ctx: Ctx, body: ImportLinksRequest) -> dict[str, Any]:
     """Um lote com todos os links (um job por mídia de cada publicação); o import runner resolve um link por vez."""
     batch_id, duplicates = import_service.create_import_links(
-        ctx, links=body.links, preset_id=body.preset_id, process=body.process)
+        ctx, links=body.links, preset_id=body.preset_id, process=body.process, edit=body.edit)
     return {**batch_single(ctx, batch_id), "duplicates": duplicates}
+
+
+@router.post("/imports/history/hide", response_model=HistoryHideResult)
+def hide_import_history(ctx: Ctx, body: HistoryHideRequest) -> dict[str, Any]:
+    """Remove do histórico (oculta) lotes avulsos/grupos terminados; os vídeos ficam, salvo `delete_media: true`."""
+    return import_history.hide(ctx, batch_ids=body.batch_ids or [], group_ids=body.group_ids or [],
+                               all_finished=body.all_finished, delete_media=body.delete_media, dry_run=body.dry_run)
 
 
 @router.get("/batches/{batch_id}/links", response_model=BatchLinkList)
@@ -200,11 +213,12 @@ def list_batches(
     source: Literal["instagram_import", "library"] | None = None,
     group_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
     ungrouped: bool = False,
+    history: bool = False,
 ) -> dict[str, Any]:
     """Por padrão lista todos os lotes, inclusive filhos de grupo (compatibilidade). `ungrouped=true` deixa só os
-    avulsos (lotes antigos e importações de um perfil); `group_id=` só os filhos daquele grupo."""
+    avulsos (lotes antigos e importações de um perfil); `group_id=` só os filhos daquele grupo; `history=true` tira os removidos do histórico."""
     items, total = ctx.batches.list(limit=limit, offset=offset, source=source, group_id=group_id,
-                                    ungrouped=ungrouped)
+                                    ungrouped=ungrouped, history=history)
     return {"items": batches_out(ctx, items), "total": total}
 
 

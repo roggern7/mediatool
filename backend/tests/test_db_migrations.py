@@ -222,8 +222,10 @@ def test_dash_streams_migration_is_additive_over_existing_rows(tmp_path, db):
     tables = ("media", "jobs", "job_remote_refs", "batches", "presets")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
 
-    assert apply_migrations(db) == [m.version for m in discover_migrations() if m.version > 15]
-    assert schema_version(db) >= 16
+    # Só até a 0016 (as seguintes acrescentam colunas e têm teste próprio).
+    until_16 = _migrations_until(tmp_path, 16)
+    assert apply_migrations(db, until_16) == [16]
+    assert schema_version(db) == 16
     new_columns = {"media": "video_codec", "job_remote_refs": "dash_streams"}
     for table in tables:
         rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
@@ -242,4 +244,29 @@ def test_dash_streams_migration_is_additive_over_existing_rows(tmp_path, db):
     db.execute("UPDATE media SET video_codec = 'vp9' WHERE id = 1")
     db.execute("UPDATE batches SET status = 'completed' WHERE id = 1")   # trigger da 0005: apaga as referências
     assert db.scalar("SELECT COUNT(*) FROM job_remote_refs") == 0
-    assert apply_migrations(db) == []
+    assert apply_migrations(db, until_16) == []
+
+
+def test_history_hidden_migration_is_additive_over_existing_rows(tmp_path, db):
+    """Migration 0018: `batches.history_hidden_at` e `import_groups.history_hidden_at` (anuláveis) num banco COM
+    dados; nenhuma linha existente muda ou some (NULL = visível no histórico). Não existe 0017 neste código."""
+    assert 17 not in [m.version for m in discover_migrations()]
+    apply_migrations(db, _migrations_until(tmp_path, 16))
+    now = "2026-01-01T00:00:00.000Z"
+    db.execute("INSERT INTO import_groups (id, content_type, requested_limit, process, created_at)"
+               " VALUES (1, 'all', 10, 0, ?)", (now,))
+    db.execute("INSERT INTO batches (id, source, process, status, found, created_at, updated_at)"
+               " VALUES (1, 'instagram_import', 0, 'completed', 0, ?, ?)", (now, now))
+    db.execute("INSERT INTO batches (id, source, process, status, found, created_at, updated_at, group_id,"
+               " group_position) VALUES (2, 'instagram_import', 0, 'completed', 0, ?, ?, 1, 1)", (now, now))
+    tables = ("batches", "import_groups")
+    before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
+    assert apply_migrations(db) == [m.version for m in discover_migrations() if m.version > 16]
+    for table in tables:
+        info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
+        column = info["history_hidden_at"]
+        assert column["type"] == "TEXT" and not column["notnull"] and column["dflt_value"] is None
+        rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
+        assert rows and all(row.pop("history_hidden_at") is None for row in rows)
+        assert rows == before[table], table
+    assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"

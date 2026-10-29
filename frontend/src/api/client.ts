@@ -20,6 +20,8 @@ import type {
   Media,
   MediaDeleteRequest,
   MediaDeleteResult,
+  HistoryHideRequest,
+  HistoryHideResult,
   MediaQuery,
   Paged,
   PickFolderResult,
@@ -191,8 +193,14 @@ export const api = {
     request<ProfilesPreview>("POST", "/import-groups/preview", { body: { entries }, signal }),
   createImportGroup: (req: ImportGroupRequest) =>
     request<ImportGroupDetail>("POST", "/import-groups", { body: req, timeoutMs: SLOW_TIMEOUT_MS }),
-  listImportGroups: (limit = 50, beforeId?: number) =>
-    request<ImportGroupList>("GET", "/import-groups", { query: { limit, before_id: beforeId } }),
+  /** `history`: sem os grupos removidos do histórico de importações. */
+  listImportGroups: (limit = 50, beforeId?: number, history = false) =>
+    request<ImportGroupList>("GET", "/import-groups", {
+      query: { limit, before_id: beforeId, history: history ? "true" : undefined },
+    }),
+  /** Remove do histórico de importações (só oculta; `delete_media` também apaga os vídeos). */
+  hideImportHistory: (body: HistoryHideRequest) =>
+    request<HistoryHideResult>("POST", "/imports/history/hide", { body, timeoutMs: 10 * 60_000 }),
   /** Grupo + uma página de filhos (ordem group_position; a seguinte é `after_position = next_after_position`). */
   getImportGroup: (id: number, opts: { childrenLimit?: number; afterPosition?: number | null } = {}) =>
     request<ImportGroupDetail>("GET", `/import-groups/${id}`, {
@@ -215,10 +223,17 @@ export const api = {
     limit = 10,
     offset = 0,
     source?: Batch["source"],
-    opts: { ungrouped?: boolean; groupId?: number } = {},
+    opts: { ungrouped?: boolean; groupId?: number; history?: boolean } = {},
   ) =>
     request<Paged<Batch>>("GET", "/batches", {
-      query: { limit, offset, source, group_id: opts.groupId, ungrouped: opts.ungrouped ? "true" : undefined },
+      query: {
+        limit,
+        offset,
+        source,
+        group_id: opts.groupId,
+        ungrouped: opts.ungrouped ? "true" : undefined,
+        history: opts.history ? "true" : undefined,
+      },
     }),
   /** Resumo do lote, sem jobs (lista de jobs do lote: listJobs({ batch_id })). */
   getBatch: (id: number, includeJobs = false) =>

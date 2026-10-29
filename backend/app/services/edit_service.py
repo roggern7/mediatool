@@ -46,11 +46,21 @@ def edit_params(settings: EditSettings) -> dict[str, Any]:
     ).model_dump()
 
 
-def start(ctx: AppContext, media_ids: list[int], settings: EditSettings) -> int:
-    """Cria o lote de edição (um job por mídia) e acorda o worker. Devolve o id do lote."""
+def ensure_changes(settings: EditSettings) -> None:
+    """422 `edit_no_changes` quando nada muda (Automático, duração original, 1,0x e sem nitidez)."""
     if (settings.output_type == "auto" and duration_limit(settings) is None and settings.speed == 1.0
             and not settings.sharpen):
         raise AppError(422, "edit_no_changes", "Nenhuma edição selecionada.")
+
+
+def is_edit(row: dict[str, Any]) -> bool:
+    """Lote ou job de Edição: sem preset e com o nome "Edição" (mesma regra da exportação e dos nomes)."""
+    return row.get("preset_id") is None and row.get("preset_name") == EDIT_PRESET_NAME
+
+
+def start(ctx: AppContext, media_ids: list[int], settings: EditSettings) -> int:
+    """Cria o lote de edição (um job por mídia) e acorda o worker. Devolve o id do lote."""
+    ensure_changes(settings)
     unique_ids = list(dict.fromkeys(media_ids))
     items = [ctx.media.get(media_id) for media_id in unique_ids]
     missing = [media_id for media_id, media in zip(unique_ids, items) if media is None]

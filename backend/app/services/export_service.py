@@ -115,7 +115,9 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
         if batch is None:
             raise not_found("Lote", "batch_not_found")
         fields["batch_id"] = source["id"]
-        edit_batch = batch["preset_id"] is None and batch["preset_name"] == EDIT_PRESET_NAME
+        # Lote de Edição da Biblioteca (`edicao-...zip`); importação com "Editar após baixar" continua `importacao-`.
+        edit_batch = (batch["source"] == "library" and batch["preset_id"] is None
+                      and batch["preset_name"] == EDIT_PRESET_NAME)
     elif kind == "group":
         if ctx.batches.get_group(source["id"]) is None:
             raise not_found("Grupo de importação", "group_not_found")

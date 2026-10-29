@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.integrations.instagram.downloader import MAX_IMPORT_LIMIT
 from app.schemas.common import PositiveId, StrictModel
+from app.schemas.edits import EditSettings
 from app.schemas.exports import LastExport
 from app.schemas.jobs import JobOut
+from app.schemas.media import MediaDeleteResult
 
 # Interface: "all" (Todos), "reels" (Reels) e "photos_carousels" (Publicações do feed). "posts", "videos" e "images"
 # continuam aceitos por compatibilidade.
@@ -24,6 +26,9 @@ class ImportRequest(StrictModel):
     preset_id: PositiveId | None = None
     # Download puro é o padrão: o processamento (FFmpeg) é opcional e só acontece com `process: true`.
     process: bool = Field(default=False, strict=True)
+    # "Editar após baixar": cada vídeo baixado ganha a versão editada (as mesmas configurações de POST /edits).
+    # Exclusivo com o preset: `edit` junto com `process: true` ou `preset_id` = 422 `edit_with_preset`.
+    edit: EditSettings | None = None
 
 
 class ProfilesPreviewRequest(StrictModel):
@@ -51,6 +56,7 @@ class ImportGroupRequest(StrictModel):
     limit: ImportLimit | None   # POR PERFIL
     preset_id: PositiveId | None = None
     process: bool = Field(default=False, strict=True)
+    edit: EditSettings | None = None   # aplicada a todos os lotes filhos
 
 
 class LinksPreviewRequest(StrictModel):
@@ -76,6 +82,35 @@ class ImportLinksRequest(StrictModel):
     links: list[str] = Field(min_length=1, max_length=100_000)
     preset_id: PositiveId | None = None
     process: bool = Field(default=False, strict=True)
+    edit: EditSettings | None = None
+
+
+class HistoryHideRequest(StrictModel):
+    """Remover do histórico de importações (POST /imports/history/hide): itens (`batch_ids` de lotes avulsos e/ou
+    `group_ids`) OU `all_finished: true` (todos os terminados). Só oculta; `delete_media: true` também apaga os vídeos
+    (como POST /media/delete). `dry_run: true` só conta (vídeos e espaço), sem mudar nada."""
+
+    batch_ids: Annotated[list[PositiveId], Field(max_length=500)] | None = None
+    group_ids: Annotated[list[PositiveId], Field(max_length=500)] | None = None
+    all_finished: bool = Field(default=False, strict=True)
+    delete_media: bool = Field(default=False, strict=True)
+    dry_run: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _one_target(self) -> HistoryHideRequest:
+        if bool(self.batch_ids or self.group_ids) == self.all_finished:
+            raise ValueError("Informe batch_ids/group_ids ou all_finished (um dos dois).")
+        return self
+
+
+class HistoryHideResult(BaseModel):
+    batches: int        # lotes avulsos ocultados (ou que seriam, em dry_run)
+    groups: int
+    video_count: int    # vídeos dessas importações (mesma regra das pastas da página Editar)
+    total_bytes: int    # originais + versões desses vídeos
+    shared_count: int = 0   # desses vídeos, quantos também estão em outra importação ainda visível
+    dry_run: bool
+    deleted: MediaDeleteResult | None = None   # só com delete_media (sem dry_run)
 
 
 class BatchLinkOut(BaseModel):

@@ -1,8 +1,36 @@
-import type { ContentType, ImportGroupRequest, ImportRequest } from "../api/types";
+import type { ContentType, EditSettings, ImportGroupRequest, ImportRequest } from "../api/types";
+import { type EditForm, toEditRequest, validateEditForm } from "./editSettings";
 import { formatCount } from "./format";
 
 /** Padrão da importação: somente baixar os originais. Não é salvo entre sessões. */
 export const PROCESS_AFTER_DOWNLOAD_DEFAULT = false;
+
+/** Pós-processamento da importação: uma escolha só por lote (preset OU edição, nunca os dois). */
+export type PostProcessing = "none" | "preset" | "edit";
+export const POST_PROCESSING_DEFAULT: PostProcessing = "none";
+export const POST_PROCESSING_OPTIONS: { value: PostProcessing; label: string }[] = [
+  { value: "none", label: "Só baixar" },
+  { value: "preset", label: "Processar com preset" },
+  { value: "edit", label: "Editar após baixar" },
+];
+
+/** Opções do pedido para a escolha da tela: preset só em "preset"; `edit` só em "edit" (configurações da Editar). */
+export function postProcessingOptions(
+  choice: PostProcessing,
+  presetId: number | null,
+  form: EditForm,
+): { processAfterDownload: boolean; presetId: number | null; edit: EditSettings | null } {
+  return {
+    processAfterDownload: choice === "preset",
+    presetId: choice === "preset" ? presetId : null,
+    edit: choice === "edit" ? toEditRequest([], form).settings : null,
+  };
+}
+
+/** Problema do formulário de edição (mesmas validações da página Editar); null fora de "edit" ou se válido. */
+export function editProblemOf(choice: PostProcessing, form: EditForm): string | null {
+  return choice === "edit" ? validateEditForm(form) : null;
+}
 
 /** Tipos de mídia oferecidos na tela (os antigos "posts", "videos" e "images" só aparecem em lotes antigos). */
 export const CONTENT_CHOICES: { value: ContentType; label: string }[] = [
@@ -43,9 +71,14 @@ interface ImportOptionsInput {
   limit: number | null;
   processAfterDownload?: boolean;
   presetId?: number | null;
+  /** "Editar após baixar": manda `edit` com `process: false` e `preset_id: null` (exclusivo com o preset). */
+  edit?: EditSettings | null;
 }
 
 function commonBody(input: ImportOptionsInput) {
+  if (input.edit) {
+    return { content_type: input.content, limit: input.limit, preset_id: null, process: false, edit: input.edit };
+  }
   const process = input.processAfterDownload ?? PROCESS_AFTER_DOWNLOAD_DEFAULT;
   return {
     content_type: input.content,
@@ -163,8 +196,8 @@ export function invalidCountText(n: number): string {
 }
 
 /** Rótulo do botão de início; com entradas inválidas, o próprio botão diz que elas ficam de fora. */
-export function startLabel(input: { process: boolean; invalid: number }): string {
-  const base = input.process ? "Baixar e processar" : "Baixar originais";
+export function startLabel(input: { process: boolean; invalid: number; edit?: boolean }): string {
+  const base = input.edit ? "Baixar e editar" : input.process ? "Baixar e processar" : "Baixar originais";
   if (input.invalid <= 0) return base;
   return `${base} (ignorar ${formatCount(input.invalid)} ${input.invalid === 1 ? "inválida" : "inválidas"})`;
 }

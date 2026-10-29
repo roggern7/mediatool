@@ -2,7 +2,7 @@
 // montado a partir do preview do backend e os textos do lote por link. Funções puras (a tela só liga os estados).
 
 import { describeErrorCode } from "../api/errors";
-import type { BatchLink, BatchLinksSummary, ImportLinksRequest, LinksPreview } from "../api/types";
+import type { BatchLink, BatchLinksSummary, EditSettings, ImportLinksRequest, LinksPreview } from "../api/types";
 import { formatCount } from "./format";
 import { canSubmitImport, invalidCountText } from "./importOptions";
 import { type StartBlocker, interpretStartError } from "./importStart";
@@ -119,6 +119,8 @@ export interface LinksStartState {
   preview: LinksPreview | null;
   process: boolean;
   presetId: number | null;
+  /** "Editar após baixar" com o formulário inválido; ausente/null = sem problema. */
+  editProblem?: string | null;
 }
 
 /** Por que a importação por link não pode começar agora; null quando pode. */
@@ -129,18 +131,23 @@ export function linksStartBlocker(s: LinksStartState): StartBlocker | null {
   if (s.preview === null) return "no_preview";
   if (s.preview.valid.length === 0) return "no_valid";
   if (!canSubmitImport(s.process, s.presetId)) return "preset";
+  if (s.editProblem) return "edit";
   return null;
 }
 
 /**
  * Corpo de POST /api/import-links montado SÓ com as URLs normalizadas de `preview.valid`, nunca com o texto do
- * campo. Download puro é `process: false, preset_id: null`. null sem link válido.
+ * campo. Download puro é `process: false, preset_id: null`; "Editar após baixar" manda `edit` com os dois desligados.
+ * null sem link válido.
  */
 export function buildLinksRequest(
   preview: LinksPreview | null,
-  options: { processAfterDownload: boolean; presetId: number | null },
+  options: { processAfterDownload: boolean; presetId: number | null; edit?: EditSettings | null },
 ): ImportLinksRequest | null {
   if (preview === null || preview.valid.length === 0) return null;
+  if (options.edit) {
+    return { links: preview.valid.map((link) => link.url), preset_id: null, process: false, edit: options.edit };
+  }
   return {
     links: preview.valid.map((link) => link.url),
     preset_id: options.processAfterDownload ? options.presetId : null,
@@ -160,8 +167,10 @@ export function linksCreatedMessage(
   batch: { links?: { total: number } | null },
   sent: number,
   process: boolean,
+  edit = false,
 ): string {
   const count = linksCountText(batch.links?.total ?? sent);
+  if (edit) return `Download e edição de ${count} iniciados.`;
   return process ? `Download e processamento de ${count} iniciados.` : `Download de ${count} iniciado.`;
 }
 

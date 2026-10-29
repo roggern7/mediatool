@@ -2,7 +2,7 @@
 // da resposta/erro da criação. Funções puras (a tela só liga os estados).
 
 import { errorMessageFor } from "../api/errors";
-import type { ContentType, InstagramProvider, ProfilesPreview } from "../api/types";
+import type { ContentType, EditSettings, InstagramProvider, ProfilesPreview } from "../api/types";
 import { skippedFrom, skippedNotice } from "./importGroup";
 import {
   type ImportPlan,
@@ -68,6 +68,7 @@ export type StartBlocker =
   | "no_valid"
   | "limit"
   | "preset"
+  | "edit"
   | "provider";
 
 export interface StartState {
@@ -80,6 +81,8 @@ export interface StartState {
   limit: LimitChoice;
   process: boolean;
   presetId: number | null;
+  /** "Editar após baixar" com o formulário inválido (`editProblemOf`); ausente/null = sem problema. */
+  editProblem?: string | null;
   /** Resultado de `providerBlocker`. */
   providerProblem: string | null;
 }
@@ -93,6 +96,7 @@ export function startBlocker(s: StartState): StartBlocker | null {
   if (s.preview.valid.length === 0) return "no_valid";
   if (!s.limit.ok) return "limit";
   if (!canSubmitImport(s.process, s.presetId)) return "preset";
+  if (s.editProblem) return "edit";
   if (s.providerProblem !== null) return "provider";
   return null;
 }
@@ -127,7 +131,13 @@ export function startSummary(input: {
  */
 export function planFromPreview(
   preview: ProfilesPreview | null,
-  options: { content: ContentType; limit: LimitChoice; processAfterDownload: boolean; presetId: number | null },
+  options: {
+    content: ContentType;
+    limit: LimitChoice;
+    processAfterDownload: boolean;
+    presetId: number | null;
+    edit?: EditSettings | null;
+  },
 ): ImportPlan | null {
   if (preview === null || !options.limit.ok) return null;
   return planImport({
@@ -136,6 +146,7 @@ export function planFromPreview(
     limit: options.limit.limit,
     processAfterDownload: options.processAfterDownload,
     presetId: options.presetId,
+    edit: options.edit,
   });
 }
 

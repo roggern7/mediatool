@@ -55,7 +55,7 @@ from app.integrations.instagram.validation import post_path_kind
 from app.jobs.dash_ref import dash_json
 from app.jobs.errors import JobCancelled, message_with_diagnostic, safe_diagnostic, safe_message
 from app.jobs.pipeline import LINKS_HOLD_DONE_MESSAGE, instagram_paused, links_query_lock
-from app.services import disk
+from app.services import disk, edit_service
 from app.services.instagram_gate import DEFAULT_MAX_PAGES_PER_HOUR, PAGES_STATE_KEY, InstagramPaused
 
 if TYPE_CHECKING:
@@ -1088,6 +1088,10 @@ class ImportRunner:
             "dash_streams": dash_json(item),
         }
         process = batch["process"] and batch["params"] is not None
+        # "Editar após baixar": só vídeo é editado; foto do lote de Edição é só baixada (download-only, sem preset).
+        image_in_edit = process and source["media_type"] != "video" and edit_service.is_edit(batch)
+        if image_in_edit:
+            process = False
         existing = self.ctx.media.find_by_source(
             source["source_platform"], source["source_post_id"], source["source_media_index"]
         )
@@ -1115,7 +1119,7 @@ class ImportRunner:
             batch_id=batch["id"],
             source=source,
             preset_id=batch["preset_id"],
-            preset_name=batch["preset_name"],
+            preset_name=None if image_in_edit else batch["preset_name"],
             params=batch["params"] if process else None,
             **kwargs,
         )

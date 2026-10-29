@@ -262,6 +262,8 @@ export interface ImportLinksRequest {
   links: string[];
   preset_id: number | null;
   process: boolean;
+  /** "Editar após baixar" (as mesmas configurações de POST /api/edits); exclusivo com `process`/`preset_id`. */
+  edit?: EditSettings | null;
 }
 
 export type GroupChildState = "waiting" | "active" | "attention" | "completed" | "failed" | "cancelled";
@@ -486,6 +488,8 @@ export interface ImportRequest {
   /** Opcionais na API (padrão: null e false = só baixar originais); o painel sempre manda os dois. */
   preset_id: number | null;
   process: boolean;
+  /** "Editar após baixar" (as mesmas configurações de POST /api/edits); exclusivo com `process`/`preset_id`. */
+  edit?: EditSettings | null;
 }
 
 export interface ImportGroupRequest {
@@ -495,6 +499,8 @@ export interface ImportGroupRequest {
   limit: number | null;
   preset_id: number | null;
   process: boolean;
+  /** "Editar após baixar" (as mesmas configurações de POST /api/edits); aplicada a todos os perfis; exclusivo com `process`/`preset_id`. */
+  edit?: EditSettings | null;
 }
 
 export type MediaView = "all" | "originals" | "processed";
@@ -661,6 +667,28 @@ export interface MediaDeleteIssue {
   id: number;
   code: string;
   message: string;
+}
+
+/** POST /api/imports/history/hide: itens OU `all_finished`; só oculta do histórico, salvo `delete_media`. */
+export interface HistoryHideRequest {
+  batch_ids?: number[];
+  group_ids?: number[];
+  all_finished?: boolean;
+  /** Também apaga os vídeos dessas importações (mesmas proteções de POST /api/media/delete). */
+  delete_media?: boolean;
+  /** Só conta (vídeos e espaço), sem mudar nada. */
+  dry_run?: boolean;
+}
+
+export interface HistoryHideResult {
+  batches: number;
+  groups: number;
+  video_count: number;
+  total_bytes: number;
+  /** Desses vídeos, quantos também estão em outra importação ainda visível. */
+  shared_count: number;
+  dry_run: boolean;
+  deleted: MediaDeleteResult | null;
 }
 
 export interface MediaDeleteResult {

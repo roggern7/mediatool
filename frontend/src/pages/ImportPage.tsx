@@ -2,8 +2,19 @@ import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { BadgeCheck, Lock, Search, UserRound } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
 import { describeErrorCode } from "../api/errors";
-import type { Batch, ContentType, ImportGroup, Preset, ProfileInfo } from "../api/types";
-import { Field, Empty, ErrorLine, Pill, SkeletonRows, SplitBar, Spinner, Switch } from "../components/ui";
+import type { Batch, ContentType, HistoryHideResult, ImportGroup, Preset, ProfileInfo } from "../api/types";
+import { ConfirmDialog, Field, Empty, ErrorLine, Pill, SkeletonRows, SplitBar, Spinner } from "../components/ui";
+import {
+  DELETE_WARNING,
+  type HistoryTarget,
+  deleteMediaLabel,
+  historyConfirmText,
+  historyConfirmTitle,
+  historyHideBody,
+  historyResultMessage,
+  removeBlockedHint,
+  sharedWarning,
+} from "../lib/importHistory";
 import { formatCount, formatDateTime } from "../lib/format";
 import {
   ACTIVE_BATCH,
@@ -21,11 +32,15 @@ import {
   DEFAULT_LIMIT_TEXT,
   LIMIT_SHORTCUTS,
   type LimitMode,
-  PROCESS_AFTER_DOWNLOAD_DEFAULT,
+  POST_PROCESSING_DEFAULT,
+  POST_PROCESSING_OPTIONS,
+  type PostProcessing,
+  editProblemOf,
   entriesSummary,
   invalidCountText,
   profilesCountText,
   resolveLimit,
+  postProcessingOptions,
   startLabel,
 } from "../lib/importOptions";
 import {
@@ -55,6 +70,8 @@ import { BatchNotice } from "../components/BatchNotice";
 import { BatchLinksPanel } from "../components/BatchLinksPanel";
 import { ImportGroupPanel } from "../components/ImportGroupPanel";
 import { ImportLinksForm } from "../components/ImportLinksForm";
+import { EditSettingsForm } from "../components/edit/EditSettingsForm";
+import { DEFAULT_EDIT_FORM, type EditForm } from "../lib/editSettings";
 import { ImportExportBar } from "../components/ExportPanel";
 import { batchExportOffer, libraryPathForProfile } from "../lib/exportFolder";
 import { listingDropped, listingDroppedSuffix, needsAttention } from "../lib/batchState";
@@ -110,8 +127,10 @@ export function ImportPage() {
   const [limitMode, setLimitMode] = useState<LimitMode>("last");
   const [limitText, setLimitText] = useState(DEFAULT_LIMIT_TEXT);
   const [presetChoice, setPresetChoice] = useState<number | null>(null);
-  // Só estado da tela: toda visita começa em "somente baixar originais".
-  const [processAfter, setProcessAfter] = useState(PROCESS_AFTER_DOWNLOAD_DEFAULT);
+  // Só estado da tela: toda visita começa em "Só baixar".
+  const [post, setPost] = useState<PostProcessing>(POST_PROCESSING_DEFAULT);
+  const [editForm, setEditForm] = useState<EditForm>(DEFAULT_EDIT_FORM);
+  const processAfter = post === "preset";
   const [submitting, setSubmitting] = useState(false);
   const [lookup, setLookup] = useState<{ username: string; info: ProfileInfo } | null>(null);
   const [lookupBusy, setLookupBusy] = useState(false);
@@ -124,6 +143,12 @@ export function ImportPage() {
   // Aviso da última criação (perfis pulados); `groupId` nulo = nada foi criado.
   const [startNotice, setStartNotice] = useState<{ groupId: number | null; text: string } | null>(null);
   const [showAllBatches, setShowAllBatches] = useState(false);
+  // Remover do histórico / limpar histórico: alvo, contagem prévia (dry_run) e a opção de apagar os vídeos.
+  const [historyTarget, setHistoryTarget] = useState<HistoryTarget | null>(null);
+  const [historyPreview, setHistoryPreview] = useState<HistoryHideResult | null>(null);
+  const [historyDelete, setHistoryDelete] = useState(false);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyVersion, setHistoryVersion] = useState(0);
   const panelRef = useRef<HTMLDivElement>(null);
 
   // A lista do campo é recalculada sem travar a digitação (valor adiado) e conferida no backend com debounce.
@@ -164,6 +189,8 @@ export function ImportPage() {
   const lastTest = settings.data?.instagram.last_test ?? null;
   const lastView = lastTest ? describeSessionTest(lastTest) : null;
   const presetId = presetChoice ?? defaultPresetId(presets.data, settings.data?.default_preset_id);
+  const editProblem = editProblemOf(post, editForm);
+  const postOptions = postProcessingOptions(post, presetId, editForm);
   const providerProblem = providerBlocker(settings.data?.instagram_provider, content, limitMode === "all");
   const blocker = startBlocker({
     sessionOk,
@@ -173,6 +200,7 @@ export function ImportPage() {
     limit: limitChoice,
     process: processAfter,
     presetId,
+    editProblem,
     providerProblem,
   });
   const canSubmit = blocker === null;
@@ -184,8 +212,8 @@ export function ImportPage() {
     async () => {
       // Grupos (uma linha cada) + lotes avulsos e antigos; os filhos de grupo não entram na lista.
       const [groups, batches] = await Promise.all([
-        api.listImportGroups(RECENT_ROWS),
-        api.listBatches(RECENT_ROWS, 0, "instagram_import", { ungrouped: true }),
+        api.listImportGroups(RECENT_ROWS, undefined, true),
+        api.listBatches(RECENT_ROWS, 0, "instagram_import", { ungrouped: true, history: true }),
       ]);
       const items = mergeRecent(
         groups.items,
@@ -224,8 +252,7 @@ export function ImportPage() {
     const plan = planFromPreview(preview, {
       content,
       limit: limitChoice,
-      processAfterDownload: processAfter,
-      presetId,
+      ...postOptions,
     });
     if (!canSubmit || !plan) return;
     setSubmitting(true);
@@ -236,7 +263,9 @@ export function ImportPage() {
         setSelected({ kind: "batch", id: batch.id });
         toast.push(
           "ok",
-          processAfter
+          post === "edit"
+            ? `Download e edição de @${plan.body.profile} iniciados.`
+            : processAfter
             ? `Download e processamento de @${plan.body.profile} iniciados.`
             : `Download dos originais de @${plan.body.profile} iniciado.`,
         );
@@ -261,6 +290,36 @@ export function ImportPage() {
     }
   }
 
+  function openHistory(target: HistoryTarget) {
+    setHistoryTarget(target);
+    setHistoryDelete(false);
+    setHistoryPreview(null);
+    api
+      .hideImportHistory(historyHideBody(target, false, true))
+      .then(setHistoryPreview)
+      .catch(() => undefined);
+  }
+
+  async function confirmHistory() {
+    if (historyTarget === null) return;
+    setHistoryBusy(true);
+    try {
+      const result = await api.hideImportHistory(historyHideBody(historyTarget, historyDelete));
+      toast.push("ok", historyResultMessage(result));
+      if (historyTarget.kind === "all" || (shown && shown.kind === historyTarget.kind && shown.id === historyTarget.id)) {
+        setSelected(null);
+        setAuto(null);
+      }
+      setHistoryTarget(null);
+      setHistoryVersion((v) => v + 1);
+      recent.reload();
+    } catch (err) {
+      toast.push("err", messageOf(err));
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
   async function consult() {
     if (singleProfile === null) return;
     const username = singleProfile;
@@ -280,13 +339,26 @@ export function ImportPage() {
 
   const lookupShown = lookup && lookup.username === singleProfile ? lookup.info : null;
 
-  // Vale para os dois modos (por perfil e por link).
+  // Vale para os dois modos (por perfil e por link). Uma escolha só: o lote tem um único pós-processamento.
   const processingBlock = (
     <div style={{ marginTop: 16 }}>
-      <div className="field-label" style={{ marginBottom: 6 }}>
+      <div className="field-label" id="imp-post-label" style={{ marginBottom: 6 }}>
         Processamento
       </div>
-      <Switch checked={processAfter} onChange={setProcessAfter} label="Processar após baixar (opcional)" />
+      <div className="radio-list" role="radiogroup" aria-labelledby="imp-post-label">
+        {POST_PROCESSING_OPTIONS.map((option) => (
+          <label key={option.value} className="radio">
+            <input
+              type="radio"
+              name="imp-post"
+              value={option.value}
+              checked={post === option.value}
+              onChange={() => setPost(option.value)}
+            />
+            <span>{option.label}</span>
+          </label>
+        ))}
+      </div>
       {processAfter ? (
         <div style={{ marginTop: 10, maxWidth: 280 }}>
           <Field
@@ -314,10 +386,22 @@ export function ImportPage() {
           </Field>
         </div>
       ) : null}
+      {post === "edit" ? (
+        <div style={{ marginTop: 10 }}>
+          <EditSettingsForm form={editForm} onChange={setEditForm} />
+          {editProblem ? (
+            <div className="field-error" role="alert" style={{ marginTop: 8 }}>
+              {editProblem}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="muted small" style={{ marginTop: 8 }}>
-        {processAfter
-          ? "Os originais são baixados e, em seguida, processados com o preset escolhido. Os originais ficam guardados."
-          : "Somente os arquivos originais serão baixados, sem nenhum processamento. Se quiser, processe depois pela Biblioteca."}
+        {post === "edit"
+          ? "Os originais são baixados e cada vídeo ganha uma versão editada com estas configurações, como na página Editar. Fotos são só baixadas. Os originais ficam guardados."
+          : processAfter
+            ? "Os originais são baixados e, em seguida, processados com o preset escolhido. Os originais ficam guardados."
+            : "Somente os arquivos originais serão baixados, sem nenhum processamento. Se quiser, processe depois pela Biblioteca."}
       </div>
     </div>
   );
@@ -548,7 +632,7 @@ export function ImportPage() {
                 aria-describedby={providerProblem ? "imp-provider-note" : undefined}
               >
                 {submitting ? <Spinner /> : null}
-                {startLabel({ process: processAfter, invalid: invalidCount })}
+                {startLabel({ process: processAfter, invalid: invalidCount, edit: post === "edit" })}
               </button>
               <span className="grow" />
               <button
@@ -571,6 +655,8 @@ export function ImportPage() {
             paused={paused}
             process={processAfter}
             presetId={presetId}
+            edit={postOptions.edit}
+            editProblem={editProblem}
             processing={processingBlock}
             onCreated={(batch) => {
               // Lista enviada: o campo é limpo e o lote criado abre no acompanhamento, como no modo por perfil.
@@ -631,6 +717,11 @@ export function ImportPage() {
           <h2>{showAllBatches ? "Todas as importações" : "Importações recentes"}</h2>
           {recent.loading && recent.data ? <Spinner /> : null}
           <span className="grow" />
+          {recentItems.length > 0 ? (
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => openHistory({ kind: "all" })}>
+              Limpar histórico
+            </button>
+          ) : null}
           {showAllBatches || recentItems.length > 0 ? (
             <button type="button" className="btn btn-sm btn-ghost" onClick={() => setShowAllBatches((v) => !v)}>
               {showAllBatches ? "ver recentes" : "ver todas"}
@@ -639,8 +730,8 @@ export function ImportPage() {
         </div>
         {showAllBatches ? (
           <>
-            <AllGroups selected={shown} onSelect={setSelected} />
-            <AllBatches selected={shown} onSelect={setSelected} />
+            <AllGroups key={`g${historyVersion}`} selected={shown} onSelect={setSelected} />
+            <AllBatches key={`b${historyVersion}`} selected={shown} onSelect={setSelected} />
           </>
         ) : recent.data === undefined ? (
           recent.error ? (
@@ -651,9 +742,37 @@ export function ImportPage() {
         ) : recentItems.length === 0 ? (
           <Empty title="Nenhuma importação ainda" />
         ) : (
-          <RecentTable items={recentItems} selected={shown} onSelect={setSelected} />
+          <RecentTable items={recentItems} selected={shown} onSelect={setSelected} onRemove={openHistory} />
         )}
       </section>
+      {historyTarget ? (
+        <ConfirmDialog
+          title={historyConfirmTitle(historyTarget)}
+          confirmLabel={historyDelete ? `${historyConfirmTitle(historyTarget)} e apagar os vídeos` : historyConfirmTitle(historyTarget)}
+          danger={historyDelete}
+          focusCancel
+          busy={historyBusy}
+          onConfirm={() => void confirmHistory()}
+          onCancel={() => setHistoryTarget(null)}
+        >
+          <p style={{ margin: "0 0 10px" }}>{historyConfirmText(historyTarget, historyPreview, historyDelete)}</p>
+          <label className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+            <input
+              type="checkbox"
+              checked={historyDelete}
+              disabled={historyBusy}
+              onChange={(e) => setHistoryDelete(e.target.checked)}
+            />
+            <span>{deleteMediaLabel(historyTarget, historyPreview)}</span>
+          </label>
+          {historyDelete ? (
+            <p className="tone-err" style={{ margin: "8px 0 0" }}>
+              {DELETE_WARNING} Vídeos com job ou exportação em andamento são pulados.
+              {sharedWarning(historyPreview) ? ` ${sharedWarning(historyPreview)}` : ""}
+            </p>
+          ) : null}
+        </ConfirmDialog>
+      ) : null}
     </div>
   );
 }
@@ -904,10 +1023,13 @@ function RecentTable({
   items,
   selected,
   onSelect,
+  onRemove,
 }: {
   items: Recent[];
   selected: Selection | null;
   onSelect: (selection: Selection) => void;
+  /** Só na lista de recentes: abre a confirmação de remover o item do histórico. */
+  onRemove?: (target: HistoryTarget) => void;
 }) {
   return (
     <div className="table-wrap">
@@ -923,6 +1045,7 @@ function RecentTable({
             <th className="num">Ignorados</th>
             <th className="num">Erros</th>
             <th>Criado em</th>
+            {onRemove ? <th aria-label="Ações" /> : null}
           </tr>
         </thead>
         <tbody>
@@ -977,6 +1100,26 @@ function RecentTable({
                 <td className="num muted">{formatCount(p.skipped)}</td>
                 <td className={`num ${p.failed > 0 ? "tone-err" : "muted"}`}>{formatCount(p.failed)}</td>
                 <td className="muted nowrap">{formatDateTime(item.created_at)}</td>
+                {onRemove ? (
+                  <td className="nowrap">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost"
+                      disabled={isActiveEntry(entry)}
+                      title={removeBlockedHint(isActiveEntry(entry)) ?? "Remover do histórico"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRemove({
+                          kind: entry.kind,
+                          id: item.id,
+                          label: isGroup ? groupTitle(entry.group) : batchOriginLabel(entry.batch),
+                        });
+                      }}
+                    >
+                      Remover
+                    </button>
+                  </td>
+                ) : null}
               </tr>
             );
           })}
@@ -997,7 +1140,7 @@ function AllGroups({ selected, onSelect }: { selected: Selection | null; onSelec
   const list = useQuery(
     `all-groups:${before ?? "first"}`,
     async () => {
-      const page = await api.listImportGroups(ALL_BATCHES_PAGE, before);
+      const page = await api.listImportGroups(ALL_BATCHES_PAGE, before, true);
       setPollMs((prev) => nextPollMs(prev, page.items.some((g) => g.status === "active")));
       return { ...page, before };
     },
@@ -1053,7 +1196,10 @@ function AllBatches({ selected, onSelect }: { selected: Selection | null; onSele
   const list = useQuery(
     `all-batches:${offset}`,
     async () => {
-      const page = await api.listBatches(ALL_BATCHES_PAGE, offset, "instagram_import", { ungrouped: true });
+      const page = await api.listBatches(ALL_BATCHES_PAGE, offset, "instagram_import", {
+        ungrouped: true,
+        history: true,
+      });
       const items = page.items.filter((b) => b.source === "instagram_import");
       setPollMs((prev) => nextPollMs(prev, items.some((b) => ACTIVE_BATCH.has(b.status))));
       if (page.items.length === 0 && page.total > 0 && offset > 0) setOffset(0);

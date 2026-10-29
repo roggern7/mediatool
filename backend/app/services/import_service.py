@@ -11,6 +11,8 @@ from app.core.errors import AppError, not_found
 from app.db.connection import utc_now
 from app.integrations.instagram.composite import web_only
 from app.integrations.instagram.validation import parse_post_link, parse_profile_input
+from app.schemas.edits import EditSettings
+from app.services import edit_service
 from app.services.context import AppContext
 from app.services.instagram_pause import ensure_not_paused
 from app.services.settings_service import instagram_provider
@@ -45,6 +47,38 @@ def resolve_preset(ctx: AppContext, preset_id: int | None) -> dict[str, Any]:
     return preset
 
 
+EDIT_WITH_PRESET_MESSAGE = (
+    "Escolha um só pós-processamento: \"Processar com preset\" ou \"Editar após baixar\" (não os dois)."
+)
+
+
+def check_edit(edit: EditSettings | None, *, process: bool, preset_id: int | None) -> None:
+    """"Editar após baixar" é exclusivo com o preset (um lote tem um único pós-processamento) e recusa a edição sem
+    nenhuma mudança, como POST /edits. Sem `edit`, não faz nada."""
+    if edit is None:
+        return
+    if process or preset_id is not None:
+        raise AppError(422, "edit_with_preset", EDIT_WITH_PRESET_MESSAGE)
+    edit_service.ensure_changes(edit)
+
+
+def post_processing(
+    ctx: AppContext, *, preset_id: int | None, process: bool, edit: EditSettings | None
+) -> dict[str, Any]:
+    """Campos do lote para o pós-processamento. Com `edit`: lote de Edição (preset_id NULL, nome "Edição", params da
+    edição, `process` ligado), igual ao de POST /edits; sem `edit`, o preset como sempre foi."""
+    if edit is not None:
+        return {"preset_id": None, "preset_name": edit_service.EDIT_PRESET_NAME,
+                "params": edit_service.edit_params(edit), "process": True}
+    preset = resolve_preset(ctx, preset_id) if (process or preset_id is not None) else None
+    return {
+        "preset_id": preset["id"] if preset else None,
+        "preset_name": preset["name"] if preset else None,
+        "params": preset["params"] if (preset and process) else None,
+        "process": process,
+    }
+
+
 WEB_ONLY_MESSAGE = (
     "\"Todos\", \"Publicações do feed\" e quantidades acima de 5.000 exigem o método de importação web. O método "
     "configurado (gallery-dl) não lista o perfil até o fim, para em 5.000 mídias e não conhece esse filtro. Troque o "
@@ -61,9 +95,11 @@ def ensure_provider_supports(ctx: AppContext, content_type: str, limit: int | No
 
 
 def create_import(
-    ctx: AppContext, *, profile: str, content_type: str, limit: int | None, preset_id: int | None, process: bool
+    ctx: AppContext, *, profile: str, content_type: str, limit: int | None, preset_id: int | None, process: bool,
+    edit: EditSettings | None = None,
 ) -> int:
     # `limit=None` = "Todos": a listagem vai até o fim real do perfil (docs/BATCH_ROBUSTNESS.md, seção 0.1).
+    check_edit(edit, process=process, preset_id=preset_id)
     ensure_provider_supports(ctx, content_type, limit)
     try:
         username = parse_profile_input(profile)
@@ -72,7 +108,7 @@ def create_import(
     if not ctx.session_provider.status().configured:
         raise AppError(409, "session_missing", SESSION_MISSING_MESSAGE)
     ensure_not_paused(ctx)
-    preset = resolve_preset(ctx, preset_id) if (process or preset_id is not None) else None
+    fields = post_processing(ctx, preset_id=preset_id, process=process, edit=edit)
     # Conferência e criação na mesma transação: duas requisições simultâneas não abrem duas listagens do perfil.
     with ctx.db.transaction():
         if ctx.batches.open_listing_for_profile(username) is not None:
@@ -83,10 +119,7 @@ def create_import(
             source_profile=username,
             content_type=content_type,
             requested_limit=limit,
-            preset_id=preset["id"] if preset else None,
-            preset_name=preset["name"] if preset else None,
-            params=preset["params"] if (preset and process) else None,
-            process=process,
+            **fields,
         )
     logger.info("Lote %s criado: importação de %s (%s, limite %s)", batch_id, username, content_type, limit)
     ctx.wake_import_runner()
@@ -159,10 +192,12 @@ def parse_profile_entries(entries: list[str]) -> tuple[list[str], list[dict[str,
 
 def create_import_group(
     ctx: AppContext, *, profiles: list[str], content_type: str, limit: int | None, preset_id: int | None,
-    process: bool,
+    process: bool, edit: EditSettings | None = None,
 ) -> tuple[int, list[dict[str, str]], int]:
     """Uma importação pai e um lote filho por perfil (na ordem da lista; `limit` é POR PERFIL). Retorna
-    (id do grupo, perfis pulados por já terem importação ativa, repetições removidas)."""
+    (id do grupo, perfis pulados por já terem importação ativa, repetições removidas). Com `edit`, o grupo e todos
+    os filhos são lotes de Edição."""
+    check_edit(edit, process=process, preset_id=preset_id)
     ensure_provider_supports(ctx, content_type, limit)
     valid, invalid, duplicates = parse_profile_entries(profiles)
     if invalid:
@@ -174,14 +209,10 @@ def create_import_group(
     if not ctx.session_provider.status().configured:
         raise AppError(409, "session_missing", SESSION_MISSING_MESSAGE)
     ensure_not_paused(ctx)
-    preset = resolve_preset(ctx, preset_id) if (process or preset_id is not None) else None
     fields: dict[str, Any] = {
         "content_type": content_type,
         "requested_limit": limit,
-        "preset_id": preset["id"] if preset else None,
-        "preset_name": preset["name"] if preset else None,
-        "params": preset["params"] if (preset and process) else None,
-        "process": process,
+        **post_processing(ctx, preset_id=preset_id, process=process, edit=edit),
     }
     # Conferência e criação na mesma transação (como em create_import): um perfil nunca ganha duas listagens.
     with ctx.db.transaction():
@@ -244,11 +275,12 @@ def parse_link_entries(entries: list[str]) -> tuple[list[dict[str, str]], list[d
 
 
 def create_import_links(
-    ctx: AppContext, *, links: list[str], preset_id: int | None, process: bool,
+    ctx: AppContext, *, links: list[str], preset_id: int | None, process: bool, edit: EditSettings | None = None,
 ) -> tuple[int, int]:
     """Um lote de importação por link (`import_mode = 'links'`) com todos os links da lista, na ordem colada.
     Retorna (id do lote, repetições removidas). Nenhuma requisição ao Instagram aqui: o import runner resolve um
     link por vez."""
+    check_edit(edit, process=process, preset_id=preset_id)
     valid, invalid, duplicates = parse_link_entries(links)
     if invalid:
         raise AppError(422, "invalid_links",
@@ -260,17 +292,14 @@ def create_import_links(
     if not ctx.session_provider.status().configured:
         raise AppError(409, "session_missing", SESSION_MISSING_MESSAGE)
     ensure_not_paused(ctx)
-    preset = resolve_preset(ctx, preset_id) if (process or preset_id is not None) else None
+    fields = post_processing(ctx, preset_id=preset_id, process=process, edit=edit)
     with ctx.db.transaction():
         batch_id = ctx.batches.create(
             source="instagram_import",
             status="listing",
             content_type="all",
-            preset_id=preset["id"] if preset else None,
-            preset_name=preset["name"] if preset else None,
-            params=preset["params"] if (preset and process) else None,
-            process=process,
             import_mode="links",
+            **fields,
         )
         ctx.batches.add_links(batch_id, [(link["shortcode"], link["url"]) for link in valid])
     logger.info("Lote %s criado: importação por link (%s links)", batch_id, len(valid))
