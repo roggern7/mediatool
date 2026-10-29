@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
@@ -42,6 +43,25 @@ def _parse_ids(raw: str | None) -> list[int] | None:
     return list(dict.fromkeys(ids))
 
 
+def _parse_instant(name: str, raw: str | None) -> str | None:
+    """Data ISO 8601 com fuso -> mesmo formato de `jobs.created_at` (UTC, milissegundos, `Z`).
+
+    Arredonda para cima no milissegundo: com `created_at` em milissegundos, `created_at >= t` e `created_at < t`
+    equivalem à comparação com o valor arredondado."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(raw.strip())
+        if moment.tzinfo is None:
+            raise ValueError
+        moment = moment.astimezone(UTC)
+        if moment.microsecond % 1000:
+            moment += timedelta(microseconds=1000 - moment.microsecond % 1000)
+    except (ValueError, OverflowError):
+        raise AppError(422, "validation_error", f"{name} deve ser uma data ISO 8601 com fuso horário.") from None
+    return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 @router.get("", response_model=JobList)
 def list_jobs(
     ctx: Ctx,
@@ -51,11 +71,19 @@ def list_jobs(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0, le=10_000_000)] = 0,
     before_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+    created_from: Annotated[str | None, Query(max_length=64)] = None,
+    created_to: Annotated[str | None, Query(max_length=64)] = None,
 ) -> dict[str, Any]:
-    """Ordem id DESC. Paginação keyset: `before_id` + `next_before_id` (null no fim); `offset` por compatibilidade."""
+    """Ordem id DESC. Paginação keyset: `before_id` + `next_before_id` (null no fim); `offset` por compatibilidade.
+
+    Período: `created_from <= created_at < created_to` (cada limite opcional; vale também para `total`/`counts`)."""
+    created_from_utc = _parse_instant("created_from", created_from)
+    created_to_utc = _parse_instant("created_to", created_to)
+    if created_from_utc is not None and created_to_utc is not None and created_from_utc > created_to_utc:
+        raise AppError(422, "validation_error", "created_from deve ser anterior ou igual a created_to.")
     items, total, counts, next_before_id = ctx.jobs.list(
         statuses=_parse_statuses(status), batch_id=batch_id, ids=_parse_ids(ids), limit=limit, offset=offset,
-        before_id=before_id,
+        before_id=before_id, created_from=created_from_utc, created_to=created_to_utc,
     )
     return {"items": jobs_out(ctx, items), "total": total, "counts": counts, "next_before_id": next_before_id}
 

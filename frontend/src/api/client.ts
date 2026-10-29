@@ -299,6 +299,8 @@ export const api = {
         limit: q.limit,
         offset: q.offset,
         before_id: q.before_id,
+        created_from: q.created_from,
+        created_to: q.created_to,
       },
     }),
   getJob: (id: number) => request<Job>("GET", `/jobs/${id}`),

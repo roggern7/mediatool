@@ -531,6 +531,9 @@ export interface JobsQuery {
   limit?: number;
   offset?: number;
   before_id?: number;
+  /** Período de criação [created_from, created_to), ISO 8601 com fuso. */
+  created_from?: string;
+  created_to?: string;
 }
 
 /** Exportação para pasta. Contrato: docs/CONTRACTS.md, seção 8.2. */

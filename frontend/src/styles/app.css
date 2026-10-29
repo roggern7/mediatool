@@ -418,6 +418,14 @@ textarea {
   border-radius: var(--radius);
   overflow: hidden;
 }
+
+/* Tela estreita: as opções do seletor quebram linha em vez de ficarem cortadas (ex.: período e status da Fila). */
+@media (max-width: 640px) {
+  .seg {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+}
 .seg button {
   height: 28px;
   padding: 0 11px;
@@ -622,6 +630,16 @@ table.table {
 }
 .table tbody tr.clickable {
   cursor: pointer;
+}
+/* Separador por dia (Fila). */
+.table tbody tr.day-row:hover {
+  background: transparent;
+}
+.table tbody tr.day-row td {
+  padding: 12px 8px 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
 }
 .table td.actions,
 .table th.actions {
