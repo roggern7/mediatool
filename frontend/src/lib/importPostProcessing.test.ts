@@ -131,6 +131,9 @@ describe("validação da edição antes de iniciar", () => {
 
   it("mesmas mensagens da página Editar; só vale com 'Editar após baixar'", () => {
     expect(editProblemOf("edit", { ...DEFAULT_EDIT_FORM, outputType: "auto" })).toBe(NO_CHANGES_TEXT);
+    // A saída é sempre MP4: sem corte, velocidade ou nitidez, a importação não tem o que editar.
+    expect(editProblemOf("edit", DEFAULT_EDIT_FORM)).toBe(NO_CHANGES_TEXT);
+    expect(editProblemOf("edit", { ...DEFAULT_EDIT_FORM, sharpen: true })).toBeNull();
     expect(editProblemOf("edit", { ...FORM, durationMode: "custom", customText: "" })).toBe(
       "Informe a duração personalizada em segundos.",
     );

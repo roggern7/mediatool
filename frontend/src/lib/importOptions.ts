@@ -1,5 +1,5 @@
 import type { ContentType, EditSettings, ImportGroupRequest, ImportRequest } from "../api/types";
-import { type EditForm, toEditRequest, validateEditForm } from "./editSettings";
+import { type EditForm, NO_CHANGES_TEXT, SPEED_MIN, toEditRequest, validateEditForm } from "./editSettings";
 import { formatCount } from "./format";
 
 /** Padrão da importação: somente baixar os originais. Não é salvo entre sessões. */
@@ -29,7 +29,10 @@ export function postProcessingOptions(
 
 /** Problema do formulário de edição (mesmas validações da página Editar); null fora de "edit" ou se válido. */
 export function editProblemOf(choice: PostProcessing, form: EditForm): string | null {
-  return choice === "edit" ? validateEditForm(form) : null;
+  if (choice !== "edit") return null;
+  // Na importação, sem corte, velocidade ou nitidez só sairia uma cópia recodificada do vídeo baixado (já MP4).
+  if (form.durationMode === "original" && form.speed === SPEED_MIN && !form.sharpen) return NO_CHANGES_TEXT;
+  return validateEditForm(form);
 }
 
 /** Tipos de mídia oferecidos na tela (os antigos "posts", "videos" e "images" só aparecem em lotes antigos). */

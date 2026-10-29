@@ -5,8 +5,6 @@ import {
   DURATION_OPTIONS,
   EXPORT_AFTER_HINT,
   type EditForm,
-  OUTPUT_AUTO_NOTE,
-  OUTPUT_OPTIONS,
   SHARPEN_DESCRIPTION,
   SHARPEN_LABEL,
   SPEED_MAX,
@@ -156,24 +154,13 @@ function SpeedControl({ id, value, onChange }: { id: string; value: number; onCh
   );
 }
 
-/** Configurações da edição, nesta ordem: tipo de saída, duração, velocidade, nitidez e salvamento automático. */
+/** Configurações da edição (a saída é sempre MP4 H.264 + AAC), nesta ordem: duração, velocidade, nitidez e salvamento automático. */
 export function EditSettingsForm({ form, onChange }: { form: EditForm; onChange: (next: EditForm) => void }) {
   const base = useId();
   const customId = `${base}-custom`;
   const speedId = `${base}-speed`;
   return (
     <div className="edit-settings">
-      <section className="edit-group">
-        <h3>Tipo de saída</h3>
-        <RadioGroup
-          name={`${base}-output`}
-          value={form.outputType}
-          options={OUTPUT_OPTIONS}
-          onChange={(outputType) => onChange({ ...form, outputType })}
-        />
-        {form.outputType === "auto" ? <div className="field-hint">{OUTPUT_AUTO_NOTE}</div> : null}
-      </section>
-
       <section className="edit-group">
         <h3>Duração</h3>
         <RadioGroup
