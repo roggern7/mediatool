@@ -429,7 +429,7 @@ def cancel_job(ctx: AppContext, job_id: int) -> None:
 def process_media(ctx: AppContext, media_id: int, preset_id: int) -> int:
     media = ctx.media.get(media_id)
     if media is None:
-        raise not_found("Mídia", "media_not_found")
+        raise not_found("Mídia", "media_not_found", feminine=True)
     preset = resolve_preset(ctx, preset_id)
     job_id = ctx.jobs.create_process(
         media=media, batch_id=None, preset_id=preset["id"], preset_name=preset["name"], params=preset["params"]

@@ -1170,6 +1170,69 @@ EditSettings = {
   do lote encerrado com saídas oferece "Baixar ZIP dos editados" e "Exportar editados para pasta"; não há exportação
   automática ao concluir.
 
+#### Pastas da página Editar (somente leitura)
+
+`GET /api/edit/folders` -> `{items: EditFolder[]}`: os vídeos da Biblioteca separados por vez que o dono importou ou
+enviou. Sem tabela nem migração nova; nada é gravado.
+
+```
+EditFolder = {
+  key: string,                 // "group:<id>" | "batch:<id>" | "local:<aaaa-mm-dd>" | "other"
+  kind: "group" | "batch" | "local" | "other",
+  import_mode: "profile" | "links" | null,   // null em local/other
+  profiles: string[],          // grupo: perfis na ordem do grupo; lote por perfil: [perfil]; link/local/other: []
+  created_at: string | null,   // grupo/lote: criação (UTC ISO); local/other: o envio/registro mais recente
+  day: string | null,          // só em local: dia local do envio
+  video_count: number,         // vídeos (media_type = "video") da pasta
+  rendition_count: number,     // versões (renditions) desses vídeos
+  total_bytes: number,         // originais + versões, em bytes
+  shared_count: number         // vídeos desta pasta que também estão em outra pasta (reimportados)
+}
+```
+
+- `group:<id>`: um grupo de importação (vários perfis). `batch:<id>`: um lote de importação (`source =
+  "instagram_import"`, perfil ou link) sem grupo, inclusive cancelado com mídias. Lote -> mídia pela mesma regra da
+  exportação (jobs `ingest`/`process` concluídos com `media_id` UNIDOS a `batch_media`). Lotes `library` (Edição,
+  processamento) não viram pasta.
+- `local:<dia>`: mídias `source_platform = "local"` (envios do computador, que não criam lote) agrupadas pelo dia
+  local de `created_at` (`date(created_at, 'localtime')`, fuso do computador onde o app roda).
+- `other`: vídeos que não são envio local nem estão em nenhum lote de importação.
+- Pastas sem vídeo são omitidas. Ordem: `created_at` mais recente primeiro; `other` sempre por último. Um vídeo
+  importado de novo em outra vez (duplicata) aparece nas duas pastas.
+- Uma consulta agregada para todas as pastas e três leituras pequenas (grupos, perfis, lotes): sem N+1.
+
+`GET /api/edit/folders/{key}/media?q=&limit=&before_id=` -> `MediaList`: vídeos da pasta, id DESC, mesma paginação
+keyset de `GET /api/media` (`limit` 1..200, padrão 50; `next_before_id`). `q` busca no código do post, perfil e nome do
+arquivo, como na Biblioteca. Chave fora do formato -> 422 `validation_error`; pasta inexistente -> lista vazia.
+
+O frontend usa `original_url` (`GET /api/media/{id}/original`, com suporte a `Range` -> 206) para a miniatura
+(`<video preload="metadata">` em `#t=0.5`, carregado quando a linha aparece) e para o player da prévia.
+
+#### Apagar vídeos (página Editar)
+
+`POST /api/media/delete` com `{media_ids: number[] (1..500)}` OU `{folder: <key de EditFolder>}`, e
+`delete_original: true` -> 200 `{deleted, deleted_ids, skipped: [{id, code, message}], failed: [{id, code, message}]}`.
+
+- `delete_original` ausente ou `false` -> 400 `confirmation_required` (nada é apagado). Estrito: só o booleano JSON
+  `true` confirma; `"true"`, `1`, `"yes"` -> 422 `validation_error`. Os dois (`media_ids` e `folder`) ou nenhum -> 422
+  `validation_error`. Mais de 500 ids -> 422; o frontend divide a seleção em blocos de 500 e soma os resumos.
+- `folder`: o servidor apaga todos os vídeos da pasta (imagens do mesmo lote ficam). A pasta some da lista quando fica
+  sem vídeos. Um vídeo que também está em outra pasta (`shared_count`) sai das duas; a confirmação avisa.
+- Item a item com o mesmo serviço de `DELETE /api/media/{id}?delete_original=true` (original, versões e thumbnail;
+  arquivos preparados para descarte antes do banco e devolvidos se o banco falhar; jobs pendentes da mídia
+  cancelados). Ids repetidos contam uma vez.
+- Pulados (`skipped`, a mídia continua): `media_not_found`, `media_busy` (job baixando/processando),
+  `export_in_progress` (mídia numa exportação `pending`/`running`, pasta ou ZIP). Falhas (`failed`): `file_in_use` e
+  erros inesperados (`delete_failed`). Um item com problema não interrompe os outros.
+- A checagem de exportação aberta é feita por item, sob o mesmo lock da criação de exportação
+  (`export_create_lock`): uma exportação pedida durante a exclusão espera, ou, se já existir, a mídia é pulada.
+- `DELETE /api/media/{id}?delete_original=true` (exclusão individual) tem a mesma proteção: mídia numa exportação
+  aberta -> 409 `export_in_progress`.
+- Só as versões editadas de um vídeo: `DELETE /api/renditions/{id}` para cada versão (o original fica). Recusado com
+  409 `media_busy` se o vídeo tem job baixando/processando e com 409 `export_in_progress` se a versão está numa
+  exportação aberta que leva versões (`content` `edited`/`both`, pasta ou ZIP); mesma checagem sob o lock.
+- 404 de mídia/versão: "Mídia não encontrada." / "Versão processada não encontrada." (códigos inalterados).
+
 ### 8.5 Upload de vídeo local
 
 `POST /api/library/uploads` registra na Biblioteca um vídeo enviado do computador (botão ou arrastar e soltar na

@@ -13,5 +13,5 @@ class AppError(Exception):
         self.extra = extra
 
 
-def not_found(what: str, code: str = "not_found") -> AppError:
-    return AppError(404, code, f"{what} não encontrado.")
+def not_found(what: str, code: str = "not_found", *, feminine: bool = False) -> AppError:
+    return AppError(404, code, f"{what} não {'encontrada' if feminine else 'encontrado'}.")

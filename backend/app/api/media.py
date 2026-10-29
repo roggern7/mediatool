@@ -7,11 +7,14 @@ from fastapi.responses import FileResponse
 
 from app.api.deps import MAX_ID, Ctx, IdPath
 from app.core.errors import AppError, not_found
+from app.db.repositories import edit_folders
 from app.schemas.batches import BatchOut
 from app.schemas.common import SafeText
 from app.schemas.jobs import JobOut
 from app.schemas.media import (
     BulkProcessRequest,
+    MediaDeleteRequest,
+    MediaDeleteResult,
     MediaList,
     MediaOut,
     OpenRequest,
@@ -29,7 +32,7 @@ router = APIRouter(tags=["biblioteca"])
 def _media_or_404(ctx: Ctx, media_id: int) -> dict[str, Any]:
     media = ctx.media.get(media_id)
     if media is None:
-        raise not_found("Mídia", "media_not_found")
+        raise not_found("Mídia", "media_not_found", feminine=True)
     return media
 
 
@@ -77,6 +80,18 @@ def process_media_by_filter(ctx: Ctx, body: ProcessByFilterRequest) -> dict[str,
     return batch_single(ctx, batch_id)
 
 
+@router.post("/media/delete", response_model=MediaDeleteResult)
+def delete_media_bulk(ctx: Ctx, body: MediaDeleteRequest) -> dict[str, Any]:
+    """Apaga várias mídias (ou os vídeos de uma pasta da página Editar) item a item; devolve o resumo."""
+    if not body.delete_original:
+        raise AppError(
+            400, "confirmation_required",
+            "Excluir uma mídia apaga o original. Confirme com delete_original=true.",
+        )
+    ids = body.media_ids if body.media_ids is not None else edit_folders.folder_video_ids(ctx.db, body.folder or "")
+    return media_service.delete_many(ctx, list(dict.fromkeys(ids)))
+
+
 @router.get("/media/{media_id}", response_model=MediaOut)
 def get_media(ctx: Ctx, media_id: IdPath) -> dict[str, Any]:
     return media_out(ctx, [_media_or_404(ctx, media_id)])[0]
@@ -100,7 +115,7 @@ def media_original(ctx: Ctx, media_id: IdPath) -> FileResponse:
 def rendition_file(ctx: Ctx, rendition_id: IdPath) -> FileResponse:
     rendition = ctx.media.get_rendition(rendition_id)
     if rendition is None:
-        raise not_found("Versão processada", "rendition_not_found")
+        raise not_found("Versão processada", "rendition_not_found", feminine=True)
     path = media_service.stored_file(ctx, rendition["processed_path"], what="Arquivo processado")
     return FileResponse(path, media_type=mime_for(path), content_disposition_type="inline")
 

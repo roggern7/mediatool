@@ -159,11 +159,16 @@ class MediaRepository:
         limit: int = 50,
         offset: int = 0,
         before_id: int | None = None,
+        scope: tuple[str, list[Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], int, int | None]:
         """Mídias em ordem id DESC. `before_id` (keyset): só ids menores; `next_before_id` None no fim.
 
-        `total` ignora o keyset (vale para o filtro inteiro)."""
+        `total` ignora o keyset (vale para o filtro inteiro). `scope`: condição extra (sobre `media m`) com os
+        parâmetros, ex.: a pasta da página Editar."""
         where, params = self.filter_where(view=view, media_type=media_type, profile=profile, q=q)
+        if scope is not None:
+            where = f"{where} AND ({scope[0]})" if where else f"WHERE ({scope[0]})"
+            params = [*params, *scope[1]]
         total = self.db.scalar(f"SELECT COUNT(*) FROM media m {where}", tuple(params))
         if before_id is not None:
             where = f"{where} AND m.id < ?" if where else "WHERE m.id < ?"

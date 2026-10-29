@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.common import PositiveId, StrictModel
 
@@ -26,3 +26,22 @@ class EditSettings(StrictModel):
 class EditRequest(StrictModel):
     media_ids: Annotated[list[PositiveId], Field(min_length=1, max_length=500)]
     settings: EditSettings
+
+
+class EditFolderOut(BaseModel):
+    """Pasta da página Editar (GET /edit/folders): `key` vai em GET /edit/folders/{key}/media e POST /media/delete."""
+
+    key: str
+    kind: Literal["group", "batch", "local", "other"]
+    import_mode: Literal["profile", "links"] | None
+    profiles: list[str]
+    created_at: str | None
+    day: str | None
+    video_count: int
+    rendition_count: int
+    total_bytes: int
+    shared_count: int  # vídeos da pasta que também estão em outra pasta
+
+
+class EditFolderList(BaseModel):
+    items: list[EditFolderOut]

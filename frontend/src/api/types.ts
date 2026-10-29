@@ -630,3 +630,42 @@ export interface UploadResult {
   /** Conteúdo idêntico (sha256) a uma mídia já existente: nenhuma mídia nova foi criada. */
   duplicate: boolean;
 }
+
+/** Pasta da página Editar (GET /api/edit/folders). `key`: group:<id>, batch:<id>, local:<aaaa-mm-dd> ou other. */
+export interface EditFolder {
+  key: string;
+  kind: "group" | "batch" | "local" | "other";
+  import_mode: "profile" | "links" | null;
+  profiles: string[];
+  created_at: string | null;
+  /** Dia local do envio (aaaa-mm-dd), só em `local`. */
+  day: string | null;
+  video_count: number;
+  rendition_count: number;
+  /** Originais + versões editadas, em bytes. */
+  total_bytes: number;
+  /** Vídeos desta pasta que também estão em outra pasta (apagar a pasta os tira de lá também). */
+  shared_count: number;
+}
+
+export interface EditFolderList {
+  items: EditFolder[];
+}
+
+/** Corpo de POST /api/media/delete: `media_ids` OU `folder`; `delete_original: true` confirma. */
+export type MediaDeleteRequest =
+  | { media_ids: number[]; delete_original: true }
+  | { folder: string; delete_original: true };
+
+export interface MediaDeleteIssue {
+  id: number;
+  code: string;
+  message: string;
+}
+
+export interface MediaDeleteResult {
+  deleted: number;
+  deleted_ids: number[];
+  skipped: MediaDeleteIssue[];
+  failed: MediaDeleteIssue[];
+}

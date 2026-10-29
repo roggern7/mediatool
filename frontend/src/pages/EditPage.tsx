@@ -49,6 +49,14 @@ export function EditPage() {
     commitSelection(selectionRef.current.filter((m) => m.id !== id));
   }
 
+  /** Vídeos apagados da biblioteca saem da seleção. */
+  function removeDeleted(ids: number[]) {
+    const gone = new Set(ids);
+    if (selectionRef.current.some((m) => gone.has(m.id))) {
+      commitSelection(selectionRef.current.filter((m) => !gone.has(m.id)));
+    }
+  }
+
   const uploads = useUploadQueue((media) => {
     add([media]);
     setLibraryVersion((v) => v + 1);
@@ -103,7 +111,12 @@ export function EditPage() {
             <div className="section-head">
               <h2>Vídeos da biblioteca</h2>
             </div>
-            <LibraryVideoPicker selectedIds={selectedIds} onAdd={add} version={libraryVersion} />
+            <LibraryVideoPicker
+              selectedIds={selectedIds}
+              onAdd={add}
+              onDeleted={removeDeleted}
+              version={libraryVersion}
+            />
           </section>
           <section className="section">
             <div className="section-head">

@@ -1,6 +1,7 @@
 import type {
   Batch,
   Diagnostics,
+  EditFolderList,
   EditRequest,
   ExportJob,
   ExportRequest,
@@ -17,6 +18,8 @@ import type {
   JobsQuery,
   LinksPreview,
   Media,
+  MediaDeleteRequest,
+  MediaDeleteResult,
   MediaQuery,
   Paged,
   PickFolderResult,
@@ -300,6 +303,12 @@ export const api = {
 
   /** Lote de edição dos vídeos (máx. 500); o progresso vem de getBatch/listJobs. */
   startEdit: (body: EditRequest) => request<Batch>("POST", "/edits", { body, timeoutMs: SLOW_TIMEOUT_MS }),
+  listEditFolders: () => request<EditFolderList>("GET", "/edit/folders"),
+  listEditFolderMedia: (key: string, q: { q?: string; limit?: number; before_id?: number }) =>
+    request<Paged<Media>>("GET", `/edit/folders/${encodeURIComponent(key)}/media`, { query: q }),
+  /** Apaga item a item no servidor: uma pasta grande (mil vídeos ou mais) pode levar minutos. */
+  deleteMediaBulk: (body: MediaDeleteRequest) =>
+    request<MediaDeleteResult>("POST", "/media/delete", { body, timeoutMs: 10 * 60_000 }),
   uploadLocalVideo: (file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal) =>
     uploadLocalVideo(file, onProgress, signal),
 };
