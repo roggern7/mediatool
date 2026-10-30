@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type GroupChildLike,
   type GroupLike,
+  EMPTY_FIRST_PAGE_TEXT,
   childState,
   groupAttentionText,
   groupDroppedText,
@@ -129,6 +130,13 @@ describe("quantidade por perfil", () => {
     const done = { group_state: "completed" as const, status: "completed" as const, listing_end: "limit" as const };
     expect(profileProgressText(child({ ...done, progress: { found: 1240, downloaded: 1240 } }))).toBe("1.240 mídias");
     expect(profileProgressText(child({ ...done, progress: { found: 1, downloaded: 1 } }))).toBe("1 mídia");
+  });
+
+  it("concluído pela 1ª página vazia: explica em vez de \"0 mídias\"", () => {
+    const empty = { group_state: "completed" as const, status: "completed" as const, listing_end: "empty_first_page" as const };
+    expect(profileProgressText(child({ ...empty, requested_limit: 50, progress: { found: 0, downloaded: 0 } }))).toBe(
+      EMPTY_FIRST_PAGE_TEXT,
+    );
   });
   it("em andamento: baixadas / pedido, ou baixadas / encontradas em Todos", () => {
     expect(profileProgressText(child({ requested_limit: 2000, progress: { found: 900, downloaded: 830 } }))).toBe(

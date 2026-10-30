@@ -43,7 +43,12 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from app.db.connection import utc_now
-from app.db.repositories.batches import LINKS_PARTIAL_MESSAGE, VIEWS_KEYS, load_listing_counts
+from app.db.repositories.batches import (
+    LINKS_PARTIAL_MESSAGE,
+    TYPE_FILTER_REASON,
+    VIEWS_KEYS_MAX,
+    load_listing_counts,
+)
 from app.db.repositories.common import canonical_json
 from app.integrations.instagram.downloader import (
     LISTING_ANOMALY_DETAILS,
@@ -88,6 +93,12 @@ ATTENTION_RETRY_SECONDS = 6 * 3600
 ATTENTION_MAX_TRIES = 4
 
 END_OF_PROFILE_MESSAGE = "O perfil não tem mais publicações compatíveis; o lote terminou com {found} itens."
+# 1a página da listagem com 0 publicações e sem próxima página (visto no real com limite temporário do Instagram, com o
+# perfil tendo posts): o lote termina, mas com `listing_empty_first_page` e esta mensagem, não como fim do perfil.
+EMPTY_FIRST_PAGE_MESSAGE = (
+    "O Instagram não devolveu nenhuma publicação deste perfil agora (perfil sem posts, privado ou limite temporário). "
+    "Tente de novo mais tarde."
+)
 # O provider encerrou o trecho sem erro, sem fim real do perfil e sem avançar nenhuma página: não é fim do perfil.
 LISTING_STALLED_MESSAGE = (
     "A listagem parou antes do fim do perfil sem avançar. A importação não foi dada como concluída e o ponto de "
@@ -142,8 +153,26 @@ def _diagnostic_suffix(diagnostic: str) -> str:
 
 
 def _filters_on(batch: dict[str, Any]) -> bool:
-    """Lote com filtro de visualizações mínimas (0017) e/ou período de postagem (0019)."""
-    return batch.get("min_views") is not None or batch.get("posted_after") is not None
+    """Lote com filtro de visualizações (mínimo 0017, máximo 0021) e/ou período de postagem (0019)."""
+    return (batch.get("min_views") is not None or batch.get("max_views") is not None
+            or batch.get("posted_after") is not None)
+
+
+def _count_of(counts: dict[str, Any], key: str) -> int:
+    """Contador válido (inteiro positivo) ou 0, como em presenters._views_filter."""
+    value = counts.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _covers(batch: dict[str, Any]) -> bool:
+    """Lote "Somente capas" (migration 0021): cada vídeo vira um job da CAPA dele (imagem), nunca do vídeo."""
+    return batch.get("media_role") == "cover"
+
+
+def _wanted_by_type(batch: dict[str, Any], item: RemoteMedia) -> bool:
+    """Lote por link da importação unificada com "Somente vídeos"/"Somente capas" (`content_type` "videos"): só os
+    vídeos da publicação viram job. Lotes por link antigos ("all") recebem todas as mídias, como antes."""
+    return batch.get("content_type") != "videos" or item.media_type == "video"
 
 
 def _is_link_error(exc: InstagramError) -> bool:
@@ -424,7 +453,9 @@ class ImportRunner:
             batch_id, batch["source_profile"], batch["content_type"], limit,
             "retomada" if resume is not None else "início",
             ("" if batch.get("min_views") is None else f", min_views={batch['min_views']}")
-            + ("" if batch.get("posted_after") is None else f", publicadas desde {batch['posted_after']}"),
+            + ("" if batch.get("max_views") is None else f", max_views={batch['max_views']}")
+            + ("" if batch.get("posted_after") is None else f", publicadas desde {batch['posted_after']}")
+            + (", só capas" if _covers(batch) else ""),
         )
         # Transição condicional e atômica: se o lote foi cancelado depois de escolhido (`_next_eligible`) e antes
         # daqui, nada é listado. `_current` já está registrado: um cancelamento posterior aciona `cancel`.
@@ -555,11 +586,15 @@ class ImportRunner:
         # Filtros (migrations 0017 e 0019): o kwarg só é repassado quando o lote o tem (providers e fakes antigos não o
         # conhecem; sem filtro a chamada é idêntica à de antes). O corte do período é o GRAVADO na criação.
         extra: dict[str, Any] = {}
-        if batch.get("min_views") is not None:
+        if batch.get("min_views") is not None or batch.get("max_views") is not None:
             from app.services.import_service import MIN_VIEWS_ENABLED
 
             if MIN_VIEWS_ENABLED:
-                extra["min_views"] = batch["min_views"]
+                # Retomada e reinício usam os valores GRAVADOS no lote (mínimo e/ou máximo).
+                if batch.get("min_views") is not None:
+                    extra["min_views"] = batch["min_views"]
+                if batch.get("max_views") is not None:
+                    extra["max_views"] = batch["max_views"]
             elif batch_id not in self._views_off_logged:
                 # Lote criado com o filtro antes de ele ser desligado: lista SEM ele (nenhuma requisição à aba Reels).
                 self._views_off_logged.add(batch_id)
@@ -567,6 +602,8 @@ class ImportRunner:
                                batch_id)
         if batch.get("posted_after") is not None:
             extra["posted_after"] = batch["posted_after"]
+        if _covers(batch):
+            extra["covers"] = True   # só decide o provider (capas só pelo método web)
         items = self.ctx.downloader_factory().iter_profile_media(
             batch["source_profile"], batch["content_type"], chunk_limit, cancel=cancel, resume=resume,
             on_checkpoint=on_checkpoint, **extra,
@@ -668,6 +705,11 @@ class ImportRunner:
                 # Fim pelo corte do período de postagem (checkpoint `period_end`): não é o fim do perfil.
                 message = None
                 logger.info("Lote %s: listagem chegou às publicações anteriores ao período pedido", batch_id)
+            elif found == 0 and current.get("listing_pages") == 1 and not current.get("listing_posts_seen"):
+                # 1a página com 0 publicações e sem próxima: termina, mas com motivo próprio (não "fim do perfil").
+                message = EMPTY_FIRST_PAGE_MESSAGE
+                self.ctx.batches.update_listing(batch_id, listing_empty_first_page=1)
+                logger.warning("Lote %s: a 1a página do perfil veio vazia e sem próxima página", batch_id)
             self._finish_listing(batch_id, None, message, listing_end="profile_end")
             return
         if chunk.pages_ok > 0 or (chunk_limit is not None and yielded >= chunk_limit and chunk.progressed):
@@ -792,11 +834,15 @@ class ImportRunner:
         current = self.ctx.batches.get(batch_id)
         if current is None or not _filters_on(current):
             return
-        totals = load_listing_counts(current.get("listing_views"))
-        approved, below, no_count, out_of_period = (int(totals.get(key) or 0) for key in VIEWS_KEYS)
-        logger.info("Lote %s: filtros: %s analisados, %s aprovados, %s abaixo do mínimo, %s sem contagem, %s fora do "
-                    "período", batch_id, approved + below + no_count + out_of_period, approved, below, no_count,
-                    out_of_period)
+        # Mesmos totais do `views_filter` da API (presenters._views_filter): todas as chaves, inclusive "acima do
+        # máximo", somando a página aberta (`listing_views_partial`, se houver).
+        stored = load_listing_counts(current.get("listing_views"))
+        partial = load_listing_counts(current.get("listing_views_partial"))
+        merged = {key: _count_of(stored, key) + _count_of(partial, key) for key in VIEWS_KEYS_MAX}
+        approved, below, no_count, above = merged["approved"], merged["below"], merged["no_count"], merged["above"]
+        logger.info("Lote %s: filtros: %s analisados, %s aprovados, %s abaixo do mínimo, %s acima do máximo, %s sem "
+                    "contagem, %s fora do período", batch_id, sum(merged.values()), approved, below, above, no_count,
+                    merged["out_of_period"])
         if current.get("min_views") is not None and approved == 0 and no_count > 0:
             logger.warning("Lote %s: nenhum vídeo com contagem de visualizações aprovado (%s sem contagem); verifique "
                            "se a consulta do Instagram traz esse campo", batch_id, no_count)
@@ -925,14 +971,19 @@ class ImportRunner:
                     return
                 continue
             created = 0
+            wanted = [item for item in items if _wanted_by_type(batch, item)]
             with self.ctx.db.transaction():
                 if self._is_cancelled(batch_id):
                     return
                 # Jobs de todas as mídias (ordem do carrossel) e o link resolvido na MESMA transação: se o app cair
                 # antes, o link é pedido de novo e o índice único dos jobs descarta os repetidos.
-                for item in items:
+                for item in wanted:
                     if self._add_item(batch, item):
                         created += 1
+                if len(wanted) < len(items):
+                    # Itens de outro tipo (ex.: fotos com "Somente vídeos"): filtrados de propósito, contados uma vez
+                    # (mesma transação que resolve o link).
+                    batches.add_listing_dropped(batch_id, {"expected": {TYPE_FILTER_REASON: len(items) - len(wanted)}})
                 batches.resolve_link(batch_id, link["position"], items_found=len(items),
                                      profile=items[0].source_profile or None)
                 if batch["listing_retry_level"] or batch["listing_attention_tries"] or batch["link_fail_streak"]:
@@ -1174,13 +1225,23 @@ class ImportRunner:
             "listing_page_size": None if ref is None else ref.page_size,
             "dash_streams": dash_json(item),
         }
-        process = batch["process"] and batch["params"] is not None
+        role = "original"
+        if _covers(batch) and (item.media_type != "video" or not data["thumbnail_url"]):
+            # Defesa: o provider web já descarta fotos em "Somente capas"; um item sem capa de vídeo nunca vira job.
+            logger.warning("Lote %s: item sem capa de vídeo ignorado em \"Somente capas\"", batch["id"])
+            return False
+        if _covers(batch):
+            # "Somente capas": o job baixa só a capa do vídeo (a maior de `image_versions2`, já em `thumbnail_url`)
+            # como imagem; o vídeo nunca é baixado. Renovação de URL expirada: a pipeline usa a capa renovada.
+            role = "cover"
+            source.update(media_type="image", media_url=data["thumbnail_url"], dash_streams=None, media_role=role)
+        process = batch["process"] and batch["params"] is not None and role == "original"
         # "Editar após baixar": só vídeo é editado; foto do lote de Edição é só baixada (download-only, sem preset).
         image_in_edit = process and source["media_type"] != "video" and edit_service.is_edit(batch)
         if image_in_edit:
             process = False
         existing = self.ctx.media.find_by_source(
-            source["source_platform"], source["source_post_id"], source["source_media_index"]
+            source["source_platform"], source["source_post_id"], source["source_media_index"], role
         )
         kwargs: dict[str, Any] = {}
         primary = None
@@ -1196,7 +1257,7 @@ class ImportRunner:
             }
         elif source["source_post_id"] and (primary := self.ctx.media.ingest_in_flight(
             source["source_platform"], source["source_post_id"], source["source_media_index"],
-            exclude_batch_id=batch["id"],
+            exclude_batch_id=batch["id"], role=role,
         )) is not None:
             # Outro lote aberto ainda vai baixar o mesmo item: este job fica `pending` aguardando o primário (não é
             # reivindicado nem conta no backpressure); concluído o primário, liga à mídia (e processa se o lote
@@ -1206,7 +1267,7 @@ class ImportRunner:
             batch_id=batch["id"],
             source=source,
             preset_id=batch["preset_id"],
-            preset_name=None if image_in_edit else batch["preset_name"],
+            preset_name=None if image_in_edit or role == "cover" else batch["preset_name"],
             params=batch["params"] if process else None,
             **kwargs,
         )

@@ -15,6 +15,8 @@ from app.schemas.batches import (
     BatchLinkList,
     BatchList,
     BatchOut,
+    ClassifyOut,
+    ClassifyRequest,
     HistoryHideRequest,
     HistoryHideResult,
     ImportGroupDetail,
@@ -28,6 +30,8 @@ from app.schemas.batches import (
     ProfilesPreview,
     ProfilesPreviewRequest,
     RestartListingRequest,
+    UnifiedImportOut,
+    UnifiedImportRequest,
 )
 from app.schemas.instagram import ProfileInfoOut, ProfileRequest
 from app.services import import_history, import_service
@@ -102,6 +106,20 @@ def create_import(ctx: Ctx, body: ImportRequest) -> dict[str, Any]:
         posted_within_days=body.posted_within_days,
     )
     return batch_single(ctx, batch_id)
+
+
+@router.post("/imports/classify", response_model=ClassifyOut)
+def classify_imports(body: ClassifyRequest) -> dict[str, Any]:
+    """Importação unificada: classifica as entradas em perfis, publicações e inválidas, sem efeitos e sem nenhuma
+    requisição ao Instagram."""
+    return import_service.classify_inputs(list(body.inputs) if body.inputs is not None else [body.text or ""])
+
+
+@router.post("/imports/start", response_model=UnifiedImportOut, status_code=202)
+def start_unified_import(ctx: Ctx, body: UnifiedImportRequest) -> dict[str, Any]:
+    """Importação unificada (publicações e/ou perfis numa entrada só): 1 perfil -> lote avulso; 2+ perfis -> grupo;
+    publicações -> um lote de links. Progresso em GET /api/batches/{id} e GET /api/import-groups/{id}."""
+    return import_service.start_unified(ctx, body)
 
 
 @router.post("/import-groups/preview", response_model=ProfilesPreview)

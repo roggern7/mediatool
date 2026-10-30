@@ -1,7 +1,9 @@
 """Proteções HTTP locais e validadores de caminho.
 
-``install_security`` aplica, de fora para dentro: cabeçalhos de segurança -> validação de Host -> CORS
-restrito -> guarda de mutações (Origin permitido + header ``X-Media-Tool-Client``) -> aplicação.
+``install_security`` aplica, de fora para dentro: cabeçalhos de segurança -> validação de Host -> acesso da
+extensão do Chrome (origem ``chrome-extension://`` só em ``/api/ext/*``, com CORS próprio) -> CORS restrito -> guarda
+de mutações (Origin permitido + header ``X-Media-Tool-Client``) -> aplicação. O token da extensão é conferido nas
+próprias rotas ``/api/ext/*`` (app/api/extension.py).
 Também registra um handler genérico de exceções que nunca devolve stack trace nem segredos.
 """
 
@@ -21,6 +23,17 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 logger = logging.getLogger("media_tool.security")
 
 CLIENT_HEADER = "X-Media-Tool-Client"
+EXTENSION_TOKEN_HEADER = "X-Media-Tool-Token"
+EXTENSION_PATH_PREFIX = "/api/ext/"
+# Origem de uma extensão do Chrome: o ID tem 32 letras de "a" a "p".
+EXTENSION_ORIGIN_RE = re.compile(r"^chrome-extension://[a-p]{32}$")
+EXTENSION_ID_RE = re.compile(r"^[a-p]{32}$")
+# ID fixo da NOSSA extensão (derivado da `key` de extension/manifest.json). IDs extras (ex.: outra cópia sem
+# compactação) só pela variável MEDIA_TOOL_EXTENSION_IDS (separados por vírgula; docs/EXTENSION.md).
+EXTENSION_ID = "lnpealhnkmjaohdlkpapjmdealokkdbf"
+EXTENSION_IDS_ENV = "MEDIA_TOOL_EXTENSION_IDS"
+EXTENSION_CORS_METHODS = "GET, POST, OPTIONS"
+EXTENSION_CORS_HEADERS = f"Authorization, Content-Type, {CLIENT_HEADER}, {EXTENSION_TOKEN_HEADER}"
 DEFAULT_CORS_ORIGINS: tuple[str, ...] = ("http://127.0.0.1:5173", "http://localhost:5173")
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
@@ -109,6 +122,28 @@ def _header(scope: Scope, name: bytes) -> str | None:
     return None
 
 
+def is_extension_origin(origin: str | None) -> bool:
+    """Parece origem de QUALQUER extensão do Chrome (usado para barrar extensões fora de ``/api/ext/*``)."""
+    return origin is not None and EXTENSION_ORIGIN_RE.match(origin.strip().lower().rstrip("/")) is not None
+
+
+def extension_origins(extra_ids: str | None = None) -> frozenset[str]:
+    """Origens aceitas em ``/api/ext/*``: o ID fixo da nossa extensão + IDs extras válidos de
+    ``MEDIA_TOOL_EXTENSION_IDS`` (separados por vírgula; entradas inválidas são ignoradas)."""
+    ids = {EXTENSION_ID}
+    for part in (extra_ids or "").split(","):
+        value = part.strip().lower()
+        if EXTENSION_ID_RE.match(value):
+            ids.add(value)
+        elif value:
+            logger.warning("ID de extensão inválido em %s ignorado", EXTENSION_IDS_ENV)
+    return frozenset(f"chrome-extension://{value}" for value in ids)
+
+
+def is_extension_path(path: str) -> bool:
+    return path.startswith(EXTENSION_PATH_PREFIX) or path == EXTENSION_PATH_PREFIX.rstrip("/")
+
+
 async def _send_json(send: Send, status: int, detail: str, code: str) -> None:
     body = json.dumps({"detail": detail, "code": code}, ensure_ascii=False).encode("utf-8")
     await send(
@@ -167,17 +202,79 @@ class HostValidationMiddleware:
         await self.app(scope, receive, send)
 
 
+class ExtensionAccessMiddleware:
+    """Origem ``chrome-extension://<id>``: aceita só em ``/api/ext/*`` (qualquer outra rota: 403, em qualquer
+    método). Em ``/api/ext/*`` responde o preflight (com ``Access-Control-Allow-Private-Network`` quando pedido) e
+    devolve os cabeçalhos CORS para a própria origem da extensão; outras origens que não sejam do próprio app
+    recebem 403. Só a NOSSA extensão (``extension_origins``) é aceita; outra extensão recebe 403 também em
+    ``/api/ext/*``. O token é exigido pelas rotas (app/api/extension.py), não aqui."""
+
+    def __init__(self, app: ASGIApp, *, app_origins: Iterable[str], extension_origins: Iterable[str]) -> None:
+        self.app = app
+        self.app_origins = frozenset(o.lower().rstrip("/") for o in app_origins)
+        self.extension_origins = frozenset(o.lower().rstrip("/") for o in extension_origins)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        origin = _header(scope, b"origin")
+        from_extension = origin is not None and origin.strip().lower().rstrip("/") in self.extension_origins
+        if not is_extension_path(scope.get("path", "")):
+            if from_extension or is_extension_origin(origin):
+                await _send_json(send, 403, "Origem não permitida.", "origin_not_allowed")
+                return
+            await self.app(scope, receive, send)
+            return
+        if not from_extension:
+            if origin is not None and origin.strip().lower().rstrip("/") not in self.app_origins:
+                await _send_json(send, 403, "Origem não permitida.", "origin_not_allowed")
+                return
+            await self.app(scope, receive, send)
+            return
+        cors = [
+            (b"access-control-allow-origin", origin.strip().encode("latin-1")),
+            (b"vary", b"Origin"),
+        ]
+        if scope.get("method", "").upper() == "OPTIONS":
+            headers = [
+                *cors,
+                (b"access-control-allow-methods", EXTENSION_CORS_METHODS.encode()),
+                (b"access-control-allow-headers", EXTENSION_CORS_HEADERS.encode()),
+                (b"access-control-max-age", b"600"),
+                (b"content-length", b"0"),
+            ]
+            if (_header(scope, b"access-control-request-private-network") or "").strip().lower() == "true":
+                headers.append((b"access-control-allow-private-network", b"true"))
+            await send({"type": "http.response.start", "status": 204, "headers": headers})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def send_with_cors(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"vary"]
+                message["headers"] = [*headers, *cors]
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
 class MutationGuardMiddleware:
-    def __init__(self, app: ASGIApp, *, allowed_origins: Iterable[str]) -> None:
+    def __init__(self, app: ASGIApp, *, allowed_origins: Iterable[str],
+                 extension_origins: Iterable[str] = ()) -> None:
         self.app = app
         self.allowed_origins = frozenset(o.lower().rstrip("/") for o in allowed_origins)
+        self.extension_origins = frozenset(o.lower().rstrip("/") for o in extension_origins)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("method", "").upper() not in MUTATING_METHODS:
             await self.app(scope, receive, send)
             return
         origin = _header(scope, b"origin")
-        if origin is not None and origin.strip().lower().rstrip("/") not in self.allowed_origins:
+        # A origem da NOSSA extensão só chega aqui em /api/ext/* (ExtensionAccessMiddleware barra o resto).
+        extension_ok = (origin is not None and origin.strip().lower().rstrip("/") in self.extension_origins
+                        and is_extension_path(scope.get("path", "")))
+        if origin is not None and not extension_ok and origin.strip().lower().rstrip("/") not in self.allowed_origins:
             await _send_json(send, 403, "Origem não permitida.", "origin_not_allowed")
             return
         client = _header(scope, CLIENT_HEADER.lower().encode())
@@ -208,11 +305,13 @@ def install_security(
     extra_hosts: Sequence[str] = (),
     cors_origins: Sequence[str] = DEFAULT_CORS_ORIGINS,
     allow_testserver: bool = False,
+    extension_ids: str | None = None,
 ) -> None:
     """Instala middlewares de segurança e o handler genérico de exceções em ``app`` (FastAPI/Starlette).
 
     Deve ser chamado uma vez, durante a montagem do app (antes de iniciar o servidor).
     ``allow_testserver=True`` aceita o Host ``testserver`` do TestClient; use somente em testes.
+    ``extension_ids``: IDs extras de extensão aceitos em ``/api/ext/*`` (valor de MEDIA_TOOL_EXTENSION_IDS).
     """
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}", *extra_hosts}
     if allow_testserver:
@@ -223,7 +322,8 @@ def install_security(
     mutation_origins = same_origins | set(cors_origins)
 
     # Starlette: o último add_middleware é o mais externo.
-    app.add_middleware(MutationGuardMiddleware, allowed_origins=mutation_origins)
+    ext_origins = extension_origins(extension_ids)
+    app.add_middleware(MutationGuardMiddleware, allowed_origins=mutation_origins, extension_origins=ext_origins)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(cors_origins),
@@ -232,6 +332,7 @@ def install_security(
         allow_credentials=False,
         max_age=600,
     )
+    app.add_middleware(ExtensionAccessMiddleware, app_origins=mutation_origins, extension_origins=ext_origins)
     app.add_middleware(HostValidationMiddleware, allowed_hosts=allowed_hosts)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

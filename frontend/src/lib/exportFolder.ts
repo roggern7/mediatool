@@ -357,7 +357,8 @@ export interface LibrarySelection {
   /** "Todos os N resultados" do filtro atual (resolvido no servidor, sem mandar ids). */
   allByFilter: boolean;
   view: MediaView;
-  typeFilter: "all" | MediaType;
+  /** "cover" = só capas (media.role, migration 0021). */
+  typeFilter: "all" | MediaType | "cover";
   q: string;
   /** Ids marcados na página (usados quando não é "todos os resultados"). */
   selectedIds: number[];
@@ -368,8 +369,9 @@ export interface LibrarySelection {
 /** Pedido de exportação a partir da seleção da Biblioteca; null se nada está selecionado. */
 export function librarySelectionSource(sel: LibrarySelection): ExportSource | null {
   if (sel.allByFilter) {
-    const filter: { view: MediaView; media_type?: MediaType; q?: string } = { view: sel.view };
-    if (sel.typeFilter !== "all") filter.media_type = sel.typeFilter;
+    const filter: { view: MediaView; media_type?: MediaType; role?: "cover"; q?: string } = { view: sel.view };
+    if (sel.typeFilter === "cover") filter.role = "cover";
+    else if (sel.typeFilter !== "all") filter.media_type = sel.typeFilter;
     if (sel.q) filter.q = sel.q;
     const excluded = sel.excludedIds ?? [];
     return {

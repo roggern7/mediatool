@@ -113,7 +113,7 @@ def test_empty_listing_completes_batch(harness):
     result = harness.batch(batch["id"])
     assert result["status"] == "completed" and result["found"] == 0
     assert result["progress"] == {"found": 0, "downloaded": 0, "processed": 0, "skipped": 0, "failed": 0,
-                                  "pending": 0, "active": 0}
+                                  "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
 
 
 def test_batch_with_only_source_duplicates_completes(harness):

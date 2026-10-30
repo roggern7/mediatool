@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
+import { type ExtensionDevice, type ExtensionPairingCode, extensionApi, formatPairingCode } from "../api/extension";
 import type { CheckStatus, InstagramProvider, Diagnostics, InstagramStatus, Preset, SessionInput, Settings, ToolDiag } from "../api/types";
 import { ConfirmDialog, ErrorLine, Field, Pill, SkeletonRows, Spinner } from "../components/ui";
 import { formatDateTime } from "../lib/format";
@@ -70,8 +71,175 @@ export function SettingsPage() {
         )}
       </section>
 
+      <ExtensionSection />
+
       <DiagnosticsSection tick={diagTick} onRefresh={refreshDiag} />
     </div>
+  );
+}
+
+/* ---------------- Extensão do Chrome ---------------- */
+
+function ExtensionSection() {
+  const toast = useToast();
+  const devices = useQuery("extension-devices", () => extensionApi.listDevices());
+  const [list, setList] = useState<ExtensionDevice[] | null>(null);
+  const [pairing, setPairing] = useState<ExtensionPairingCode | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [revoking, setRevoking] = useState<ExtensionDevice | null>(null);
+  // O código mostrado foi usado pela extensão (a tela troca o código por "Extensão conectada").
+  const [connected, setConnected] = useState(false);
+  const now = useNow(1_000);
+  const items = list ?? devices.data ?? null;
+  const left = pairing ? Math.max(0, Math.ceil((Date.parse(pairing.expires_at) - now) / 1000)) : 0;
+  const pairingId = pairing && left > 0 ? pairing.id : null;
+
+  // Enquanto o código está visível: consulta leve a cada 2 s se ele já foi usado (ou invalidado).
+  useEffect(() => {
+    if (!pairingId) return undefined;
+    let stopped = false;
+    const timer = window.setInterval(() => {
+      extensionApi
+        .pairingCodeStatus(pairingId)
+        .then(async (result) => {
+          if (stopped || result.status === "pending") return;
+          stopped = true;
+          window.clearInterval(timer);
+          if (result.status === "used") {
+            setConnected(true);
+            setPairing(null);
+            setList(await extensionApi.listDevices());
+          } else {
+            // Substituído, invalidado pelo bloqueio ou expirado no servidor: mostra "expirou".
+            const expired = new Date(0).toISOString();
+            setPairing((current) =>
+              current && current.id === pairingId ? { ...current, expires_at: expired } : current,
+            );
+          }
+        })
+        .catch(() => undefined); // falha momentânea: tenta de novo no próximo ciclo
+    }, 2_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [pairingId]);
+
+  const generate = async () => {
+    setBusy(true);
+    try {
+      setConnected(false);
+      setPairing(await extensionApi.createPairingCode());
+    } catch (err) {
+      toast.push("err", messageOf(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refresh = async () => {
+    try {
+      setList(await extensionApi.listDevices());
+    } catch (err) {
+      toast.push("err", messageOf(err));
+    }
+  };
+
+  const revoke = async (device: ExtensionDevice) => {
+    setBusy(true);
+    try {
+      setList(await extensionApi.revokeDevice(device.id));
+      toast.push("ok", `Acesso de "${device.name}" revogado.`);
+      setRevoking(null);
+    } catch (err) {
+      toast.push("err", messageOf(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="section">
+      <div className="section-head">
+        <h2>Extensão do Chrome</h2>
+        <button type="button" className="btn btn-sm" disabled={devices.loading} onClick={() => void refresh()}>
+          <RefreshCw size={13} strokeWidth={1.75} aria-hidden="true" />
+          Atualizar
+        </button>
+      </div>
+      <p className="muted" style={{ marginTop: 0 }}>
+        A extensão inicia importações a partir da aba do Instagram aberta no Chrome. Para conectar, gere um código e
+        digite-o nas opções da extensão. O código vale por 5 minutos e só pode ser usado uma vez.
+      </p>
+      <div className="row" style={{ gap: 12, marginBottom: 14 }}>
+        <button type="button" className="btn" disabled={busy} onClick={() => void generate()}>
+          {busy && !revoking ? <Spinner /> : null}
+          Gerar código
+        </button>
+        {pairing && left > 0 ? (
+          <span className="row" style={{ gap: 10 }}>
+            <span className="mono" style={{ fontSize: 20, letterSpacing: 2 }} aria-label="Código de pareamento">
+              {formatPairingCode(pairing.code)}
+            </span>
+            <span className="muted">
+              expira em {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}
+            </span>
+          </span>
+        ) : pairing ? (
+          <span className="muted">O código expirou. Gere outro.</span>
+        ) : connected ? (
+          <span role="status">Extensão conectada.</span>
+        ) : null}
+      </div>
+
+      {devices.error && !items ? <ErrorLine message={devices.error} onRetry={devices.reload} /> : null}
+      {!items ? (
+        devices.error ? null : <SkeletonRows rows={2} />
+      ) : items.length === 0 ? (
+        <p className="muted">Nenhuma extensão conectada.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Extensão conectada</th>
+                <th>Conectada em</th>
+                <th>Último uso</th>
+                <th aria-label="Ações" />
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((d) => (
+                <tr key={d.id}>
+                  <td>{d.name}</td>
+                  <td className="nowrap muted">{formatDateTime(d.created_at)}</td>
+                  <td className="nowrap muted">{d.last_used_at ? formatDateTime(d.last_used_at) : "Nunca"}</td>
+                  <td className="nowrap" style={{ textAlign: "right" }}>
+                    <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setRevoking(d)}>
+                      Revogar
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {revoking ? (
+        <ConfirmDialog
+          title="Revogar extensão"
+          confirmLabel="Revogar"
+          danger
+          busy={busy}
+          onConfirm={() => void revoke(revoking)}
+          onCancel={() => setRevoking(null)}
+        >
+          A extensão &quot;{revoking.name}&quot; perde o acesso na hora. Para usá-la de novo será preciso parear com um
+          código novo.
+        </ConfirmDialog>
+      ) : null}
+    </section>
   );
 }
 

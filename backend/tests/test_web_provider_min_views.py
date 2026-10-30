@@ -72,7 +72,7 @@ def test_views_come_from_the_anonymous_reels_tab_and_equal_to_the_minimum_approv
     assert "sessionid" not in cookie and gp.FAKE_SESSION not in cookie, "a aba Reels é aberta SEM a sessão"
     for number in (HIGH, EQUAL, LOW, 99_999_999):
         assert str(number) not in caplog.text and f"{number:,}" not in caplog.text
-    assert "views_approved=2 views_below=1 views_no_count=5" in caplog.text
+    assert "views_approved=2 views_below=1 views_above=0 views_no_count=5" in caplog.text
 
 
 def test_reels_tab_pages_are_fetched_on_demand_with_the_verified_request():

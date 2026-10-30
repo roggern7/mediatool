@@ -2,7 +2,15 @@ import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { BadgeCheck, Lock, Search, UserRound } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
 import { describeErrorCode } from "../api/errors";
-import type { Batch, ContentType, HistoryHideResult, ImportGroup, Preset, ProfileInfo } from "../api/types";
+import type {
+  Batch,
+  ContentType,
+  HistoryHideResult,
+  ImportGroup,
+  Preset,
+  ProfileInfo,
+  UnifiedImportResult,
+} from "../api/types";
 import { ConfirmDialog, Field, Empty, ErrorLine, Pill, SkeletonRows, SplitBar, Spinner } from "../components/ui";
 import {
   DELETE_WARNING,
@@ -86,6 +94,8 @@ import { BatchNotice } from "../components/BatchNotice";
 import { BatchLinksPanel } from "../components/BatchLinksPanel";
 import { ImportGroupPanel } from "../components/ImportGroupPanel";
 import { ImportLinksForm } from "../components/ImportLinksForm";
+import { ImportUnifiedForm } from "../components/ImportUnifiedForm";
+import { createdText } from "../lib/importUnified";
 import { EditSettingsForm } from "../components/edit/EditSettingsForm";
 import { DEFAULT_EDIT_FORM, type EditForm } from "../lib/editSettings";
 import { ImportExportBar } from "../components/ExportPanel";
@@ -106,9 +116,11 @@ const RECENT_ROWS = 8;
 
 type Recent = RecentEntry<ImportGroup, Batch>;
 type Selection = { kind: "batch" | "group"; id: number };
-type ImportMode = "profile" | "links";
+type ImportMode = "unified" | "profile" | "links";
 
+// "Links e perfis" (importação unificada) é a tela padrão; "Por perfil" e "Por link" continuam como antes.
 const IMPORT_MODES: { id: ImportMode; label: string }[] = [
+  { id: "unified", label: "Links e perfis" },
   { id: "profile", label: "Por perfil" },
   { id: "links", label: "Por link" },
 ];
@@ -135,8 +147,8 @@ export function ImportPage() {
   const settings = useQuery("settings", () => api.getSettings());
   const presets = useQuery("presets", () => api.listPresets());
 
-  // Só estado da tela: toda visita começa em "Por perfil"; os dois rascunhos ficam ao trocar de modo.
-  const [mode, setMode] = useState<ImportMode>("profile");
+  // Só estado da tela: toda visita começa em "Links e perfis"; os rascunhos ficam ao trocar de modo.
+  const [mode, setMode] = useState<ImportMode>("unified");
   const [linksText, setLinksText] = useState("");
   const [profileText, setProfileText] = useState("");
   const [content, setContent] = useState<ContentType>("all");
@@ -357,9 +369,9 @@ export function ImportPage() {
     }
   }
 
-  async function consult() {
-    if (singleProfile === null) return;
-    const username = singleProfile;
+  async function consult(target?: string) {
+    const username = target ?? singleProfile;
+    if (username === null) return;
     setLookupBusy(true);
     setLookupError(null);
     try {
@@ -374,7 +386,26 @@ export function ImportPage() {
     }
   }
 
-  const lookupShown = lookup && lookup.username === singleProfile ? lookup.info : null;
+  const lookupShown =
+    lookup && (lookup.username === singleProfile || mode === "unified") ? lookup.info : null;
+
+  function unifiedCreated(result: UnifiedImportResult) {
+    // Grupo (2+ perfis) ou o primeiro lote criado abre no acompanhamento; o aviso lista o que foi criado junto.
+    const first = result.group_id ?? result.batch_ids[0] ?? null;
+    if (first !== null) setSelected({ kind: result.group_id !== null ? "group" : "batch", id: first });
+    setStartNotice({ groupId: null, text: createdText(result) });
+    toast.push("ok", "Importação iniciada.");
+    setLookup(null);
+    revealCreated();
+  }
+
+  function unifiedFailed(err: unknown) {
+    const failure = interpretStartError(err instanceof ApiError ? err : null);
+    if (failure.notice) setStartNotice({ groupId: null, text: failure.notice });
+    toast.push("err", failure.error ?? messageOf(err));
+    if (failure.reloadRecent) recent.reload();
+    settings.reload();
+  }
 
   // Vale para os dois modos (por perfil e por link). Uma escolha só: o lote tem um único pós-processamento.
   const processingBlock = (
@@ -500,7 +531,20 @@ export function ImportPage() {
       </div>
 
       <div id="imp-mode-panel" role="tabpanel" aria-labelledby={`imp-mode-${mode}`}>
-        {mode === "profile" ? (
+        {mode === "unified" ? (
+          <ImportUnifiedForm
+            blocker={!sessionOk ? "Configure a sessão do Instagram em Configurações." : paused ? "Instagram em pausa." : null}
+            processing={processingBlock}
+            post={post}
+            presetId={presetId}
+            edit={postOptions.edit}
+            editProblem={editProblem}
+            onCreated={unifiedCreated}
+            onError={unifiedFailed}
+            onConsult={(username) => void consult(username)}
+            consultBusy={lookupBusy || !sessionOk || paused}
+          />
+        ) : mode === "profile" ? (
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -787,17 +831,17 @@ export function ImportPage() {
         )}
       </div>
 
-      {mode === "profile" && startNotice && startNotice.groupId === null ? (
+      {mode !== "links" && startNotice && startNotice.groupId === null ? (
         <div className="alert warn" role="status" style={{ marginTop: 12 }}>
           <span className="grow">{startNotice.text}</span>
         </div>
       ) : null}
-      {mode === "profile" && lookupError ? (
+      {mode !== "links" && lookupError ? (
         <div style={{ marginTop: 12 }}>
           <ErrorLine message={lookupError} />
         </div>
       ) : null}
-      {mode === "profile" && lookupShown ? <ProfilePreview info={lookupShown} /> : null}
+      {mode !== "links" && lookupShown ? <ProfilePreview info={lookupShown} /> : null}
 
       <div ref={panelRef} tabIndex={-1} role="region" aria-label="Acompanhamento da importação">
         {shown?.kind === "group" ? (
@@ -1064,6 +1108,9 @@ function BatchSummary({ batch }: { batch: Batch }) {
     // Lote só de download não tem etapa de processamento para contar.
     ...(downloadOnly ? [] : ([["Processados", p.processed]] as [string, number][])),
     ["Ignorados", p.skipped],
+    // Importação unificada: já existentes e filtrados por tipo/período/visualizações (ausentes em backends antigos).
+    ...(typeof p.duplicates === "number" ? ([["Duplicados", p.duplicates]] as [string, number][]) : []),
+    ...(typeof p.filtered === "number" ? ([["Filtrados", p.filtered]] as [string, number][]) : []),
     ["Erros", p.failed],
     ["Pendentes", p.pending],
   ];

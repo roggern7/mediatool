@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Media Tool</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="head">
+    <img src="icons/icon32.png" alt="" width="20" height="20">
+    <strong>Media Tool</strong>
+    <span class="grow"></span>
+    <button type="button" class="link" id="open-options">Opções</button>
+  </header>
+
+  <main>
+    <div id="loading" class="muted">Carregando…</div>
+
+    <section id="state" class="alert" hidden>
+      <p id="state-message"></p>
+      <div class="row">
+        <button type="button" class="btn" id="state-options" hidden>Abrir Opções</button>
+        <button type="button" class="btn" id="state-retry" hidden>Tentar de novo</button>
+      </div>
+    </section>
+
+    <div id="ig-warning" class="alert warn" hidden></div>
+    <div id="error" class="alert err" role="alert" hidden></div>
+
+    <section id="post" hidden>
+      <p class="kicker" id="post-title">Publicação</p>
+      <p class="mono small" id="post-url"></p>
+      <div class="stack">
+        <button type="button" class="btn primary" data-post-action="videos">Baixar vídeo(s)</button>
+        <button type="button" class="btn" data-post-action="covers">Baixar só a capa</button>
+        <button type="button" class="btn" data-post-action="all">Baixar tudo da publicação</button>
+        <button type="button" class="btn" id="post-owner">Coletar perfil desta publicação</button>
+      </div>
+    </section>
+
+    <section id="profile" hidden>
+      <p class="kicker">Perfil <span class="mono" id="profile-name"></span></p>
+      <form id="profile-form" class="form">
+        <label>Mídia
+          <select name="media">
+            <option value="videos">Somente vídeos</option>
+            <option value="all">Todas</option>
+            <option value="covers">Somente capas</option>
+          </select>
+        </label>
+        <label>Quantidade
+          <select name="limit">
+            <option value="10">10</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="500">500</option>
+            <option value="custom">Personalizada</option>
+            <option value="all">Todas</option>
+          </select>
+        </label>
+        <label data-when="limit-custom" hidden>Quantas publicações
+          <input name="limitCustom" type="number" min="1" max="1000000" inputmode="numeric">
+        </label>
+        <label class="check" data-when="limit-all" hidden>
+          <input name="confirmAll" type="checkbox">
+          Entendo que "Todas" pode levar muito tempo e fazer muitas consultas ao Instagram.
+        </label>
+        <label>Período
+          <select name="period">
+            <option value="any">Qualquer data</option>
+            <option value="7">Últimos 7 dias</option>
+            <option value="30">Últimos 30 dias</option>
+            <option value="60">Últimos 60 dias</option>
+            <option value="90">Últimos 90 dias</option>
+            <option value="custom">Personalizado</option>
+          </select>
+        </label>
+        <label data-when="period-custom" hidden>Últimos N dias
+          <input name="periodCustom" type="number" min="1" max="3650" inputmode="numeric">
+        </label>
+        <fieldset id="views">
+          <legend>Visualizações</legend>
+          <div class="row">
+            <label>Mínimo
+              <select name="minViews" data-views></select>
+            </label>
+            <label>Máximo
+              <select name="maxViews" data-views></select>
+            </label>
+          </div>
+          <div class="row">
+            <label data-when="min-custom" hidden>Mín.
+              <input name="minViewsCustom" type="number" min="1" inputmode="numeric">
+            </label>
+            <label data-when="max-custom" hidden>Máx.
+              <input name="maxViewsCustom" type="number" min="1" inputmode="numeric">
+            </label>
+          </div>
+          <p class="hint" id="views-hint" hidden>Com Mídia "Todas" o filtro de visualizações não se aplica.</p>
+        </fieldset>
+        <label>Depois de baixar
+          <select name="postProcessing" disabled>
+            <option value="none">Só baixar</option>
+          </select>
+        </label>
+        <p class="hint">Edição e presets: <button type="button" class="link" id="more-options">Mais opções no Media Tool</button></p>
+        <button type="submit" class="btn primary">Coletar perfil</button>
+      </form>
+    </section>
+
+    <section id="other" hidden>
+      <p class="muted">Abra uma publicação, um Reel ou um perfil do Instagram e clique de novo no ícone da extensão.</p>
+    </section>
+
+    <section id="progress" hidden>
+      <p class="kicker">Andamento</p>
+      <p class="small muted" id="progress-note"></p>
+      <ul id="progress-list" class="list"></ul>
+      <div class="row">
+        <button type="button" class="btn primary" id="open-app">Abrir no Media Tool</button>
+        <button type="button" class="btn" id="open-library">Biblioteca</button>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

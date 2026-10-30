@@ -135,6 +135,7 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
                 "mode": "filter",
                 "view": chosen.get("view") or "all",
                 "media_type": chosen.get("media_type"),
+                "role": chosen.get("role"),
                 "profile": (chosen.get("profile") or "").strip().lstrip("@") or None,
                 "q": (chosen.get("q") or "").strip() or None,
                 "max_id": int(ctx.db.scalar("SELECT COALESCE(MAX(id), 0) FROM media")),

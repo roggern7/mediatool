@@ -17,6 +17,9 @@ BATCH_PROGRESS_CONDITIONS = {
     "processed": "status = 'completed' AND rendition_id IS NOT NULL AND COALESCE(stage, '') <> 'skipped'",
     "skipped": "status = 'completed' AND stage = 'skipped'",
     "failed": "status = 'failed'",
+    # Mídias que já existiam (origem ou sha256, inclusive a espera por outro lote): congelado em `final_duplicates`
+    # (migration 0021).
+    "duplicates": "kind = 'ingest' AND is_duplicate = 1",
 }
 
 

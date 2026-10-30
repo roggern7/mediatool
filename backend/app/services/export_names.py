@@ -1,6 +1,6 @@
 """Nomes de arquivo da exportação para pasta: amigáveis, estáveis e válidos no Windows (funções puras).
 
-Formato: `{perfil}_{AAAA-MM-DD}_{codigo_do_post}[_{n}].{ext}`. A data é a da publicação (`taken_at`) no fuso do
+Formato: `{perfil}_{AAAA-MM-DD}_{codigo_do_post}[_{n}][_capa].{ext}` (`_capa`: capa de um vídeo, migration 0021). A data é a da publicação (`taken_at`) no fuso do
 Media Tool (`app.services.export_time`; sem zona informada, UTC); `n` (1-based) só aparece em item de carrossel. Sem código do post: `{perfil}_{id da mídia}`; sem perfil nem código: prefixo do SHA-256.
 A extensão é sempre a do arquivo guardado no storage. Versão editada/processada: o nome base ganha a marca da versão
 (`rendition_tag`, ex.: `_editado_15s_1.5x`) antes do sufixo de colisão e da extensão.
@@ -32,6 +32,8 @@ _EXTENSION = re.compile(r"^\.[a-z0-9]{1,5}$")
 EDIT_PRESET_NAME = "Edição"
 EDIT_DURATION_MARGIN = 0.03
 MAX_TAG_LENGTH = 40
+# Sufixo do nome de uma capa (media.role = 'cover').
+COVER_SUFFIX = "capa"
 
 
 def sanitize_component(value: Any) -> str:
@@ -79,6 +81,9 @@ def export_stem(media: dict[str, Any], *, carousel: bool = False, zone: Zone | N
         parts.append(str(media.get("id")))
     else:
         parts.append(str(media.get("original_sha256") or media.get("id"))[:12])
+    if media.get("role") == "cover":
+        # Capa baixada sozinha: o nome nunca se confunde com o do vídeo da mesma publicação (pasta e ZIP planos).
+        parts.append(COVER_SUFFIX)
     return safe_stem("_".join(parts))
 
 

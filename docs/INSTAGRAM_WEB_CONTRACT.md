@@ -975,3 +975,23 @@ Se o root field mudar, edite `root_field` em `PROFILE_POSTS` e as fixtures/teste
 em `backend/tests/fixtures/instagram_web/graphql/`). Consulta nova: crie o `QuerySpec` em `web/queries.py` e inclua o
 nome em `KNOWN_QUERIES` (o schema de settings valida contra essa lista). Depois de qualquer ajuste: rode a suíte
 offline do backend e, só então, a POC com 1 mídia.
+
+### Documento da publicação `/p/` aberto COM a sessão (VERIFICADO 2026-10-29)
+
+`/p/<código>/` logado (foto e carrossel) responde 200 SEM `xig_fetch_media`. O nó vem em
+`require > [0:"ScheduledServerJS"] > [3] > [0] > __bbox > require > [0:"RelayPrefetchedStreamCache"] > [3:<preloader>] >
+[1] > __bbox > result > data > xdt_api__v1__media__shortcode__web_info > items > [0]`: nó v1 com `code` (igual ao
+pedido), `media_type` inteiro, `carousel_media` (lista no carrossel, null na foto), `carousel_media_count`,
+`image_versions2`, `video_versions` (null na foto), `taken_at`, `user`. `parse_session_post_document` aceita os dois
+envelopes (`xig_fetch_media` dos Reels e `items` deste campo) e só o item com `code` EXATAMENTE igual ao pedido vira
+mídia; `items` vazio ou o campo nulo = "gated". Teste com fixture sintética: `tests/test_unified_import.py`.
+
+### Capa e visualizações (VERIFICADO 2026-10-29)
+
+- Capa: `RemoteMedia.thumbnail_url` (maior `image_versions2.candidates` do vídeo) baixa SEM login (1080x1920 JPEG,
+  ~250 KB) sem baixar o vídeo. "Somente capas" baixa só essa URL.
+- Visualizações: a aba Reels ANÔNIMA (`web/reels_tab.py`, `ReelsViews`) paginou 5 páginas seguidas (60 Reels,
+  `play_count` inteiro em todos, ~7 s/página, sem 429): filtro religado (`MIN_VIEWS_ENABLED = True`,
+  `VIEWS_FILTER_ENABLED = true`) com mínimo e máximo (`max_views`; acima do máximo = "above"). O documento por post não
+  traz visualizações; a consulta LOGADA da aba Reels dá field_exception e não é usada. Curtidas e comentários não são
+  usados.

@@ -116,6 +116,21 @@ def test_import_links_schema_and_constraints(db):
     assert db.scalar("SELECT COUNT(*) FROM batch_links") == 0, "ON DELETE CASCADE"
 
 
+# Colunas da 0021 (importação unificada) e da 0022 (1a página vazia) e o valor que as linhas antigas recebem.
+_COLUMNS_0021 = {"media": {"role": "original"}, "jobs": {"media_role": "original"},
+                 "batches": {"media_role": "original", "max_views": None, "final_duplicates": None,
+                             "listing_empty_first_page": None},
+                 "import_groups": {"media_role": "original", "max_views": None}}
+
+
+def _pop_0021(table, rows):
+    """Tira das linhas as colunas da 0021, conferindo o valor padrão (linhas antigas não mudam)."""
+    for row in rows:
+        for name, value in _COLUMNS_0021.get(table, {}).items():
+            if name in row:
+                assert row.pop(name) == value, (table, name)
+
+
 def _migrations_until(tmp_path, version):
     """Cópia das migrations até `version` (banco "existente" de antes das seguintes)."""
     directory = tmp_path / f"migs_until_{version}"
@@ -234,6 +249,7 @@ def test_dash_streams_migration_is_additive_over_existing_rows(tmp_path, db):
             info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
             assert info[column]["type"] == "TEXT" and not info[column]["notnull"] and info[column]["dflt_value"] is None
             assert rows and all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        _pop_0021(table, rows)
         assert rows == before[table], table
     assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
 
@@ -273,6 +289,7 @@ def test_history_hidden_migration_is_additive_over_existing_rows(tmp_path, db):
         for row in rows:
             for name in filters:
                 assert row.pop(name, None) is None
+        _pop_0021(table, rows)
         assert rows == before[table], table
     assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
 
@@ -305,6 +322,7 @@ def test_min_views_migration_is_additive_over_existing_rows(tmp_path, db):
         for column in new_columns.get(table, ()):
             assert not info[column]["notnull"] and info[column]["dflt_value"] is None
             assert rows and all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        _pop_0021(table, rows)
         assert rows == before[table], table
     assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
 
@@ -354,8 +372,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
 
-    assert apply_migrations(db) == [v for v in (17, 18, 19, 20) if v > applied_until]
-    assert schema_version(db) == 20
+    assert apply_migrations(db) == [v for v in (17, 18, 19, 20, 21, 22) if v > applied_until]
+    assert schema_version(db) == 22
     added = {"import_groups": ("posted_within_days", "posted_after", "history_hidden_at"),
              "batches": ("posted_within_days", "posted_after", "listing_period_end", "history_hidden_at")}
     if applied_until < 17:
@@ -367,6 +385,7 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
         for column in added.get(table, ()):
             assert not info[column]["notnull"] and info[column]["dflt_value"] is None
             assert rows and all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        _pop_0021(table, rows)
         assert rows == before[table], table
     assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
 
@@ -382,8 +401,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
 
 
 def test_new_database_gets_17_18_and_19(db):
-    assert apply_migrations(db)[-4:] == [17, 18, 19, 20]
-    assert schema_version(db) == 20
+    assert apply_migrations(db)[-6:] == [17, 18, 19, 20, 21, 22]
+    assert schema_version(db) == 22
     columns = {row["name"] for row in db.fetchall("PRAGMA table_info(batches)")}
     assert {"min_views", "history_hidden_at", "posted_after", "posted_within_days", "listing_period_end"} <= columns
 
@@ -398,7 +417,7 @@ def test_batch_media_params_migration_is_additive(tmp_path, db):
     db.execute("INSERT INTO batch_media (batch_id, media_id) VALUES (1, 7)")
     before = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert before
-    assert apply_migrations(db) == [20]
+    assert apply_migrations(db) == [20, 21, 22]
     rows = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert all(row.pop("params") is None for row in rows) and rows == before
     db.execute("UPDATE batch_media SET params = '{\"speed\": 1.0}'")

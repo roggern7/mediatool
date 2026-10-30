@@ -41,6 +41,8 @@ def list_media(
     ctx: Ctx,
     view: Literal["all", "originals", "processed"] = "all",
     media_type: Literal["video", "image"] | None = None,
+    # Papel (migration 0021): "cover" = só capas; "original" = sem as capas; omitido = todas.
+    role: Literal["original", "cover"] | None = None,
     profile: Annotated[SafeText | None, Query(max_length=64)] = None,
     q: Annotated[SafeText | None, Query(max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -51,6 +53,7 @@ def list_media(
     items, total, next_before_id = ctx.media.list(
         view=view,
         media_type=media_type,
+        role=role,
         profile=(profile or "").strip().lstrip("@") or None,
         q=(q or "").strip() or None,
         limit=limit,
@@ -76,6 +79,7 @@ def process_media_by_filter(ctx: Ctx, body: ProcessByFilterRequest) -> dict[str,
         q=(body.q or "").strip() or None,
         profile=(body.profile or "").strip().lstrip("@") or None,
         preset_id=body.preset_id,
+        role=body.role,
     )
     return batch_single(ctx, batch_id)
 

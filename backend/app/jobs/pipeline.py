@@ -6,7 +6,9 @@ etapa separada, reivindicada pelo pool de FFmpeg (docs/BATCH_ROBUSTNESS.md, seç
 ÚNICA exceção ao "download-only sem FFmpeg": vídeo de lote por link com fluxos separados (DASH) usa o FFmpeg para
 JUNTAR vídeo e áudio sem recodificar (`-c copy`, etapa `muxing`) e o ffprobe para conferir a junção, gravando os
 metadados técnicos do original; sem FFmpeg/ffprobe, ou em qualquer falha de conteúdo, baixa o MP4 direto como antes
-(`_download_dash`).
+(`_download_dash`). Outra exceção, só de análise: imagem (foto ou capa) baixada em download puro ganha largura e
+altura por um ffprobe leve e opcional depois de registrada (`_image_dimensions`; sem ffprobe fica sem dimensões e o
+job conclui igual), nunca miniatura nem FFmpeg.
 Process: processamento a partir do original existente. O original nunca é aberto para escrita.
 """
 
@@ -20,6 +22,7 @@ import time
 import uuid
 import zlib
 from collections.abc import Iterator
+from dataclasses import replace
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -464,7 +467,7 @@ class JobExecutor:
         if self.job.get("source_post_id"):
             media = self.ctx.media.find_by_source(
                 self.job["source_platform"] or "instagram", self.job["source_post_id"],
-                int(self.job["source_media_index"] or 0),
+                int(self.job["source_media_index"] or 0), self._role,
             )
             if media is not None:
                 # Dependente de um job de outro lote (seção 9) mantém o motivo `duplicate_in_flight`.
@@ -501,6 +504,60 @@ class JobExecutor:
             **(dash_fields_from_json(self._ref().get("dash_streams")) or {}),
         )
 
+    @property
+    def _role(self) -> str:
+        """Papel do que o job baixa (migration 0021): 'cover' = só a capa do vídeo, como imagem."""
+        return self.job.get("media_role") or "original"
+
+    def _largest_cover(self, downloader, item: RemoteMedia) -> RemoteMedia:
+        """Capa de lote por PERFIL: a listagem traz a capa menor (ex.: 640x1136) e o documento da publicação a maior
+        (ex.: 1080x1920). UMA leitura da publicação (`resolve_post`: documento público anônimo e, só se restrita, a 2a
+        tentativa com a sessão salva; pelo portão e pelo teto por hora) antes de baixar. Qualquer falha (erro,
+        publicação restrita, pausa, capa ausente): fica a capa da listagem, com uma linha de log (sem URL). Erro do
+        Instagram (ex.: 429) aplica a pausa de sempre e não é repetido aqui. Lote por link já leu a publicação: nada."""
+        batch_id = self.job.get("batch_id")
+        if batch_id is None or self._links_batch(batch_id):
+            return item
+        if instagram_paused(self.worker):
+            logger.info("Job %s: Instagram em pausa; capa da listagem usada (publicação não consultada)", self.job_id)
+            return item
+        shortcode = item.source_post_id
+        try:
+            items = downloader.resolve_post(shortcode, cancel=self.cancel, path_kind=post_path_kind(item.source_url))
+        except BaseException as exc:
+            if is_cancellation(exc) or self.cancel.is_set():
+                raise
+            if isinstance(exc, InstagramError) and self.worker is not None:
+                self.worker.pause_for(exc.code)   # 429/restrição: pausa como sempre; nenhuma nova tentativa aqui
+            code = getattr(exc, "code", None) or exc.__class__.__name__
+            logger.info("Job %s: capa maior não obtida pela publicação (%s); usando a capa da listagem", self.job_id,
+                        code)
+            return item
+        self._check_cancel()
+        index = int(item.source_media_index or 0)
+        best = next((found.thumbnail_url for found in items
+                     if found.source_post_id == shortcode and int(found.source_media_index or 0) == index
+                     and found.thumbnail_url), None)
+        if not best:
+            logger.info("Job %s: a publicação não trouxe a capa deste item; usando a capa da listagem", self.job_id)
+            return item
+        logger.info("Job %s: capa maior obtida pela leitura da publicação", self.job_id)
+        return replace(item, media_url=best, thumbnail_url=best)
+
+    def _refreshed(self, items: list[RemoteMedia]) -> list[tuple[str, int, dict[str, Any]]]:
+        """URLs renovadas (post, índice, ref) das mídias de uma resposta. Job de capa: a URL a baixar é a capa renovada
+        (`thumbnail_url`), sem fluxos separados; o vídeo nunca é baixado."""
+        if self._role == "cover":
+            return [(item.source_post_id, int(item.source_media_index or 0),
+                     {"media_url": item.thumbnail_url, "thumbnail_url": item.thumbnail_url, "dash_streams": None})
+                    for item in items if item.thumbnail_url]
+        return [
+            (item.source_post_id, int(item.source_media_index or 0),
+             {"media_url": item.media_url, "thumbnail_url": item.thumbnail_url, "dash_streams": dash_json(item)})
+            for item in items
+            if item.media_url
+        ]
+
     def _ref(self) -> dict[str, Any]:
         if self.ref is None:
             self.ref = self.ctx.jobs.get_remote_ref(self.job_id)
@@ -514,6 +571,8 @@ class JobExecutor:
         self._check_cancel()  # pedido visto pela gravação da etapa: não começa o download
         downloader = self.ctx.downloader_factory()
         item = self._remote_media()
+        if self._role == "cover" and item.media_url:
+            item = self._largest_cover(downloader, item)
         if not item.media_url:
             # URL já limpa (ex.: job terminado e repetido): só a renovação pela listagem pode obter outra.
             downloaded = self._download_after_expired(downloader, item.media_url, temp_dir)
@@ -574,6 +633,7 @@ class JobExecutor:
                         "video_codec": probe.video_codec if probe and media_type == "video" else None,
                         "mime_type": mime_for(original),
                         "taken_at": self.job["taken_at"],
+                        "role": self._role,
                     }
                 )
             except BaseException:
@@ -581,6 +641,9 @@ class JobExecutor:
                 raise
             self._set(media_id=media_id, temp_path=None)
         logger.info("Job %s: original registrado (media %s, sha %s)", self.job_id, media_id, sha256[:12])
+        if probe is None and media_type == "image":
+            # Imagem (foto ou capa) em download puro: só as dimensões, por um ffprobe leve e opcional.
+            self._image_dimensions(media_id, original)
 
         if not self._download_only:
             self._stage("thumbnail")
@@ -771,12 +834,7 @@ class JobExecutor:
         self.worker.note_auth_success()  # renovação ok: resposta autenticada com sucesso (seção 7)
         self._check_cancel()
         now = utc_now()
-        urls = [
-            (item.source_post_id, int(item.source_media_index or 0),
-             {"media_url": item.media_url, "thumbnail_url": item.thumbnail_url, "dash_streams": dash_json(item)})
-            for item in items
-            if item.media_url
-        ]
+        urls = self._refreshed(items)
         updated = self.ctx.jobs.apply_refreshed_urls(job["batch_id"], urls, now)
         logger.info("Lote %s: página %s renovada (%s jobs com link novo)", job["batch_id"], ref.page_index, updated)
         key = (job["source_post_id"], int(job["source_media_index"] or 0))
@@ -901,12 +959,7 @@ class JobExecutor:
             # SEM a sessão do dono e não prova nada sobre ela.
             self.worker.note_auth_success()
         now = utc_now()
-        urls = [
-            (item.source_post_id, int(item.source_media_index or 0),
-             {"media_url": item.media_url, "thumbnail_url": item.thumbnail_url, "dash_streams": dash_json(item)})
-            for item in items
-            if item.media_url
-        ]
+        urls = self._refreshed(items)
         updated = self.ctx.jobs.apply_refreshed_urls(job["batch_id"], urls, now)
         logger.info("Lote %s: publicação renovada (%s jobs com link novo)", job["batch_id"], updated)
         key = (job["source_post_id"], int(job["source_media_index"] or 0))
@@ -966,6 +1019,18 @@ class JobExecutor:
         self.ctx.media.update(media["id"], duration=probe.duration, width=probe.width, height=probe.height,
                               fps=probe.fps, has_audio=int(probe.has_audio),
                               video_codec=probe.video_codec if media.get("media_type") == "video" else None)
+
+    def _image_dimensions(self, media_id: int, original: Path) -> None:
+        """Largura/altura de uma imagem registrada sem análise (download puro), pelo ffprobe. Nunca falha o job: sem
+        ffprobe (ou se ele não lê o arquivo) a imagem continua sem dimensões, sem aviso por job."""
+        try:
+            probe = self.ctx.processors.get().probe(original)
+        except Exception as exc:  # noqa: BLE001 - dimensões são opcionais
+            logger.debug("Job %s: dimensões da imagem não obtidas para media %s: %s", self.job_id, media_id,
+                         getattr(exc, "code", exc.__class__.__name__))
+            return
+        if probe.width and probe.height:
+            self.ctx.media.update(media_id, width=probe.width, height=probe.height)
 
     def _ensure_thumbnail(self, media_id: int, original: Path) -> None:
         """Reaproveita `thumbs/<media_id>.jpg` se já existe; senão gera em temp e promove sem sobrescrever."""

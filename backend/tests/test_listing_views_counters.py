@@ -35,7 +35,8 @@ def views(approved: int = 0, below: int = 0, no_count: int = 0) -> dict:
 
 def api(approved: int = 0, below: int = 0, no_count: int = 0, pending: int = 0) -> dict:
     return {"min_views": MIN, "posted_within_days": None, "posted_after": None, "analyzed": approved + below + no_count,
-            "approved": approved, "below": below, "no_count": no_count, "out_of_period": 0, "pending": pending}
+            "approved": approved, "below": below, "no_count": no_count, "out_of_period": 0, "pending": pending,
+            "max_views": None, "above": 0}
 
 
 def batch(h, limit: int | None = 100, content: str = "reels", min_views: int | None = MIN) -> int:
@@ -233,5 +234,20 @@ def test_single_warning_when_nothing_was_approved_and_videos_had_no_count(harnes
                 if r.levelno == logging.WARNING and "contagem de visualizações" in r.getMessage()]
     assert len(warnings) == 1 and "5 sem contagem" in warnings[0]
     totals = [r.getMessage() for r in caplog.records if ": filtros: " in r.getMessage()]
-    assert totals == [f"Lote {batch_id}: filtros: 6 analisados, 0 aprovados, 1 abaixo do mínimo, 5 sem contagem, 0 fora do período"]
+    assert totals == [f"Lote {batch_id}: filtros: 6 analisados, 0 aprovados, 1 abaixo do mínimo, 0 acima do máximo, 5 sem contagem, 0 fora do período"]
     assert str(LOW) not in caplog.text and str(MIN) in caplog.text   # só o mínimo configurado, nunca a contagem
+
+
+def test_totals_log_matches_the_api_and_includes_above_the_maximum(harness_factory, caplog):
+    site = MirroredSite(gp.body(1, [reel(1, 0, play_count=HIGH), reel(1, 1, play_count=LOW),
+                                    reel(1, 2, play_count=MIN), reel(1, 3)], has_next=False))
+    h = harness_factory(downloader=gp.downloader(site))
+    batch_id = h.ctx.batches.create(source="instagram_import", status="listing", source_profile="perfil_teste",
+                                    content_type="reels", requested_limit=100, min_views=MIN, max_views=MIN)
+    h.run_imports()
+    api_filter = h.batch(batch_id)["views_filter"]
+    assert (api_filter["analyzed"], api_filter["approved"], api_filter["below"], api_filter["above"],
+            api_filter["no_count"]) == (4, 1, 1, 1, 1)
+    totals = [r.getMessage() for r in caplog.records if ": filtros: " in r.getMessage()]
+    assert totals == [f"Lote {batch_id}: filtros: 4 analisados, 1 aprovados, 1 abaixo do mínimo, 1 acima do máximo, "
+                      "1 sem contagem, 0 fora do período"]

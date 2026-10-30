@@ -22,7 +22,7 @@ def test_ingest_promotes_original_and_thumbnail(harness):
     result = harness.batch(batch["id"])
     assert result["status"] == "completed"
     assert result["progress"] == {"found": 2, "downloaded": 2, "processed": 2, "skipped": 0, "failed": 0,
-                                  "pending": 0, "active": 0}
+                                  "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
     for job in result["jobs"]:
         assert job["status"] == "completed" and job["stage"] == "done" and job["progress"] == 1.0
         assert job["thumbnail_url"] == f"/api/media/{job['media_id']}/thumbnail"

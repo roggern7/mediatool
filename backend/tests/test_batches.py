@@ -18,7 +18,7 @@ def test_partially_failed_batch_completes_with_correct_progress(harness):
     assert result["status"] == "completed" and result["finished_at"]
     assert result["found"] == 5
     assert result["progress"] == {"found": 5, "downloaded": 4, "processed": 0, "skipped": 0, "failed": 1,
-                                  "pending": 0, "active": 0}
+                                  "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
     assert result["counts"]["completed"] == 4 and result["counts"]["failed"] == 1
     statuses = sorted(j["status"] for j in result["jobs"])
     assert statuses == ["completed"] * 4 + ["failed"]

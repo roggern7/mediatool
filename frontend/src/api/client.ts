@@ -34,6 +34,10 @@ import type {
   Settings,
   SettingsUpdate,
   UploadResult,
+  ClassifyRequest,
+  ClassifyResult,
+  UnifiedImportRequest,
+  UnifiedImportResult,
 } from "./types";
 import { errorMessageFor } from "./errors";
 import type { CookiePatch } from "../lib/sessionCookies";
@@ -214,6 +218,12 @@ export const api = {
   /** Importação por link: `links` são as URLs normalizadas do preview. A resposta é o lote criado. */
   createLinksImport: (req: ImportLinksRequest) =>
     request<Batch & { duplicates?: number }>("POST", "/import-links", { body: req, timeoutMs: SLOW_TIMEOUT_MS }),
+  /** Importação unificada: classifica as entradas (perfis, publicações, inválidas), sem efeitos. */
+  classifyImport: (body: ClassifyRequest, signal?: AbortSignal) =>
+    request<ClassifyResult>("POST", "/imports/classify", { body, signal }),
+  /** Importação unificada: 1 perfil = lote avulso; 2+ perfis = grupo; publicações = lote de links. */
+  startImport: (body: UnifiedImportRequest) =>
+    request<UnifiedImportResult>("POST", "/imports/start", { body, timeoutMs: SLOW_TIMEOUT_MS }),
   /** Links de um lote por link, na ordem em que foram enviados. */
   listBatchLinks: (id: number, limit = 200, offset = 0) =>
     request<BatchLinks>("GET", `/batches/${id}/links`, { query: { limit, offset } }),
@@ -248,6 +258,7 @@ export const api = {
       query: {
         view: q.view,
         media_type: q.media_type,
+        role: q.role,
         profile: q.profile,
         q: q.q,
         limit: q.limit,

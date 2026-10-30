@@ -117,6 +117,8 @@ class JobRepository:
             updated_at=now,
             finished_at=now if completed_skipped else None,
             primary_job_id=primary_job_id,
+            # Papel do que o job baixa (migration 0021): 'cover' = só a capa do vídeo (`media_url` = a URL da capa).
+            media_role=source.get("media_role") or "original",
         )
         columns = list(data)
         ref = {column: source.get(column) for column in REMOTE_REF_COLUMNS}

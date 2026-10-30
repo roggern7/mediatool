@@ -23,7 +23,7 @@ export interface GroupChildLike extends BatchStateLike {
   process?: boolean;
   requested_limit: number | null;
   progress: Pick<BatchProgress, "found" | "downloaded" | "failed"> & { skipped?: number };
-  listing_end?: "profile_end" | "limit" | "period_end" | null;
+  listing_end?: "profile_end" | "limit" | "period_end" | "empty_first_page" | null;
   group_state?: GroupChildState | null;
 }
 
@@ -87,6 +87,11 @@ export function profileStateDetail(b: GroupChildLike, now: number): string | nul
   return null;
 }
 
+/** Lote que terminou porque a 1a página do perfil veio vazia e sem próxima (listing_end "empty_first_page"). */
+export const EMPTY_FIRST_PAGE_TEXT =
+  "o Instagram não devolveu nenhuma publicação deste perfil agora (perfil sem posts, privado ou limite temporário); " +
+  "tente de novo mais tarde";
+
 /** "perfil chegou ao fim: 37 de 100" quando o perfil acabou antes da quantidade pedida; null nos demais casos. */
 export function profileEndText(b: GroupChildLike): string | null {
   if (b.listing_end !== "profile_end" || b.requested_limit === null) return null;
@@ -116,7 +121,9 @@ export function profileProgressText(b: GroupChildLike): string {
   const end = profileEndText(b);
   const existing = Math.max(0, p.skipped ?? 0);
   const done = p.downloaded + existing;
-  if (state === "completed") {
+  if (state === "completed" && b.listing_end === "empty_first_page") {
+    parts.push(EMPTY_FIRST_PAGE_TEXT);
+  } else if (state === "completed") {
     parts.push(end ?? mediaCountText(done));
   } else {
     const target = b.status === "listing" ? (b.requested_limit ?? p.found) : p.found;

@@ -82,7 +82,7 @@ class ExportRepository:
         if selection.get("mode") == "filter":
             where, params = MediaRepository.filter_where(
                 view=selection.get("view") or "all", media_type=selection.get("media_type"),
-                profile=selection.get("profile"), q=selection.get("q"),
+                profile=selection.get("profile"), q=selection.get("q"), role=selection.get("role"),
             )
             # Filtro congelado no pedido: mídias importadas depois (id maior) não entram no meio da cópia.
             extra = f"m.id <= ? AND m.id NOT IN ({_ITEMS})"
