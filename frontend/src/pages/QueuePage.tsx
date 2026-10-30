@@ -23,7 +23,8 @@ import {
 } from "../lib/labels";
 import { batchIdFromSearch } from "../lib/batchRoute";
 import { linksSummaryText } from "../lib/importLinks";
-import { progressExtrasText } from "../lib/importUnified";
+import { mediaLabel, progressExtrasText } from "../lib/importUnified";
+import { AutoExportLine } from "../components/AutoExportLine";
 import {
   FIRST_PAGE,
   type PageCursor,
@@ -473,7 +474,11 @@ function BatchHeader({
       {batch ? (
         <div className="muted small" style={{ marginTop: 6 }}>
           {isLinksBatch(batch) && batch.links ? `${linksSummaryText(batch.links)} · ` : ""}
-          {isDownloadOnly(batch) ? (batch.media === "covers" ? "Somente capas · " : "Somente originais · ") : ""}
+          {isDownloadOnly(batch)
+            ? batch.media && batch.media !== "videos"
+              ? `${mediaLabel(batch.media)} · `
+              : "Somente originais · "
+            : ""}
           {BATCH_COUNTS.map(
             ({ label, statuses }) =>
               `${isDownloadOnly(batch) && label === "Processando" ? "Baixando" : label}: ${formatCount(
@@ -493,6 +498,7 @@ function BatchHeader({
           {viewsFilterText(visibleFilter(batch.views_filter), batch.progress.downloaded)}
         </div>
       ) : null}
+      {batch ? <AutoExportLine auto={batch.auto_export} /> : null}
       {batch ? <BatchNotice batch={batch} onResumed={onRetry} /> : null}
     </div>
   );

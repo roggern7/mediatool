@@ -78,11 +78,65 @@ test("app desligado vira offline; demora vira timeout", async () => {
   await assert.rejects(slow.status(), (err) => err.kind === "timeout");
 });
 
-test("progress monta a query", async () => {
-  const { calls, impl } = fakeFetch(() => json(200, { batches: [] }));
+test("rotas novas: query, método e caminho", async () => {
+  const { calls, impl } = fakeFetch(() => json(200, { items: [] }));
   const client = createClient({ token: "t", fetchImpl: impl });
-  await client.progress({ batchIds: [3, 4], groupId: 9 });
-  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/ext/progress?batch_ids=3%2C4&group_id=9");
-  assert.equal(calls[0].init.method, "GET");
+  await client.activity(20);
+  await client.batchItems(7, { beforeId: 100, limit: 50 });
+  await client.library({ media_type: "video", role: "", profile: null, before_id: 55, limit: 30 });
+  await client.libraryIds({ batch_id: 7 });
+  await client.cancel("group", 3);
+  await client.cancel("batch", 4);
+  await client.editOptions();
+  await client.edits({ media_ids: [1], settings: {} });
+  await client.process([1, 2], 9);
+  await client.createExport({ source: { kind: "batch", id: 7 }, content: "both" });
+  await client.exportStatus(12);
+  await client.postPreview("https://www.instagram.com/p/ABCDE12345/");
+  const got = calls.map((c) => `${c.init.method} ${c.url.replace("http://127.0.0.1:8765", "")}`);
+  assert.deepEqual(got, [
+    "GET /api/ext/activity?limit=20",
+    "GET /api/ext/batches/7/items?before_id=100&limit=50",
+    "GET /api/ext/library?media_type=video&before_id=55&limit=30",
+    "GET /api/ext/library/ids?batch_id=7",
+    "POST /api/ext/groups/3/cancel",
+    "POST /api/ext/batches/4/cancel",
+    "GET /api/ext/edit/options",
+    "POST /api/ext/edits",
+    "POST /api/ext/process",
+    "POST /api/ext/exports",
+    "GET /api/ext/exports/12",
+    "POST /api/ext/post-preview",
+  ]);
+  assert.deepEqual(JSON.parse(calls[8].init.body), { media_ids: [1, 2], preset_id: 9 });
   assert.equal(calls[0].init.headers["X-Media-Tool-Client"], undefined);
+  assert.equal(calls[4].init.headers["X-Media-Tool-Client"], "extension");
+});
+
+test("perfis de um grupo: rota paginada com token", async () => {
+  const { calls, impl } = fakeFetch(() => json(200, { items: [], total: 0, next_after_position: null }));
+  const client = createClient({ token: "t", fetchImpl: impl });
+  await client.groupChildren(5);
+  await client.groupChildren(5, { afterPosition: 20, limit: 20 });
+  assert.deepEqual(calls.map((c) => `${c.init.method} ${c.url.replace("http://127.0.0.1:8765", "")}`), [
+    "GET /api/ext/groups/5/children?limit=20",
+    "GET /api/ext/groups/5/children?after_position=20&limit=20",
+  ]);
+  assert.equal(calls[0].init.headers.Authorization, "Bearer t");
+});
+
+test("429 vira rate_limited com Retry-After", async () => {
+  const impl = async () => ({ ok: false, status: 429, headers: { get: (k) => (k === "Retry-After" ? "7" : null) },
+    json: async () => ({ detail: "Calma.", code: "rate_limited" }) });
+  await assert.rejects(createClient({ token: "t", fetchImpl: impl }).activity(),
+    (err) => err.kind === "rate_limited" && err.retryAfter === 7 && err.message === "Calma.");
+});
+
+test("miniatura volta como Blob, com token, sem expor URL com token", async () => {
+  const { calls, impl } = fakeFetch(() => ({ ok: true, status: 200, blob: async () => "BLOB" }));
+  const blob = await createClient({ token: "SEGREDO", fetchImpl: impl }).thumbnail(42);
+  assert.equal(blob, "BLOB");
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/ext/media/42/thumbnail");
+  assert.ok(!calls[0].url.includes("SEGREDO"));
+  assert.equal(calls[0].init.headers.Authorization, "Bearer SEGREDO");
 });

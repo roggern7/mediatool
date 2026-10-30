@@ -267,6 +267,8 @@ export const api = {
       },
     }),
   getMedia: (id: number) => request<Media>("GET", `/media/${id}`),
+  /** Leitura em lote (até 500 ids), na ordem pedida; ids inexistentes ficam de fora. */
+  getMediaByIds: (ids: number[]) => request<Paged<Media>>("GET", "/media", { query: { ids: ids.join(",") } }),
   processMedia: (id: number, presetId: number) =>
     request<Job>("POST", `/media/${id}/process`, { body: { preset_id: presetId } }),
   processMediaBatch: (mediaIds: number[], presetId: number) =>

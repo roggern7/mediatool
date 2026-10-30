@@ -164,15 +164,44 @@ def _count_of(counts: dict[str, Any], key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
+# Conjuntos de mídia (migration 0023) que pedem a capa de cada vídeo, e os que pedem também o item original.
+_COVER_SETS = frozenset({"covers", "videos_covers", "all"})
+
+
 def _covers(batch: dict[str, Any]) -> bool:
-    """Lote "Somente capas" (migration 0021): cada vídeo vira um job da CAPA dele (imagem), nunca do vídeo."""
-    return batch.get("media_role") == "cover"
+    """Lote que baixa capas: "Somente capas" (migration 0021) e os conjuntos com capa da 0023 ("Vídeos e capas",
+    "Todas"). Só decide o provider (capas só pelo método web)."""
+    return batch.get("media_role") == "cover" or batch.get("media_set") in _COVER_SETS
+
+
+def _roles(batch: dict[str, Any], item: RemoteMedia) -> list[str]:
+    """Papéis dos jobs de um item, na ordem: o original (se o lote o pede) e depois a capa (só de vídeo com capa).
+    Lote anterior à 0023 (`media_set` NULL): um papel só, o do lote, como antes."""
+    media_set = batch.get("media_set")
+    if media_set is None:
+        return [batch.get("media_role") or "original"]
+    roles = [] if media_set == "covers" else ["original"]
+    if media_set in _COVER_SETS and item.media_type == "video" and item.thumbnail_url:
+        roles.append("cover")
+    return roles
+
+
+def _primary_role(batch: dict[str, Any]) -> str:
+    """Papel que conta na quantidade pedida ("Últimas N"): a capa em "Somente capas"; o original nos demais (o vídeo
+    e a capa dele contam como UM item)."""
+    return "cover" if batch.get("media_role") == "cover" else "original"
 
 
 def _wanted_by_type(batch: dict[str, Any], item: RemoteMedia) -> bool:
-    """Lote por link da importação unificada com "Somente vídeos"/"Somente capas" (`content_type` "videos"): só os
-    vídeos da publicação viram job. Lotes por link antigos ("all") recebem todas as mídias, como antes."""
-    return batch.get("content_type") != "videos" or item.media_type == "video"
+    """Lote por link da importação unificada: com conteúdo "videos" (Somente vídeos/capas, Vídeos e capas) só os
+    vídeos da publicação viram job; com "images" (Somente fotos) só as fotos. "all" (e os lotes por link antigos)
+    recebem todas as mídias, na ordem do carrossel."""
+    content = batch.get("content_type")
+    if content == "videos":
+        return item.media_type == "video"
+    if content == "images":
+        return item.media_type == "image"
+    return True
 
 
 def _is_link_error(exc: InstagramError) -> bool:
@@ -446,7 +475,7 @@ class ImportRunner:
             self._current_thread = threading.get_ident()
         resume = self._checkpoint_from(batch)
         limit = batch["requested_limit"]
-        created_before = self.ctx.jobs.count_for_batch(batch_id)
+        created_before = self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch))
         remaining = None if limit is None else max(0, limit - created_before)
         logger.info(
             "Lote %s: listando perfil %s (conteúdo=%s, limite=%s, %s%s)",
@@ -1134,7 +1163,10 @@ class ImportRunner:
         return current is None or current["status"] == "cancelled"
 
     def _limit_reached(self, batch_id: int, limit: int | None) -> bool:
-        return limit is not None and self.ctx.jobs.count_for_batch(batch_id) >= limit
+        if limit is None:
+            return False
+        batch = self.ctx.batches.get(batch_id) or {}
+        return self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch)) >= limit
 
     def _flush(self, batch: dict[str, Any], buffer: list[RemoteMedia], checkpoint: ListingCheckpoint | None) -> int:
         """Grava os jobs dos itens acumulados (e o checkpoint) numa transação. Retorna quantos jobs criou."""
@@ -1147,7 +1179,7 @@ class ImportRunner:
                 # Cancelado (mesma transação que gravaria os jobs e o checkpoint): nada é criado nem avançado.
                 buffer.clear()
                 return 0
-            count = self.ctx.jobs.count_for_batch(batch_id)
+            count = self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch))
             for item in buffer:
                 if limit is not None and count >= limit:
                     break
@@ -1205,7 +1237,21 @@ class ImportRunner:
         return created
 
     def _add_item(self, batch: dict[str, Any], item: RemoteMedia) -> bool:
-        """Cria o job do item (sem duplicar dentro do lote). Retorna True se o item é novo no lote."""
+        """Cria os jobs do item (sem duplicar dentro do lote): um por papel pedido (`_roles`; ex.: o vídeo e a capa
+        dele em "Todas"). Retorna True se o item é novo no lote (o job do papel principal foi criado)."""
+        roles = _roles(batch, item)
+        if not roles:
+            return False
+        primary = _primary_role(batch)
+        new_item = False
+        for role in roles:
+            created = self._add_job(batch, item, role)
+            if created and (role == primary or primary not in roles):
+                new_item = True
+        return new_item
+
+    def _add_job(self, batch: dict[str, Any], item: RemoteMedia, role: str) -> bool:
+        """Cria o job de UM papel do item. True se o job é novo no lote."""
         data = asdict(item)
         ref = item.listing_ref
         source = {
@@ -1225,19 +1271,21 @@ class ImportRunner:
             "listing_page_size": None if ref is None else ref.page_size,
             "dash_streams": dash_json(item),
         }
-        role = "original"
-        if _covers(batch) and (item.media_type != "video" or not data["thumbnail_url"]):
+        if role == "cover" and (item.media_type != "video" or not data["thumbnail_url"]):
             # Defesa: o provider web já descarta fotos em "Somente capas"; um item sem capa de vídeo nunca vira job.
             logger.warning("Lote %s: item sem capa de vídeo ignorado em \"Somente capas\"", batch["id"])
             return False
-        if _covers(batch):
-            # "Somente capas": o job baixa só a capa do vídeo (a maior de `image_versions2`, já em `thumbnail_url`)
-            # como imagem; o vídeo nunca é baixado. Renovação de URL expirada: a pipeline usa a capa renovada.
-            role = "cover"
+        if role == "cover":
+            # Job da capa ("Somente capas", "Vídeos e capas", "Todas"): baixa só a capa do vídeo (a maior de
+            # `image_versions2`, já em `thumbnail_url`) como imagem; o vídeo nunca é baixado por ESTE job. Renovação
+            # de URL expirada: a pipeline usa a capa renovada.
             source.update(media_type="image", media_url=data["thumbnail_url"], dash_streams=None, media_role=role)
         process = batch["process"] and batch["params"] is not None and role == "original"
         # "Editar após baixar": só vídeo é editado; foto do lote de Edição é só baixada (download-only, sem preset).
-        image_in_edit = process and source["media_type"] != "video" and edit_service.is_edit(batch)
+        # Importação unificada com tipo de mídia (migration 0023): só vídeo original é processado, com preset ou
+        # edição; fotos e capas são só baixadas.
+        image_in_edit = process and source["media_type"] != "video" and (
+            edit_service.is_edit(batch) or batch.get("media_set") is not None)
         if image_in_edit:
             process = False
         existing = self.ctx.media.find_by_source(

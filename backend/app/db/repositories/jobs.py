@@ -271,8 +271,12 @@ class JobRepository:
         next_before_id = rows[limit - 1]["id"] if len(rows) > limit else None
         return [decode_job(row) for row in rows[:limit]], total, counts, next_before_id
 
-    def count_for_batch(self, batch_id: int) -> int:
-        return int(self.db.scalar("SELECT COUNT(*) FROM jobs WHERE batch_id = ?", (batch_id,)))
+    def count_for_batch(self, batch_id: int, *, role: str | None = None) -> int:
+        """Jobs do lote; com `role` (migration 0023), só os do papel (a quantidade pedida conta itens, e um vídeo com
+        capa tem dois jobs)."""
+        if role is None:
+            return int(self.db.scalar("SELECT COUNT(*) FROM jobs WHERE batch_id = ?", (batch_id,)))
+        return int(self.db.scalar("SELECT COUNT(*) FROM jobs WHERE batch_id = ? AND media_role = ?", (batch_id, role)))
 
     def pending_ingest_count(self, batch_id: int) -> int:
         """Jobs de ingest do lote ainda não baixados (backpressure da listagem)."""

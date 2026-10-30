@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { ClassifyResult, UnifiedImportResult } from "../api/types";
 import { LIBRARY_TYPE_FILTERS, libraryTypeQuery, mediaKindLabel } from "./importCovers";
 import {
+  MEDIA_CHOICES,
+  autoExportText,
+  autoExportNeedsProcessing,
+  AUTO_EXPORT_NEEDS_PROCESSING_TEXT,
   classificationText,
   createdText,
   entriesOf,
   needsConfirmAll,
+  postProcessingApplies,
   progressExtrasText,
   resolveQuantity,
   unifiedBody,
@@ -147,5 +152,47 @@ describe("contadores Duplicados e Filtrados", () => {
   it("backend antigo sem os campos: nada", () => {
     expect(progressExtrasText({})).toBeNull();
     expect(progressExtrasText({ filtered: 3 })).toBe("Filtrados: 3");
+  });
+});
+
+describe("tipos de mídia e exportação automática", () => {
+  it("cinco tipos, na ordem da tela", () => {
+    expect(MEDIA_CHOICES.map((c) => c.value)).toEqual(["videos", "photos", "covers", "videos_covers", "all"]);
+  });
+  it("visualizações só com vídeos, capas ou vídeos e capas", () => {
+    expect(["videos", "covers", "videos_covers"].every((m) => viewsAllowed(m as never))).toBe(true);
+    expect(viewsAllowed("photos")).toBe(false);
+    const body = unifiedBody(form({ media: "photos", minViews: 10 }));
+    expect(body).not.toHaveProperty("min_views");
+    expect(unifiedBody(form({ media: "videos_covers", minViews: 10 }))).toMatchObject({ min_views: 10 });
+  });
+  it("pós-processamento não vale para somente fotos/capas", () => {
+    expect(postProcessingApplies("photos")).toBe(false);
+    expect(postProcessingApplies("covers")).toBe(false);
+    expect(postProcessingApplies("all")).toBe(true);
+  });
+  it("auto_export só vai quando ligado", () => {
+    expect(unifiedBody(form())).not.toHaveProperty("auto_export");
+    expect(unifiedBody(form({ autoExport: "off" }))).not.toHaveProperty("auto_export");
+    expect(unifiedBody(form({ autoExport: "both" }))).toMatchObject({ auto_export: { content: "both" } });
+  });
+  it("editados/ambos exigem pós-processamento", () => {
+    expect(autoExportNeedsProcessing("edited")).toBe(true);
+    expect(autoExportNeedsProcessing("both")).toBe(true);
+    expect(autoExportNeedsProcessing("originals")).toBe(false);
+    expect(autoExportNeedsProcessing("off")).toBe(false);
+    expect(AUTO_EXPORT_NEEDS_PROCESSING_TEXT).toContain("originais");
+  });
+  it("texto do painel da exportação automática", () => {
+    const base = { content: "originals" as const, export_id: null, error_message: null, zip_ready: false, download_url: null };
+    expect(autoExportText(null)).toBeNull();
+    expect(autoExportText({ ...base, status: "waiting" })).toContain("aguardando");
+    expect(autoExportText({ ...base, status: "waiting", request_id: 4 })).toContain("ZIP único");
+    expect(autoExportText({ ...base, status: "completed", export_id: 3, zip_ready: true, download_url: "/x" })).toContain(
+      "ZIP pronto",
+    );
+    expect(autoExportText({ ...base, status: "failed", error_message: "Nada para exportar." })).toContain(
+      "falhou: Nada para exportar.",
+    );
   });
 });

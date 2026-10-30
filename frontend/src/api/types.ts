@@ -6,7 +6,23 @@ export type MediaType = "video" | "image";
 /** Papel da mídia na Biblioteca: "cover" = capa de um vídeo/Reel baixada sozinha. */
 export type MediaRole = "original" | "cover";
 /** Tipo de mídia da importação unificada. */
-export type MediaChoice = "videos" | "all" | "covers";
+export type MediaChoice = "videos" | "photos" | "covers" | "videos_covers" | "all";
+
+/** O que a exportação ZIP automática leva ao concluir a importação. */
+export type AutoExportContent = "originals" | "edited" | "both";
+
+/** Exportação ZIP automática de um lote/grupo (null/ausente sem ela ou em backends antigos). */
+export interface AutoExport {
+  content: AutoExportContent;
+  /** "waiting": aguardando o fim; "failed": não foi criada (motivo em error_message); senão, o estado do ZIP. */
+  status: "waiting" | "pending" | "running" | "completed" | "failed" | "cancelled" | "expired";
+  export_id: number | null;
+  error_message: string | null;
+  zip_ready: boolean;
+  download_url: string | null;
+  /** Pedido com perfis E links: UM ZIP para o pedido inteiro (as partes mostram o mesmo). Ausente em backends antigos. */
+  request_id?: number | null;
+}
 
 export type JobStatus =
   | "pending"
@@ -235,6 +251,8 @@ export interface Batch {
   links?: BatchLinksSummary | null;
   /** Tipo de mídia pedido (importação unificada); null/ausente em lotes antigos de outro conteúdo. */
   media?: MediaChoice | null;
+  /** Exportação ZIP automática ao concluir; filho de grupo: null (a do grupo fica no grupo). */
+  auto_export?: AutoExport | null;
 }
 
 export interface BatchLinksSummary {
@@ -330,6 +348,7 @@ export interface ImportGroup {
   /** Última exportação para pasta concluída do grupo inteiro; null/ausente se nunca foi exportado. */
   last_export?: LastExport | null;
   media?: MediaChoice | null;
+  auto_export?: AutoExport | null;
 }
 
 export interface SkippedProfile {
@@ -588,6 +607,8 @@ export interface UnifiedImportRequest {
   post_processing: "none" | "preset" | "edit";
   preset_id?: number;
   edit?: EditSettings;
+  /** Exportação ZIP automática ao concluir; ausente = sem ela. */
+  auto_export?: { content: AutoExportContent };
 }
 
 export interface UnifiedImportResult {

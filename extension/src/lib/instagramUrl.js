@@ -61,5 +61,8 @@ export function fromPageInfo(info) {
   if (info.shortcode) result.shortcode = info.shortcode;
   if (info.username) result.username = info.username;
   if (info.canonical_url) result.canonicalUrl = info.canonical_url;
+  // Publicação já na Biblioteca: o dono conhecido (a URL de um Reel não traz o @).
+  const owner = info.library && info.library.source_profile;
+  if (typeof owner === "string" && owner) result.libraryProfile = owner;
   return result;
 }

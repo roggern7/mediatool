@@ -3,48 +3,9 @@
 <head>
   <meta charset="utf-8">
   <title>Media Tool: opções da extensão</title>
-  <link rel="stylesheet" href="popup.css">
 </head>
-<body class="page">
-  <h1>Media Tool: opções</h1>
-
-  <section class="alert" id="connection">
-    <p id="connection-text">Verificando…</p>
-    <div class="row">
-      <button type="button" class="btn" id="test">Testar conexão</button>
-      <button type="button" class="btn" id="disconnect" hidden>Desconectar</button>
-    </div>
-  </section>
-
-  <form id="settings-form" class="form" style="margin-top: 16px">
-    <label>Porta do Media Tool
-      <input name="port" type="number" min="1024" max="65535" required>
-    </label>
-    <p class="hint">
-      Padrão: 8765. A extensão só tem permissão para falar com <span class="mono">127.0.0.1:8765</span> e
-      <span class="mono">localhost:8765</span>; outra porta só funciona se você também ajustar
-      <span class="mono">host_permissions</span> no manifest.json e recarregar a extensão.
-    </p>
-    <label>Nome deste dispositivo
-      <input name="deviceName" type="text" maxlength="60" required>
-    </label>
-    <button type="submit" class="btn">Salvar</button>
-  </form>
-
-  <form id="pair-form" class="form" style="margin-top: 24px">
-    <h2>Parear com o Media Tool</h2>
-    <p class="hint">
-      No Media Tool, abra Configurações → Extensão do Chrome e clique em "Gerar código". Digite o código aqui
-      (vale por 5 minutos e só uma vez).
-    </p>
-    <label>Código de pareamento
-      <input name="code" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH" required>
-    </label>
-    <button type="submit" class="btn primary">Parear</button>
-  </form>
-
-  <div id="message" class="alert" role="status" style="margin-top: 16px" hidden></div>
-
-  <script type="module" src="options.js"></script>
+<body>
+  <p><a href="app.html?tab=settings">Abrir as Configurações da extensão</a></p>
+  <script src="options.js"></script>
 </body>
 </html>

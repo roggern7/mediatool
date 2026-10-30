@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, Response
@@ -28,6 +29,19 @@ from app.services.storage import mime_for
 
 router = APIRouter(tags=["biblioteca"])
 
+# Leitura em lote de GET /media?ids= (a página Editar recebe até 500 vídeos por ?ids=, o teto de um lote de edição).
+MAX_MEDIA_IDS = 500
+_MEDIA_IDS_RE = re.compile(r"^\d{1,16}(,\d{1,16})*$")
+
+
+def _parse_media_ids(raw: str) -> list[int]:
+    if not _MEDIA_IDS_RE.match(raw):
+        raise AppError(422, "validation_error", "ids deve ser uma lista de números separados por vírgula.")
+    ids = list(dict.fromkeys(int(part) for part in raw.split(",")))
+    if len(ids) > MAX_MEDIA_IDS or any(not 1 <= value <= MAX_ID for value in ids):
+        raise AppError(422, "validation_error", f"Informe de 1 a {MAX_MEDIA_IDS} ids válidos.")
+    return ids
+
 
 def _media_or_404(ctx: Ctx, media_id: int) -> dict[str, Any]:
     media = ctx.media.get(media_id)
@@ -48,8 +62,14 @@ def list_media(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0, le=10_000_000)] = 0,
     before_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+    ids: Annotated[str | None, Query(max_length=MAX_MEDIA_IDS * 17)] = None,
 ) -> dict[str, Any]:
-    """Ordem id DESC. Paginação keyset: `before_id` + `next_before_id` (null no fim); `offset` por compatibilidade."""
+    """Ordem id DESC. Paginação keyset: `before_id` + `next_before_id` (null no fim); `offset` por compatibilidade.
+    `ids=1,2,3` (até 500): leitura em lote só dessas mídias, na ordem pedida, sem as inexistentes; os filtros e a
+    paginação não se aplicam (`next_before_id` null)."""
+    if ids is not None:
+        items = ctx.media.get_many(_parse_media_ids(ids))
+        return {"items": media_out(ctx, items), "total": len(items), "next_before_id": None}
     items, total, next_before_id = ctx.media.list(
         view=view,
         media_type=media_type,

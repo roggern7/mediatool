@@ -116,11 +116,15 @@ def test_import_links_schema_and_constraints(db):
     assert db.scalar("SELECT COUNT(*) FROM batch_links") == 0, "ON DELETE CASCADE"
 
 
-# Colunas da 0021 (importação unificada) e da 0022 (1a página vazia) e o valor que as linhas antigas recebem.
+# Colunas da 0021 (importação unificada), da 0022 (1a página vazia) e da 0023 (tipo de mídia e exportação automática)
+# e o valor que as linhas antigas recebem.
+_COLUMNS_0023 = {"media_set": None, "auto_export_content": None, "auto_export_state": None, "auto_export_id": None,
+                 "auto_export_error": None}
+_COLUMNS_0024 = {"request_id": None}   # pedido com várias partes (import_requests)
 _COLUMNS_0021 = {"media": {"role": "original"}, "jobs": {"media_role": "original"},
                  "batches": {"media_role": "original", "max_views": None, "final_duplicates": None,
-                             "listing_empty_first_page": None},
-                 "import_groups": {"media_role": "original", "max_views": None}}
+                             "listing_empty_first_page": None, **_COLUMNS_0023, **_COLUMNS_0024},
+                 "import_groups": {"media_role": "original", "max_views": None, **_COLUMNS_0023, **_COLUMNS_0024}}
 
 
 def _pop_0021(table, rows):
@@ -372,8 +376,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
 
-    assert apply_migrations(db) == [v for v in (17, 18, 19, 20, 21, 22) if v > applied_until]
-    assert schema_version(db) == 22
+    assert apply_migrations(db) == [v for v in (17, 18, 19, 20, 21, 22, 23, 24) if v > applied_until]
+    assert schema_version(db) == 24
     added = {"import_groups": ("posted_within_days", "posted_after", "history_hidden_at"),
              "batches": ("posted_within_days", "posted_after", "listing_period_end", "history_hidden_at")}
     if applied_until < 17:
@@ -401,8 +405,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
 
 
 def test_new_database_gets_17_18_and_19(db):
-    assert apply_migrations(db)[-6:] == [17, 18, 19, 20, 21, 22]
-    assert schema_version(db) == 22
+    assert apply_migrations(db)[-8:] == [17, 18, 19, 20, 21, 22, 23, 24]
+    assert schema_version(db) == 24
     columns = {row["name"] for row in db.fetchall("PRAGMA table_info(batches)")}
     assert {"min_views", "history_hidden_at", "posted_after", "posted_within_days", "listing_period_end"} <= columns
 
@@ -417,10 +421,73 @@ def test_batch_media_params_migration_is_additive(tmp_path, db):
     db.execute("INSERT INTO batch_media (batch_id, media_id) VALUES (1, 7)")
     before = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert before
-    assert apply_migrations(db) == [20, 21, 22]
+    assert apply_migrations(db) == [20, 21, 22, 23, 24]
     rows = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert all(row.pop("params") is None for row in rows) and rows == before
     db.execute("UPDATE batch_media SET params = '{\"speed\": 1.0}'")
     with pytest.raises(sqlite3.IntegrityError):
         db.execute("UPDATE batch_media SET params = 'x'")
     assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
+
+
+def test_media_set_auto_export_migration_is_additive_over_a_bank_at_0022(tmp_path, db):
+    """Migration 0023 sobre banco com 0001–0022 (o banco real do dono) e dados: só colunas NULL novas, nenhuma linha
+    muda; o índice único dos jobs de ingestão passa a incluir o papel (vídeo e capa do mesmo item no mesmo lote)."""
+    apply_migrations(db, _migrations_until(tmp_path, 22))
+    assert schema_version(db) == 22
+    _bank_with_rows(db)
+    tables = ("import_groups", "batches", "jobs", "media")
+    before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
+    assert apply_migrations(db) == [23, 24]
+    assert schema_version(db) == 24
+    for table in tables:
+        rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
+        info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
+        if table in ("batches", "import_groups"):
+            for column in {**_COLUMNS_0023, **_COLUMNS_0024}:
+                assert not info[column]["notnull"] and info[column]["dflt_value"] is None
+                assert all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        assert rows == before[table], table
+    assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
+    now = "2026-01-01T00:00:00.000Z"
+    insert = ("INSERT INTO jobs (batch_id, kind, status, source_post_id, source_media_index, media_role, created_at,"
+              " updated_at) VALUES (1, 'ingest', 'pending', 'POST1', 0, ?, ?, ?)")
+    db.execute(insert, ("cover", now, now))   # mesmo item, outro papel: aceito
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(insert, ("cover", now, now))   # mesmo item e mesmo papel: recusado
+    db.execute("UPDATE batches SET media_set = 'videos_covers', auto_export_content = 'both',"
+               " auto_export_state = 'waiting' WHERE id = 1")
+    for sql in ("UPDATE batches SET media_set = 'outro' WHERE id = 1",
+                "UPDATE import_groups SET auto_export_content = 'tudo' WHERE id = 1",
+                "UPDATE batches SET auto_export_state = 'pronto' WHERE id = 1"):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(sql)
+    assert apply_migrations(db) == []
+
+
+def test_import_requests_migration_is_additive_over_a_bank_at_0023(tmp_path, db):
+    """Migration 0024 (pedido com várias partes e UM ZIP): só uma tabela nova; nenhuma linha existente muda."""
+    apply_migrations(db, _migrations_until(tmp_path, 23))
+    _bank_with_rows(db)
+    tables = ("import_groups", "batches", "jobs", "media")
+    before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
+    assert apply_migrations(db) == [24]
+    assert schema_version(db) == 24
+    for table in tables:
+        rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
+        if table in ("batches", "import_groups"):
+            info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
+            assert not info["request_id"]["notnull"] and info["request_id"]["dflt_value"] is None
+            assert all(row.pop("request_id") is None for row in rows), "linhas antigas ficam com NULL"
+        assert rows == before[table], table
+    assert db.scalar("SELECT COUNT(*) FROM import_requests") == 0
+    now = "2026-01-01T00:00:00.000Z"
+    db.execute("INSERT INTO import_requests (auto_export_content, created_at) VALUES ('originals', ?)", (now,))
+    assert db.scalar("SELECT auto_export_state FROM import_requests") == "waiting"
+    db.execute("UPDATE batches SET request_id = 1 WHERE id = 1")
+    for sql in ("INSERT INTO import_requests (auto_export_content, created_at) VALUES ('tudo', '" + now + "')",
+                "UPDATE import_requests SET auto_export_state = 'pronto'"):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(sql)
+    assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
+    assert apply_migrations(db) == []

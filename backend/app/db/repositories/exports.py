@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from app.db.connection import Database, utc_now
@@ -179,8 +179,10 @@ class ExportRepository:
         dest_created: bool = False,
         mode: str = "folder",
         zip_fields: dict[str, str] | None = None,
+        on_created: Callable[[int], None] | None = None,
     ) -> dict[str, Any] | None:
-        """Cria a exportação `pending` com o total já contado. Sem nenhuma mídia: nada é gravado e retorna None."""
+        """Cria a exportação `pending` com o total já contado. Sem nenhuma mídia: nada é gravado e retorna None.
+        `on_created(export_id)` roda dentro da mesma transação (se levantar, nada é gravado)."""
         with self.db.transaction() as conn:
             cursor = conn.execute(
                 "INSERT INTO exports (kind, batch_id, group_id, selection, dest_path, dest_created, mode, zip_path,"
@@ -200,6 +202,8 @@ class ExportRepository:
                 conn.execute("DELETE FROM exports WHERE id = ?", (export_id,))
                 return None
             conn.execute("UPDATE exports SET total = ? WHERE id = ?", (total, export_id))
+            if on_created is not None:
+                on_created(export_id)
         return self.get(export_id)
 
     def get(self, export_id: int) -> dict[str, Any] | None:

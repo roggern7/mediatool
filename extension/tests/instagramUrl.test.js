@@ -38,5 +38,10 @@ test("fromPageInfo converte a resposta do backend", () => {
   assert.deepEqual(fromPageInfo({ kind: "reel", shortcode: "X1234", canonical_url: "https://www.instagram.com/reel/X1234/" }),
     { kind: "reel", shortcode: "X1234", canonicalUrl: "https://www.instagram.com/reel/X1234/" });
   assert.deepEqual(fromPageInfo({ kind: "weird" }), { kind: "other" });
+  // Reel já na Biblioteca: o dono vem de `library.source_profile`.
+  assert.deepEqual(fromPageInfo({ kind: "reel", shortcode: "X1234", library: { in_library: true, items: [],
+    source_profile: "fulano" } }), { kind: "reel", shortcode: "X1234", libraryProfile: "fulano" });
+  assert.deepEqual(fromPageInfo({ kind: "reel", shortcode: "X1234", library: { in_library: false, items: [],
+    source_profile: null } }), { kind: "reel", shortcode: "X1234" });
   assert.deepEqual(fromPageInfo(null), { kind: "other" });
 });

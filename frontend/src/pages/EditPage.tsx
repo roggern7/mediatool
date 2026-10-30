@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Scissors } from "lucide-react";
 import { api, messageOf } from "../api/client";
 import type { Media } from "../api/types";
@@ -19,6 +19,8 @@ import {
   toEditRequest,
   validateEditForm,
 } from "../lib/editSettings";
+import { editIdsFromSearch, ignoredText, incomingVideos, searchWithoutIds } from "../lib/editIncoming";
+import { ROUTES } from "../lib/router";
 import { useToast } from "../lib/toast";
 import type { Trim } from "../lib/trim";
 import { useUploadQueue } from "../lib/useUploadQueue";
@@ -72,6 +74,40 @@ export function EditPage() {
       commitSelection(selectionRef.current.filter((m) => !gone.has(m.id)));
     }
   }
+
+  // Vídeos pedidos pela URL (?ids=, ex.: "Recortar no Media Tool" da extensão): lidos uma vez ao abrir a página.
+  const [incoming] = useState(() => editIdsFromSearch(window.location.search));
+  const receiveIncoming = useEffectEvent((items: Media[], requested: number) => {
+    const videos = incomingVideos(items);
+    add(videos);
+    const ignored = ignoredText(incoming.ignored + requested - videos.length);
+    if (ignored) toast.push("info", ignored);
+  });
+  const failIncoming = useEffectEvent((err: unknown) => toast.push("err", messageOf(err)));
+
+  useEffect(() => {
+    if (incoming.ids.length === 0 && incoming.ignored === 0) return undefined;
+    // Limpa o parâmetro (recarregar a página não adiciona de novo); o resto da URL fica.
+    const { pathname, search, hash } = window.location;
+    if (pathname === ROUTES.edit) {
+      window.history.replaceState(window.history.state, "", pathname + searchWithoutIds(search) + hash);
+    }
+    let cancelled = false;
+    const load =
+      incoming.ids.length > 0
+        ? api.getMediaByIds(incoming.ids).then((page) => page.items)
+        : Promise.resolve<Media[]>([]);
+    load
+      .then((items) => {
+        if (!cancelled) receiveIncoming(items, incoming.ids.length);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) failIncoming(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [incoming]);
 
   const uploads = useUploadQueue((media) => {
     add([media]);

@@ -498,6 +498,11 @@ class Worker:
             )
         for batch_id in result["batch_ids"]:
             self.ctx.batches.refresh_status(batch_id)
+        # Exportações automáticas devidas (migration 0023): lotes/grupos encerrados por qualquer caminho (fim da
+        # listagem, cancelamento, recuperação) e disparos adiados por erro passageiro. Nunca levanta.
+        from app.services import auto_export
+
+        auto_export.run_due(self.ctx)
         try:
             self._idle_maintenance()
         except sqlite3.Error:

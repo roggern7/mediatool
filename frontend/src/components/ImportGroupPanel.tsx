@@ -23,6 +23,7 @@ import { groupExportOffer } from "../lib/exportFolder";
 import { ROUTES, navigate } from "../lib/router";
 import { useQuery } from "../lib/useQuery";
 import { useToast } from "../lib/toast";
+import { AutoExportLine } from "./AutoExportLine";
 import { ImportExportBar } from "./ExportPanel";
 import { ConfirmDialog, ErrorLine, Pill, SkeletonRows, Spinner } from "./ui";
 
@@ -275,6 +276,8 @@ export function ImportGroupPanel({
           </>
         ) : null}
       </div>
+
+      <AutoExportLine auto={group.auto_export} />
 
       <ImportExportBar
         source={{ kind: "group", id: group.id }}
