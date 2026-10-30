@@ -109,6 +109,22 @@ textarea { resize: vertical; font-family: var(--mono); font-size: 12px; }
 input:focus, select:focus, textarea:focus, button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 input[type="range"] { width: 100%; accent-color: var(--accent); }
 .speed-input { width: 70px !important; text-align: center; }
+/* controles de edição (Processar, Importar e Página atual) e escolha "Depois de baixar" */
+.edit-controls { display: flex; flex-direction: column; gap: 6px; }
+.edit-controls.compact { gap: 5px; padding: 8px; border-radius: var(--radius); background: var(--surface-2);
+  border: 1px solid var(--border); }
+.edit-controls.compact .grid2 { gap: 6px; }
+.edit-controls.compact select, .edit-controls.compact input[type="text"] { padding: 4px 6px; }
+.speed-row input[type="range"] { flex: 1; min-width: 60px; }
+.edit-controls.compact .speed-input { width: 56px !important; }
+.edit-controls.compact .chip { padding: 1px 7px; font-size: 11.5px; }
+.flow-chooser { display: flex; flex-direction: column; gap: 6px; }
+.flow-line { align-items: baseline; gap: 8px; }
+.flow-summary { flex: 1; min-width: 0; }
+.flow-toggle { white-space: nowrap; font-size: 12px; }
+.flow-box .flow-chooser { gap: 5px; }
+.flow-box .row.between { align-items: baseline; }
+.link.small { font-size: 12px; }
 .check { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; }
 .check input { margin-top: 2px; accent-color: var(--accent); }
 
