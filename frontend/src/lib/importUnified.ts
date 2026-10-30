@@ -2,6 +2,8 @@
 // liga os estados.
 
 import type {
+  AutoExport,
+  AutoExportContent,
   BatchProgress,
   ClassifyResult,
   EditSettings,
@@ -14,9 +16,68 @@ import type { PostProcessing } from "./importOptions";
 
 export const MEDIA_CHOICES: { value: MediaChoice; label: string; hint: string }[] = [
   { value: "videos", label: "Somente vídeos", hint: "Reels e qualquer vídeo, inclusive vídeos de carrossel." },
-  { value: "all", label: "Todas as mídias", hint: "Fotos, vídeos e carrosséis com todos os itens." },
+  { value: "photos", label: "Somente fotos", hint: "Fotos avulsas e as fotos dos carrosséis; vídeos são ignorados." },
   { value: "covers", label: "Somente capas", hint: "Só a capa de cada vídeo/Reel, sem baixar o vídeo; fotos são ignoradas." },
+  { value: "videos_covers", label: "Vídeos e capas", hint: "Cada vídeo/Reel e a capa dele; fotos são ignoradas." },
+  {
+    value: "all",
+    label: "Todas — fotos, vídeos e capas",
+    hint: "Todos os itens de cada publicação (carrossel inteiro, na ordem) e a capa de cada vídeo.",
+  },
 ];
+
+/** Rótulo curto do tipo de mídia de um lote/grupo ("Somente fotos", "Vídeos e capas"...). */
+export function mediaLabel(media: MediaChoice): string {
+  return media === "all" ? "Todas as mídias" : (MEDIA_CHOICES.find((c) => c.value === media)?.label ?? media);
+}
+
+/** Tipos com fotos ou capas: o pós-processamento (preset/edição) vale só para os vídeos originais. */
+export function postProcessingApplies(media: MediaChoice): boolean {
+  return media !== "covers" && media !== "photos";
+}
+
+/** Exportação ZIP automática ao concluir: desligada ou o conteúdo escolhido. */
+export type AutoExportChoice = "off" | AutoExportContent;
+export const AUTO_EXPORT_CHOICES: { value: AutoExportChoice; label: string }[] = [
+  { value: "off", label: "Não exportar automaticamente" },
+  { value: "originals", label: "Originais" },
+  { value: "edited", label: "Editados" },
+  { value: "both", label: "Originais e editados" },
+];
+
+/** "Editados" e "Originais e editados" só existem com pós-processamento (o backend recusa sem ele: 422). */
+export function autoExportNeedsProcessing(choice: AutoExportChoice): boolean {
+  return choice === "edited" || choice === "both";
+}
+
+export const AUTO_EXPORT_NEEDS_PROCESSING_TEXT =
+  "“Editados” e “Originais e editados” exigem processar ou editar depois de baixar. Escolha um pós-processamento " +
+  "ou exporte só os originais.";
+
+/** Linha do painel do lote/grupo sobre a exportação automática; null sem ela. */
+export function autoExportText(auto: AutoExport | null | undefined): string | null {
+  if (!auto) return null;
+  const what = AUTO_EXPORT_CHOICES.find((c) => c.value === auto.content)?.label.toLowerCase() ?? auto.content;
+  switch (auto.status) {
+    case "waiting":
+      return auto.request_id
+        ? `Exportação automática (${what}): um ZIP único quando os perfis e as publicações deste pedido terminarem.`
+        : `Exportação automática (${what}): aguardando a importação terminar.`;
+    case "pending":
+    case "running":
+      return `Exportação automática (${what}): preparando o ZIP…`;
+    case "completed":
+      return auto.zip_ready
+        ? `Exportação automática (${what}): ZIP pronto.`
+        : `Exportação automática (${what}): concluída.`;
+    case "expired":
+      return `Exportação automática (${what}): o ZIP já foi removido.`;
+    case "cancelled":
+      return `Exportação automática (${what}): cancelada.`;
+    default:
+      return `Exportação automática (${what}) falhou${auto.error_message ? `: ${auto.error_message}` : "."}`;
+  }
+}
 
 /** Quantidade por perfil: atalhos, personalizada e "Todas" (pede confirmação). */
 export const QUANTITY_PRESETS = [10, 50, 100, 500] as const;
@@ -44,9 +105,9 @@ export function needsConfirmAll(classified: ClassifyResult | null, quantity: Qua
   return !!classified && classified.profiles.length > 0 && quantity.ok && quantity.limit === null;
 }
 
-/** Visualizações só valem para vídeos (e capas, que usam as visualizações do vídeo). */
+/** Visualizações só valem para vídeos (e capas, que usam as visualizações do vídeo); nunca com fotos. */
 export function viewsAllowed(media: MediaChoice): boolean {
-  return media !== "all";
+  return media === "videos" || media === "covers" || media === "videos_covers";
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -83,6 +144,8 @@ export interface UnifiedForm {
   post: PostProcessing;
   presetId: number | null;
   edit: EditSettings | null;
+  /** Exportação ZIP automática ao concluir ("off" ou ausente = não exportar). */
+  autoExport?: AutoExportChoice;
 }
 
 /** Corpo de POST /api/imports/start. Filtros só entram quando ligados (e visualizações só com vídeos/capas). */
@@ -102,6 +165,7 @@ export function unifiedBody(form: UnifiedForm): UnifiedImportRequest | null {
   }
   if (form.post === "preset" && form.presetId !== null) body.preset_id = form.presetId;
   if (form.post === "edit" && form.edit) body.edit = form.edit;
+  if (form.autoExport && form.autoExport !== "off") body.auto_export = { content: form.autoExport };
   return body;
 }
 

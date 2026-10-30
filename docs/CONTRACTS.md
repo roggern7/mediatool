@@ -1367,6 +1367,16 @@ arquivo, como na Biblioteca. Chave fora do formato -> 422 `validation_error`; pa
 O frontend usa `original_url` (`GET /api/media/{id}/original`, com suporte a `Range` -> 206) para a miniatura
 (`<video preload="metadata">` em `#t=0.5`, carregado quando a linha aparece) e para o player da prévia.
 
+#### Abrir a página Editar com vídeos (`/editar?ids=`)
+
+`/editar?ids=1,2,3` (ex.: "Recortar no Media Tool" da extensão) abre a página Editar com essas mídias na seleção. O
+frontend lê o parâmetro uma vez ao abrir: só inteiros positivos, sem repetir, até 500 (o resto é ignorado); lê as
+mídias por `GET /api/media?ids=1,2,3` -> `MediaList` (os mesmos itens de `GET /api/media/{id}`, na ordem pedida, sem as
+inexistentes; `total` = itens devolvidos, `next_before_id` null; com `ids` os filtros e a paginação não se aplicam;
+fora do formato, 0, ou mais de 500 ids -> 422 `validation_error`); adiciona à seleção só os VÍDEOS (capas e fotos
+ficam de fora), avisa quantos itens foram ignorados (não são vídeo, não existem mais ou id inválido) e tira o `ids`
+da URL (`history.replaceState`; recarregar não adiciona de novo). Não há outro editor: é a mesma página.
+
 #### Apagar vídeos (página Editar)
 
 `POST /api/media/delete` com `{media_ids: number[] (1..500)}` OU `{folder: <key de EditFolder>}`, e
@@ -1463,19 +1473,30 @@ bloqueio) e `app_state.extension_devices` (id, nome, `sha256(token)`, `created_a
   (expirado, já usado ou nenhum gerado), 429 `pairing_locked` (5 erros seguidos: bloqueio de 5 min e o código vigente
   deixa de valer; gerar um código novo libera).
 - `GET /api/ext/status` -> `{ok: true, app: {version}, instagram: {session_configured, paused, pause_reason,
-  paused_until, message}, defaults: {media, limit, posted_within_days, post_processing}}`. `message`: texto do app para
-  pausa vigente ou sessão ausente; null se nada impede.
+  paused_until, message}, defaults: {media, limit, posted_within_days, post_processing, auto_export, activity_limit,
+  library_limit}, features: [...]}`. `message`: texto do app para pausa vigente ou sessão ausente; null se nada
+  impede. `features`: capacidades desta versão (seção 8.7).
 - `POST /api/ext/page-info` `{url (1..2048)}` -> `{kind: "post"|"reel"|"profile"|"other", shortcode?, username?,
   canonical_url?}`, sem rede. `/p/` -> post; `/reel/`, `/reels/`, `/tv/` -> reel (`/tv/` tem `canonical_url` em
   `/p/<código>/`); `/<usuario>/p/<código>/` traz `username`; perfil: `/<usuario>/`, `/<usuario>/reels/`,
-  `/<usuario>/tagged/`; o resto é `other`.
+  `/<usuario>/tagged/`; o resto é `other`. Publicação: + `library: {in_library, items: [{media_id, media_type, role,
+  index, has_edited}], source_profile}` (mídias do shortcode já na biblioteca; `source_profile` = dono conhecido em
+  minúsculas ou null); perfil: + `library: {media_count, videos, photos,
+  covers}` (só o banco local).
 - `POST /api/ext/post-owner` `{url}` -> `{username, shortcode}`. Com o @ na URL, sem consulta; senão `resolve_post`
   pelo downloader do app (portão, prazo e trava da prévia de perfil). Erros: 422 `invalid_input` (não é publicação),
   404 `owner_not_found`, 409 `instagram_paused`/`profile_preview_in_progress`, 504 `timeout` e os códigos do
   Instagram com os mesmos status de `POST /api/instagram/profile`.
-- `POST /api/ext/start` -> 202: mesmo corpo (`UnifiedImportRequest`) e mesma resposta de `POST /api/imports/start`
-  (chama `import_service.start_unified`), mais `open_url` (`http://127.0.0.1:<porta>/fila?lote=<id>` para um lote;
-  `/` para grupo ou vários lotes). Mesmos erros.
+- `POST /api/ext/start` -> 202: mesmo corpo (`UnifiedImportRequest`, com `media` e `auto_export` da seção 8.6) mais
+  `client_request_id` opcional (1..64, `[A-Za-z0-9_.:-]`) e mesma resposta de `POST /api/imports/start` (chama
+  `import_service.start_unified`), mais `open_url` (`http://127.0.0.1:<porta>/fila?lote=<id>` para um lote; `/` para
+  grupo ou vários lotes). Idempotência: a mesma `client_request_id` do mesmo dispositivo em até 10 min devolve a mesma
+  resposta (+ `replayed: true`) sem criar nada, inclusive depois de um reinício do app; erro não é guardado. Mesmos
+  erros. Persistência: `app_state` (sem migração), uma chave `extension_start_requests:<id do dispositivo>` com
+  `{<client_request_id>: {expires_at (epoch, +10 min), response}}`; só o id do pedido, a validade e a resposta pública
+  (ids, contagens, `open_url`), nada de token ou cookie. Leitura e gravação sob a mesma trava do start; cada acesso
+  remove as entradas vencidas do dispositivo (até 200 por dispositivo, as mais antigas saem) e cada gravação apaga as
+  chaves de outros dispositivos sem gravação há mais de 10 min.
 - `GET /api/ext/progress?batch_ids=1,2&group_id=3` (até 50 lotes; pelo menos um dos dois; 422 `validation_error`) ->
   `{batches: [{id, status, profile, found, downloaded, duplicates, filtered, skipped, failed, active, finished,
   error_message, open_url}], group: {id, status, profiles, found, downloaded, duplicates, filtered, skipped, failed,
@@ -1500,10 +1521,13 @@ Builder A. Migration **0021** (aditiva). Serviço: `app.services.import_service.
   url, kind: "p"|"reel"}], invalid: [{entry, reason}], duplicates}`. Publicação: `/p/`, `/reel/`, `/reels/` e `/tv/`
   (só aqui; vira `/p/<código>/`). Perfil: URL do perfil, `@usuario` ou `usuario`. Tetos: 10.000 perfis
   (`too_many_profiles`) e 500 publicações (`too_many_links`).
-- `POST /api/imports/start` (202): `inputs`|`text`, `media` ("videos" padrão | "all" | "covers"), `limit` (POR PERFIL,
-  1..1.000.000; `null` = todas e exige `confirm_all: true` quando há perfil, senão 422 `confirm_all_required`),
-  `posted_within_days`, `min_views`, `max_views` (>= mínimo; só perfis; com `media` "all" E perfis na entrada = 422
-  `views_filter_media`; só links: aceito, filtros ignorados com aviso em `notes`),
+- `POST /api/imports/start` (202): `inputs`|`text`, `media` ("videos" padrão | "photos" | "covers" | "videos_covers" |
+  "all"), `limit` (POR PERFIL, 1..1.000.000; conta ITENS: o vídeo e a capa dele contam um; `null` = todas e exige
+  `confirm_all: true` quando há perfil, senão 422 `confirm_all_required`), `posted_within_days`, `min_views`,
+  `max_views` (>= mínimo; só perfis; com `media` "photos" ou "all" E perfis na entrada = 422 `views_filter_media`; só
+  links: aceito, filtros ignorados com aviso em `notes`), `auto_export` (`null` | `{content: "originals"|"edited"|
+  "both"}`: exportação ZIP automática ao concluir, seção 8.7; "edited"/"both" com `post_processing: "none"` = 422
+  `auto_export_needs_processing`),
   `post_processing` ("none"|"preset"|"edit"), `preset_id` (só com "preset"), `edit` (obrigatório com "edit").
   1 perfil -> lote avulso (`create_import`); 2+ perfis -> grupo (`create_import_group`); publicações -> um lote de links
   (`create_import_links`). Tudo é conferido antes de criar o primeiro lote (sessão 409 `session_missing`, pausa,
@@ -1512,10 +1536,18 @@ Builder A. Migration **0021** (aditiva). Serviço: `app.services.import_service.
   skipped, notes}` (`skipped`: perfis do grupo já em andamento; `notes`: avisos sem erro, ex.: filtros de perfil
   ignorados nas publicações por link; campos extras opcionais). Período e visualizações valem só para perfis
   (ignorados nos links). "Somente capas" só baixa (o pós-processamento não se aplica às capas).
-- Tipo de mídia: "videos" -> `content_type = 'videos'` (Reels e qualquer vídeo, inclusive de carrossel); "all" ->
-  `'all'`; "covers" -> `'videos'` + `batches.media_role = 'cover'`. Nos lotes de links novos o tipo vale sobre as mídias
-  resolvidas (itens de outro tipo contam em `filtered`); lotes de links antigos (`all`) continuam baixando tudo.
-  "Somente capas" e o gallery-dl: 422 `not_supported_by_provider` (só o método web entrega a capa sozinha).
+- Tipo de mídia (migration **0023**: `batches.media_set`/`import_groups.media_set`; NULL nos lotes antigos = regra
+  antiga por `content_type`/`media_role`): "videos" -> `content_type = 'videos'`, job original; "photos" -> `'images'`
+  (fotos avulsas e de carrossel), job original; "covers" -> `'videos'` + `media_role = 'cover'`, só o job da capa;
+  "videos_covers" -> `'videos'`, job original + job da capa de cada vídeo; "all" -> `'all'`, TODOS os itens originais
+  (carrossel inteiro, na ordem) + o job da capa de cada vídeo. Um vídeo pode gerar dois jobs no mesmo lote (índice
+  `ux_jobs_batch_source` com `media_role`, 0023); dedup por (origem, índice, papel). Nos lotes de links o tipo vale
+  sobre as mídias resolvidas (itens de outro tipo contam em `filtered`); lotes de links antigos (`all`) continuam
+  baixando tudo. Tipos com capa ("covers", "videos_covers", "all") e o gallery-dl: 422 `not_supported_by_provider`
+  (só o método web entrega a capa sozinha). Pós-processamento (preset/edição) só no vídeo original: fotos e capas são
+  só baixadas.
+- Causa do antigo "Baixar tudo da publicação" sem capa: `media: "all"` virava `(content_type "all", role
+  "original")` e o lote só tinha UM papel, então o Reel vinha só com o vídeo. Corrigido pelo `media_set` acima.
 - Capas (`media.role = 'cover'`): o job (`jobs.media_role = 'cover'`) baixa só `thumbnail_url` (a maior capa do vídeo)
   como `media_type = 'image'`; o vídeo nunca é baixado. Dedup por origem inclui o papel (`ux_media_source` com `role`):
   a capa nunca é duplicata do vídeo (e vice-versa); sha256 continua único. URL da capa expirada: a renovação de sempre
@@ -1530,7 +1562,8 @@ Builder A. Migration **0021** (aditiva). Serviço: `app.services.import_service.
   com 0 publicações e sem próxima página encerra o lote com `listing_end: "empty_first_page"` (não `profile_end`) e
   `error_message` "O Instagram não devolveu nenhuma publicação deste perfil agora (perfil sem posts, privado ou limite
   temporário). Tente de novo mais tarde." (`error_code` null). Não conta em `profile_end_count` do grupo.
-- Lote/grupo: `media` ("videos"|"all"|"covers"; null em lotes antigos de outro conteúdo), `progress.duplicates`
+- Lote/grupo: `media` (o `media_set`; nos lotes anteriores à 0023 "videos"|"all"|"covers"; null em lotes antigos de
+  outro conteúdo), `auto_export` (seção 8.7; null sem ela; filho de grupo: null), `progress.duplicates`
   (jobs `is_duplicate`; congelado em `final_duplicates`) e `progress.filtered` (abaixo/acima/sem contagem/fora do
   período + `listing_dropped_reasons.expected.content_filter`). `views_filter` ganha `max_views` e `above`.
 - Biblioteca: `GET /api/media?role=cover|original` (omitido = todas), o mesmo `role` no filtro da exportação
@@ -1538,6 +1571,88 @@ Builder A. Migration **0021** (aditiva). Serviço: `app.services.import_service.
   processada" (capas entram nela). A página Editar continua só com vídeos (`media_type = 'video'`).
 - Exportação: o MESMO fluxo (lote, grupo, biblioteca por seleção ou filtro; pasta ou ZIP). Capa = original; o nome
   ganha `_capa` antes da extensão (`perfil_AAAA-MM-DD_codigo[_n]_capa.jpg`), na pasta e no ZIP (plano, único).
+
+### 8.7 Extensão como central de operações
+
+Migration **0023** (aditiva). Rotas finas em `app/api/extension.py` sobre os serviços existentes (`import_service`,
+`edit_service`, `export_service`, repositórios); helpers em `app/services/extension_ops.py`. Todas exigem o token e a
+origem da extensão (como o resto de `/api/ext/*`); nenhuma rota administrativa (sessão, cookies, configurações,
+exclusões). Erros `{detail, code}`. Respostas sem caminhos de arquivo, URLs de mídia, cookies ou tokens (exceção: o
+`download_url` de um ZIP pronto, que é o link de download do app com o token próprio dele).
+
+- Exportação automática (`app/services/auto_export.py`): `batches`/`import_groups` ganham `auto_export_content`,
+  `auto_export_state` ('waiting' | 'created' | 'failed'), `auto_export_id` e `auto_export_error`. Lote avulso
+  `completed` (ou grupo sem filho aberto e com algum filho `completed`) e nenhuma mídia dele com job aberto de
+  processamento -> UMA exportação ZIP pelo `export_service.create_export` (fonte = o lote ou o grupo; filhos de grupo
+  não exportam sozinhos). Disparo no fim de cada job que conclui o lote e na manutenção do worker (30 s). Transição
+  'waiting' -> 'created'/'failed' uma vez só (idempotente). `export_already_running`/`export_queue_full`: continua
+  esperando; outros erros (ex.: `export_empty`, `export_no_space`): 'failed' com o motivo. Lote/grupo cancelado ou falho
+  sem nada concluído: 'failed'. API: `BatchOut.auto_export`/`ImportGroupOut.auto_export` = `{content, status
+  ("waiting"|"failed"|estado da exportação), export_id, error_message, zip_ready, download_url, request_id}`.
+  Pedido com perfis E links no mesmo start (migration 0024, `import_requests`): UM ZIP por pedido. A exportação
+  automática fica no pedido (as partes — lote avulso ou grupo de perfis e lote de links — ficam sem
+  `auto_export_content` e apontam para ele por `batches.request_id`/`import_groups.request_id`; filhos de grupo não); dispara uma vez quando TODAS as partes encerraram, ao menos um lote concluiu e nenhuma mídia
+  delas tem processamento pendente, com fonte `library` + `media_ids` (união das mídias das partes, mesma regra da
+  exportação de um lote). Todas as partes cancelaram/falharam: 'failed'. As partes apresentam o `auto_export` do pedido
+  (mesmo `export_id`, `request_id` = id do pedido); pedido de uma parte só: `request_id` null. A exportação e o
+  registro do id dela no lote/grupo/pedido são gravados na MESMA transação (`create_export(..., on_created)`): uma
+  queda entre os dois não deixa nascer um segundo ZIP.
+- `POST /api/ext/post-preview {url}` -> `{shortcode, username, kind: "reel"|"photo"|"carousel"|"video", items: [{index,
+  media_type, has_cover, width, height}], counts: {videos, photos, covers}}`. UMA leitura pelo `resolve_post` do app
+  (portão, teto, pausa, trava da prévia); cache em memória de 10 min por shortcode (também usado por `post-owner`;
+  é só cache: perder num reinício custa no máximo uma leitura nova, por isso não é persistido).
+  Erros do Instagram classificados como em `post-owner`, sem nova tentativa; 422 `invalid_input` fora de publicação;
+  404 `content_unavailable` sem mídias.
+- `GET /api/ext/activity?limit=1..50 (20)` -> `{items: [{kind: "batch"|"group", id, title, created_at, status, state,
+  message, media_set, filters: {limit, posted_within_days, min_views, max_views}, progress, auto_export, open_url}]}`:
+  grupos e
+  lotes avulsos (inclusive Edição/processamento da Biblioteca), mais recentes primeiro. `state`: "waiting" (na fila,
+  pausado, aguardando ação) | "analyzing" (listando) | "downloading" (há downloads pendentes) | "processing" (só
+  processamento) | "done" | "partial" (concluído com falhas) | "failed" | "cancelled". `progress`: `files` (jobs/arquivos),
+  `found` (`files` + filtrados), `analyzed` (publicações vistas; links resolvidos + falhos), `downloaded`,
+  `duplicates`, `filtered_period` (fora do período), `filtered_views` (abaixo + acima), `no_count` (sem contagem),
+  `failed`, `processed`, `processing` (jobs `downloaded`/`processing`), `pending` (`pending`/`downloading`).
+  `auto_export`: `{content, status, export_id, error_message, request_id, download_url (absoluto)}` | null.
+  `message`: aviso do item ou null — 1a página vazia (o Instagram não devolveu publicações), "precisa de atenção" com o
+  motivo, falha (`error_message` do lote), pausa do lote por falhas seguidas, espera do teto de páginas, coleta em
+  pausa e, em item ativo sem outro aviso, a pausa geral do acesso ao Instagram (mesmos textos do app). Grupo: os avisos
+  dos perfis (`@perfil: texto`, até 3, separados por "; ").
+- `GET /api/ext/batches/{id}/items?before_id&limit=1..200 (50)` -> `{items: [{id, media_id, media_type, role, index,
+  source_post_id, status, stage_label, error_message?}], total, next_before_id}` (id DESC). `stage_label`:
+  "aguardando" | "analisando" | "baixando vídeo" | "baixando foto" | "baixando capa" | "processando" | "concluído" |
+  "duplicado" | "falhou" | "cancelado". 404 `batch_not_found`.
+- `GET /api/ext/groups/{id}/children?after_position&limit=1..100 (20)` -> `{group_id, items: [item de lote da
+  Atividade (kind "batch", title "@perfil", state, message, progress, filters, open_url...) + position], total,
+  next_after_position}`: os perfis (lotes filhos) do grupo em ordem de `group_position`, keyset `after_position`
+  (`BatchRepository.group_children`, o mesmo de `GET /api/import-groups/{id}`); só filhos deste grupo. Cada
+  filho expande por `GET /api/ext/batches/{id}/items`. 404 `group_not_found`.
+- `POST /api/ext/batches/{id}/cancel`, `POST /api/ext/groups/{id}/cancel` -> `{ok: true}` (mesmo cancelamento de
+  `/api/batches/{id}/cancel` e `/api/import-groups/{id}/cancel`; mesmos erros 404/409).
+- `GET /api/ext/library?before_id&limit=1..50&media_type&role&view&batch_id|group_id&profile&q` -> `{items: [{id,
+  media_type, role, source_profile, source_post_id, index, taken_at, created_at, width, height, duration, has_edited,
+  renditions, processing: "none"|"pending"|"processing"|"failed", has_thumbnail}], total, next_before_id}` (keyset id
+  DESC; lote/grupo pela relação durável `batch_media`). `batch_id` e `group_id` juntos: 422.
+- `GET /api/ext/library/ids?batch_id|group_id&media_type&role` -> `{ids, items: [{id, media_type, role}], truncated}`
+  (até 5.000, id DESC; `items` na mesma ordem de `ids`, para o resumo da seleção). Sem lote nem
+  grupo: 422.
+- `GET /api/ext/media/{id}/thumbnail` -> imagem (`image/jpeg` da miniatura; gera e grava como a pipeline se faltar e
+  houver FFmpeg; imagem sem FFmpeg: a própria imagem). Vídeo sem miniatura possível: 404 `thumbnail_unavailable` (nunca
+  o vídeo).
+- `GET /api/ext/edit/options` -> `{edit: {duration_modes: [{value, label}] ("original", "15", "30", "60", "custom"),
+  custom_seconds_max: 7200, duration_margin: 0.03, speed: {min: 1.0, max: 1.5, step: 0.01, presets: [1, 1.05, 1.1,
+  1.15, 1.2, 1.25, 1.3, 1.5]}, sharpen: {label, description}, output: "mp4", max_items: 500}, presets: [{id, name,
+  summary}], defaults: {duration_mode, custom_seconds, speed, sharpen, output_type, preset_id}}`.
+- `POST /api/ext/edits {media_ids (1..500), settings}` (sem recorte; `settings.output_type` só "mp4") -> 202 `{batch_id,
+  created, skipped: [{media_id, reason: "not_video"|"cover"|"not_found"}], open_url}` (chama `edit_service.start` só com
+  os vídeos originais). Nenhum vídeo: 422 `edit_requires_video` (com `skipped`).
+- `POST /api/ext/process {media_ids (1..500), preset_id}` -> 202 `{batch_id, created, skipped, open_url}`
+  (`import_service.process_media_bulk`, o mesmo de `POST /api/media/process`, só com vídeos originais). Nenhum vídeo:
+  422 `process_requires_video`.
+- `POST /api/ext/exports {source: {kind: "batch"|"group", id} | {kind: "library", media_ids (1..5000)}, content}` -> 202
+  `{id, status}`: sempre UM ZIP por pedido (`export_service.create_export` com `{zip: true}`; capas com `_capa`). Mesmos
+  erros (`export_already_running`, `export_queue_full`, `export_empty`, `export_no_space`).
+- `GET /api/ext/exports/{id}` -> `{id, status, content, processed, total, zip_ready, zip_bytes, download_url (absoluto,
+  só com o ZIP pronto), error_message}`.
 
 ## 9. Processor (`media_processor`)
 

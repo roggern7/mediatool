@@ -151,15 +151,18 @@ def _filters_log(min_views: int | None, posted_within_days: int | None, max_view
 def create_import(
     ctx: AppContext, *, profile: str, content_type: str, limit: int | None, preset_id: int | None, process: bool,
     edit: EditSettings | None = None, min_views: int | None = None, posted_within_days: int | None = None,
-    max_views: int | None = None, media_role: str = "original",
+    max_views: int | None = None, media_role: str = "original", media_set: str | None = None,
+    auto_export_content: str | None = None,
 ) -> int:
     # `limit=None` = "Todos": a listagem vai até o fim real do perfil (docs/BATCH_ROBUSTNESS.md, seção 0.1).
     # `min_views`: filtro de visualizações mínimas (só vídeos; None = desligado). `posted_within_days`: período de
     # postagem (últimos N dias; None = qualquer data); o corte é calculado AGORA e gravado no lote.
     # `max_views` (migration 0021): máximo de visualizações; `media_role="cover"`: "Somente capas".
+    # `media_set` (migration 0023): tipo de mídia da importação unificada; `auto_export_content`: exportação ZIP
+    # automática ao concluir.
     check_edit(edit, process=process, preset_id=preset_id)
     ensure_provider_supports(ctx, content_type, limit, min_views, posted_within_days, max_views,
-                             covers=media_role == "cover")
+                             covers=media_role == "cover" or media_set in COVER_SETS)
     try:
         username = parse_profile_input(profile)
     except ValueError as exc:
@@ -179,6 +182,8 @@ def create_import(
             content_type=content_type,
             requested_limit=limit,
             media_role=media_role,
+            media_set=media_set,
+            auto_export_content=auto_export_content,
             **fields,
             **filter_fields(min_views, posted_within_days, max_views),
         )
@@ -256,6 +261,7 @@ def create_import_group(
     ctx: AppContext, *, profiles: list[str], content_type: str, limit: int | None, preset_id: int | None,
     process: bool, edit: EditSettings | None = None, min_views: int | None = None,
     posted_within_days: int | None = None, max_views: int | None = None, media_role: str = "original",
+    media_set: str | None = None, auto_export_content: str | None = None,
 ) -> tuple[int, list[dict[str, str]], int]:
     """Uma importação pai e um lote filho por perfil (na ordem da lista; `limit`, `min_views` e o período valem POR
     PERFIL). Retorna (id do grupo, perfis pulados por já terem importação ativa, repetições removidas). Com `edit`, o
@@ -263,7 +269,7 @@ def create_import_group(
     para todos os filhos."""
     check_edit(edit, process=process, preset_id=preset_id)
     ensure_provider_supports(ctx, content_type, limit, min_views, posted_within_days, max_views,
-                             covers=media_role == "cover")
+                             covers=media_role == "cover" or media_set in COVER_SETS)
     valid, invalid, duplicates = parse_profile_entries(profiles)
     if invalid:
         raise AppError(422, "invalid_profiles",
@@ -278,6 +284,7 @@ def create_import_group(
         "content_type": content_type,
         "requested_limit": limit,
         "media_role": media_role,
+        "media_set": media_set,
         **post_processing(ctx, preset_id=preset_id, process=process, edit=edit),
     }
     # Um único corte para o grupo e todos os filhos (calculado uma vez, aqui).
@@ -290,7 +297,8 @@ def create_import_group(
         if not pending:
             raise AppError(409, "profile_already_importing",
                            "Todos os perfis da lista já têm uma importação em andamento.", extra={"skipped": skipped})
-        group_id = ctx.batches.create_group(**fields)
+        # A exportação automática de um grupo é UMA, do grupo inteiro (os filhos não exportam sozinhos).
+        group_id = ctx.batches.create_group(**fields, auto_export_content=auto_export_content)
         for position, username in enumerate(pending, start=1):
             ctx.batches.create(source="instagram_import", status="listing", source_profile=username,
                                group_id=group_id, group_position=position, **fields)
@@ -344,14 +352,16 @@ def parse_link_entries(entries: list[str]) -> tuple[list[dict[str, str]], list[d
 
 def create_import_links(
     ctx: AppContext, *, links: list[str], preset_id: int | None, process: bool, edit: EditSettings | None = None,
-    content_type: str = "all", media_role: str = "original",
+    content_type: str = "all", media_role: str = "original", media_set: str | None = None,
+    auto_export_content: str | None = None,
 ) -> tuple[int, int]:
     """Um lote de importação por link (`import_mode = 'links'`) com todos os links da lista, na ordem colada.
     Retorna (id do lote, repetições removidas). Nenhuma requisição ao Instagram aqui: o import runner resolve um
     link por vez. `content_type="videos"` (importação unificada): só os vídeos das publicações resolvidas viram job
     (os demais itens contam como filtrados); `media_role="cover"`: a capa de cada vídeo (só método web)."""
     check_edit(edit, process=process, preset_id=preset_id)
-    if media_role == "cover" and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl":
+    if ((media_role == "cover" or media_set in COVER_SETS)
+            and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl"):
         raise AppError(422, "not_supported_by_provider", COVERS_WEB_ONLY_MESSAGE)
     valid, invalid, duplicates = parse_link_entries(links)
     if invalid:
@@ -372,6 +382,8 @@ def create_import_links(
             content_type=content_type,
             import_mode="links",
             media_role=media_role,
+            media_set=media_set,
+            auto_export_content=auto_export_content,
             **fields,
         )
         ctx.batches.add_links(batch_id, [(link["shortcode"], link["url"]) for link in valid])
@@ -390,19 +402,33 @@ def create_import_links(
 _UNIFIED_SPLIT_RE = re.compile(r"[\r\n,;]+")
 _UNIFIED_SPACE_RE = re.compile(r"\s+")
 SPACED_ENTRY_REASON = "entrada com espaço: use uma por linha"
-# Tipo de mídia -> (content_type do lote, papel do job). "covers" lista os vídeos e baixa a capa de cada um.
+# Tipo de mídia -> (content_type do lote, papel do lote). O conjunto pedido fica em `media_set` (migration 0023) e
+# decide os jobs de cada item (import_runner): "videos" = vídeos (original); "photos" = fotos, inclusive de carrossel
+# (original); "covers" = só a capa de cada vídeo; "videos_covers" = vídeo + capa de cada vídeo; "all" = todos os itens
+# originais (carrossel inteiro, na ordem) + a capa de cada vídeo. Um vídeo pode gerar dois jobs (original e capa).
 MEDIA_CHOICES: dict[str, tuple[str, str]] = {
     "videos": ("videos", "original"),
-    "all": ("all", "original"),
+    "photos": ("images", "original"),
     "covers": ("videos", "cover"),
+    "videos_covers": ("videos", "original"),
+    "all": ("all", "original"),
 }
+# Conjuntos com capa: só o método web entrega a capa do vídeo sozinha (como "Somente capas" na 0021).
+COVER_SETS = frozenset({"covers", "videos_covers", "all"})
+# Filtro de visualizações (só vídeos): permitido com estes tipos quando há perfis.
+VIEWS_MEDIA = frozenset({"videos", "covers", "videos_covers"})
 CONFIRM_ALL_MESSAGE = (
     "\"Todas\" pede ao Instagram todas as publicações de cada perfil: pode demorar e fazer muitas requisições. "
     "Confirme para continuar."
 )
 VIEWS_FILTER_MEDIA_MESSAGE = (
-    "O filtro de visualizações só vale para vídeos: escolha \"Somente vídeos\" ou \"Somente capas\", ou desligue o "
-    "filtro."
+    "O filtro de visualizações só vale para vídeos: escolha \"Somente vídeos\", \"Somente capas\" ou \"Vídeos e "
+    "capas\", ou desligue o filtro."
+)
+
+AUTO_EXPORT_NEEDS_PROCESSING_MESSAGE = (
+    "Exportar \"editados\" ou \"originais e editados\" exige processar ou editar depois de baixar. Escolha um "
+    "pós-processamento ou exporte só os originais."
 )
 
 LINK_FILTERS_IGNORED_NOTE = (
@@ -505,15 +531,23 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
         raise AppError(422, "no_valid_inputs", "Nenhuma entrada é um link de publicação ou um perfil válido.",
                        extra={"invalid": classified["invalid"], "duplicates": classified["duplicates"]})
     content_type, media_role = MEDIA_CHOICES[req.media]
+    media_set = req.media
     views = req.min_views is not None or req.max_views is not None
-    # Visualizações com "Todas as mídias" só são recusadas quando há perfis: para links os filtros de perfil são
-    # ignorados (avisado em `notes`).
-    if views and req.media == "all" and profiles:
+    # Visualizações com fotos ("Somente fotos", "Todas") só são recusadas quando há perfis: para links os filtros de
+    # perfil são ignorados (avisado em `notes`).
+    if views and req.media not in VIEWS_MEDIA and profiles:
         raise AppError(422, "views_filter_media", VIEWS_FILTER_MEDIA_MESSAGE)
     if profiles and req.limit is None and not req.confirm_all:
         raise AppError(422, "confirm_all_required", CONFIRM_ALL_MESSAGE)
-    # Pós-processamento: só vídeos são processados/editados; "Somente capas" só baixa.
-    covers = media_role == "cover"
+    # Pós-processamento: só vídeos originais são processados/editados; "Somente capas" e "Somente fotos" só baixam
+    # (nos conjuntos mistos, fotos e capas são só baixadas: import_runner._add_item).
+    covers = media_role == "cover" or media_set == "photos"
+    with_covers = media_set in COVER_SETS
+    auto_export = req.auto_export.content if getattr(req, "auto_export", None) is not None else None
+    # Exportar "editados"/"ambos" sem pós-processamento: não haveria versão editada para exportar.
+    # "Somente capas"/"Somente fotos" nunca são processadas: também não haveria versão editada.
+    if auto_export in ("edited", "both") and (req.post_processing == "none" or covers):
+        raise AppError(422, "auto_export_needs_processing", AUTO_EXPORT_NEEDS_PROCESSING_MESSAGE)
     process = req.post_processing == "preset" and not covers
     preset_id = req.preset_id if process else None
     edit = req.edit if req.post_processing == "edit" and not covers else None
@@ -523,15 +557,18 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
     check_edit(edit, process=process, preset_id=preset_id)
     if profiles:
         ensure_provider_supports(ctx, content_type, req.limit, req.min_views, req.posted_within_days, req.max_views,
-                                 covers=covers)
-    if links and covers and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl":
+                                 covers=with_covers)
+    if links and with_covers and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl":
         raise AppError(422, "not_supported_by_provider", COVERS_WEB_ONLY_MESSAGE)
     if not ctx.session_provider.status().configured:
         raise AppError(409, "session_missing", SESSION_MISSING_MESSAGE)
     ensure_not_paused(ctx)
     if process or preset_id is not None:
         resolve_preset(ctx, preset_id)
-    common = {"preset_id": preset_id, "process": process, "edit": edit}
+    # Perfis E links: UM ZIP por pedido (migration 0024). A exportação automática fica no pedido, não nas partes.
+    multipart = bool(profiles) and bool(links) and auto_export is not None
+    common = {"preset_id": preset_id, "process": process, "edit": edit, "media_set": media_set,
+              "auto_export_content": None if multipart else auto_export}
     batch_ids: list[int] = []
     group_id: int | None = None
     links_batch_id: int | None = None
@@ -549,6 +586,8 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
             links_batch_id, _ = create_import_links(ctx, links=[link["url"] for link in links],
                                                     content_type=content_type, media_role=media_role, **common)
             batch_ids.append(links_batch_id)
+        if multipart:
+            ctx.batches.create_request(auto_export_content=auto_export, batch_ids=batch_ids, group_id=group_id)
     # As criações acordam o runner ainda dentro da transação (ele pode não ter visto os lotes): acorda de novo.
     ctx.wake_import_runner()
     notes: list[str] = []

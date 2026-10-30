@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Media Tool",
   "short_name": "Media Tool",
-  "version": "0.1.0",
-  "description": "Envia publicações, Reels e perfis do Instagram da aba aberta para o Media Tool local.",
+  "version": "0.2.0",
+  "description": "Central do Media Tool local: importa publicações e perfis do Instagram, acompanha a atividade, processa e exporta pela API local.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4IRBfs/HHoJglb3UnE3Pn52H6qix/wNLVfV1nWTi13wWldA7wji4K6ok0OAF3ETVATH8CAVFYgXKOSW6vvRtulU46VmSTVFEqI+Kd0ii0H0CAFr/iS8PhvydkDVIVId/zSnM+O0u7Sj0mwCjJToxwWD/nUw1TuTrO0Pl3TJzKdiwoEEWvGnfsZqM6Bufc9DftJWWcwb1U/+7vBKneK7MAc3AOm3WMUb0ftOrfP8qZTqvYsr1+NIsewvzPIQ+mY2hITERID8KnJ1nEk6syTgyw6v8aHwt/HT7O6qO2HLP3zkhwkXRAOjb9ZW7R0s9uHOua+WqEvlyXu+jUMEggSwxywIDAQAB",
   "action": {
     "default_title": "Media Tool",

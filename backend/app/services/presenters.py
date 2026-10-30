@@ -7,6 +7,7 @@ from typing import Any
 from app.db.connection import parse_utc, utc_now
 from app.db.repositories.batches import TYPE_FILTER_REASON, VIEWS_KEYS, VIEWS_KEYS_MAX, load_listing_counts
 from app.db.repositories.common import JOB_STATUSES
+from app.services.auto_export import auto_export_out, exports_for, with_requests
 from app.services.context import AppContext
 
 _PROGRESS_KEYS = ("downloaded", "processed", "skipped", "failed", "pending", "active", "duplicates")
@@ -18,8 +19,11 @@ _FILTERED_VERDICTS = ("below", "no_count", "out_of_period", "above")
 
 
 def media_choice(row: dict[str, Any]) -> str | None:
-    """Tipo de mídia do pedido (importação unificada): "covers" (migration 0021), "videos" (Reels/vídeos) ou "all";
-    None nos lotes antigos com outro conteúdo (fotos, publicações do feed) e nos da Biblioteca."""
+    """Tipo de mídia do pedido (importação unificada): o `media_set` gravado (migration 0023); nos lotes anteriores a
+    ela, "covers" (migration 0021), "videos" (Reels/vídeos) ou "all"; None nos lotes antigos com outro conteúdo
+    (fotos, publicações do feed) e nos da Biblioteca."""
+    if row.get("media_set"):
+        return row["media_set"]
     if row.get("media_role") == "cover":
         return "covers"
     content = row.get("content_type")
@@ -173,6 +177,9 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
     """Grupos de importação com agregados derivados dos filhos (duas consultas para a lista inteira)."""
     stats = ctx.batches.group_aggregates([g["id"] for g in groups])
     exports = ctx.exports.last_completed("group_id", [g["id"] for g in groups])
+    # Grupo parte de um pedido com links (migration 0024): mostra a exportação automática do pedido.
+    auto_rows = {row["id"]: row for row in with_requests(ctx, groups)}
+    autos = exports_for(ctx, list(auto_rows.values()))
     result = []
     for group in groups:
         row = stats.get(group["id"], {})
@@ -201,6 +208,7 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
             "profile_end_count": int(row.get("profile_end") or 0),
             "period_end_count": int(row.get("period_end") or 0),
             "media": media_choice(group),
+            "auto_export": auto_export_out(auto_rows[group["id"]], autos),
             "progress": {"found": found, **{key: int(row.get(key, 0)) for key in _PROGRESS_KEYS},
                          "filtered": int(row.get("type_filtered") or 0) + sum(
                              int(row.get(f"views_{key}") or 0) for key in _FILTERED_VERDICTS)},
@@ -225,6 +233,8 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
     exports = ctx.exports.last_completed("batch_id", [b["id"] for b in batches])
     # Lotes por link: contagem dos links numa consulta agregada para a página inteira (nenhuma se não há lote assim).
     link_counts = ctx.batches.link_counts([b["id"] for b in batches if b.get("import_mode") == "links"])
+    auto_rows = {row["id"]: row for row in with_requests(ctx, batches)}
+    autos = exports_for(ctx, list(auto_rows.values()))
     result = []
     for batch in batches:
         row = stats.get(batch["id"], {})
@@ -261,6 +271,7 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
             data["listing_end"] = "empty_first_page"
         data["views_filter"] = _views_filter(batch)
         data["media"] = media_choice(batch) if batch["source"] == "instagram_import" else None
+        data["auto_export"] = auto_export_out(auto_rows[batch["id"]], autos)
         if batch.get("import_mode") == "links":
             data["import_mode"] = "links"
             data["links"] = link_counts.get(batch["id"], {"total": 0, "pending": 0, "resolved": 0, "failed": 0})

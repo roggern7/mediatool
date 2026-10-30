@@ -850,3 +850,22 @@ mas nunca acontece sozinho depois do download.
 - Contadores: `progress.duplicates` (mídias já existentes, por origem ou sha256; congelado em `final_duplicates`, NULL
   = 0 nos lotes encerrados antes da 0021) e `progress.filtered` (abaixo, acima, sem contagem, fora do período e itens
   de outro tipo, `expected.content_filter`, contados por página na listagem e por publicação nos links).
+
+## 12. Tipos de mídia e exportação automática (migration 0023)
+
+- Tipos de mídia: `batches.media_set`/`import_groups.media_set` guardam o tipo pedido ("videos", "photos", "covers",
+  "videos_covers", "all"); NULL nos lotes antigos mantém a regra antiga (`content_type` + `media_role`, um papel por
+  lote). Com `media_set`, `import_runner._roles` decide os jobs de cada item: original (menos em "covers") e a capa
+  de cada vídeo com capa ("covers", "videos_covers", "all"). O índice único dos jobs de ingestão passa a incluir o
+  papel (`ux_jobs_batch_source`), então o vídeo e a capa do mesmo item convivem no lote; a retomada e o "recomeçar
+  listagem" continuam idempotentes pelo índice. A quantidade pedida ("Últimas N") conta itens: só os jobs do papel
+  principal (original; capa em "Somente capas"). Carrossel em "all": todos os itens, na ordem; a falha de um item é
+  só daquele job. Fotos e capas nunca recebem params de processamento.
+- Exportação automática: `auto_export_state = 'waiting'` até o lote (ou o grupo inteiro) terminar sem processamento
+  pendente das mídias dele; então UMA exportação ZIP pelo serviço existente. Disparo no fim do job que conclui o lote e
+  na manutenção do worker; transição única 'waiting' -> 'created'/'failed' sob trava (sem segunda exportação em
+  reinício, repetição ou corrida). Erro passageiro (exportação da mesma origem em andamento, fila cheia) adia; os
+  outros ficam registrados em `auto_export_error` e aparecem no painel e na extensão. Lote/grupo cancelado ou falho sem
+  nada concluído: 'failed' sem exportação. Pedido com perfis E links (migration 0024, `import_requests`): UM ZIP por
+  pedido, quando TODAS as partes terminaram (fonte `library` com a união das mídias das partes). A exportação e o
+  registro do id dela nascem na mesma transação: queda no meio não cria um segundo ZIP.

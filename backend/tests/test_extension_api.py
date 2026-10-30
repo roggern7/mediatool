@@ -81,7 +81,16 @@ def test_page_info(ext, url, expected):
     harness, headers = ext
     response = harness.client.post("/api/ext/page-info", json={"url": url}, headers=headers)
     assert response.status_code == 200, response.text
-    assert response.json() == expected
+    body = response.json()
+    # Publicação e perfil trazem também o que já está na biblioteca (aqui, nada).
+    library = body.pop("library", None)
+    assert body == expected
+    if expected["kind"] in ("post", "reel"):
+        assert library == {"in_library": False, "items": [], "source_profile": None}
+    elif expected["kind"] == "profile":
+        assert library == {"media_count": 0, "videos": 0, "photos": 0, "covers": 0}
+    else:
+        assert library is None
 
 
 def test_page_info_does_not_touch_instagram(ext, monkeypatch):

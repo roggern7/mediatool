@@ -99,15 +99,33 @@ class ImportLinksRequest(StrictModel):
     posted_within_days: Any = None
 
 
+class AutoExportOut(BaseModel):
+    content: Literal["originals", "edited", "both"]
+    # "waiting" (aguardando o fim), "failed" (não criada; motivo em error_message) ou o estado da exportação criada.
+    status: Literal["waiting", "pending", "running", "completed", "failed", "cancelled", "expired"]
+    export_id: int | None = None
+    error_message: str | None = None
+    zip_ready: bool = False
+    download_url: str | None = None
+    # Pedido com perfis E links (migration 0024): o ZIP é UM para o pedido inteiro; as partes mostram o mesmo.
+    request_id: int | None = None
+
+
 class SkippedProfile(BaseModel):
     profile: str
     reason: str
 
 
 # Importação unificada (docs/CONTRACTS.md, seção 8.6): publicações e/ou perfis numa entrada só.
-# "videos": Reels e qualquer vídeo (inclusive de carrossel); "all": fotos, vídeos e carrosséis inteiros; "covers": só a
-# capa de cada vídeo/Reel (fotos ignoradas, contadas em `filtered`).
-MediaChoice = Literal["videos", "all", "covers"]
+# "videos": Reels e qualquer vídeo (inclusive de carrossel); "photos": fotos (inclusive de carrossel); "covers": só a
+# capa de cada vídeo/Reel; "videos_covers": vídeos + a capa de cada um; "all": todos os itens originais (carrossel
+# inteiro, na ordem) + a capa de cada vídeo. Itens de outro tipo são ignorados e contados em `filtered`.
+MediaChoice = Literal["videos", "photos", "covers", "videos_covers", "all"]
+
+
+class AutoExportRequest(StrictModel):
+    # Exportação ZIP automática quando a importação (lote ou grupo) terminar: originais, editados ou os dois.
+    content: Literal["originals", "edited", "both"]
 
 
 class ClassifyRequest(StrictModel):
@@ -137,6 +155,8 @@ class UnifiedImportRequest(ClassifyRequest):
     post_processing: Literal["none", "preset", "edit"] = "none"
     preset_id: PositiveId | None = None
     edit: EditSettings | None = None
+    # Exportação ZIP automática ao concluir (migration 0023); null = sem exportação automática.
+    auto_export: AutoExportRequest | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> UnifiedImportRequest:
@@ -314,9 +334,11 @@ class BatchOut(BaseModel):
     listing_end: Literal["profile_end", "limit", "period_end", "empty_first_page"] | None = None
     # Filtro de visualizações mínimas do lote; None = sem filtro (lotes antigos e criados sem ele).
     views_filter: ViewsFilterOut | None = None
-    # Tipo de mídia pedido (importação unificada): "videos", "all" ou "covers"; None em lotes antigos de outro
-    # conteúdo e nos da Biblioteca.
-    media: Literal["videos", "all", "covers"] | None = None
+    # Tipo de mídia pedido (importação unificada; `MediaChoice`); None em lotes antigos de outro conteúdo e nos da
+    # Biblioteca.
+    media: MediaChoice | None = None
+    # Exportação ZIP automática ao concluir (migration 0023); None sem ela. Filho de grupo: a do grupo.
+    auto_export: AutoExportOut | None = None
     # Como o lote foi criado: "profile" (importação por perfil), "links" (importação por link) ou None (Biblioteca).
     import_mode: Literal["profile", "links"] | None = None
     # Só em lote por link: quantos links há e em que estado (lista: GET /api/batches/{id}/links).
@@ -379,7 +401,8 @@ class ImportGroupOut(BaseModel):
     listing_dropped_total: int
     # Filtro de visualizações mínimas do grupo (soma dos filhos); None = sem filtro.
     views_filter: ViewsFilterOut | None = None
-    media: Literal["videos", "all", "covers"] | None = None
+    media: MediaChoice | None = None
+    auto_export: AutoExportOut | None = None
     # Última exportação para pasta CONCLUÍDA do grupo inteiro (None se nunca foi exportado).
     last_export: LastExport | None = None
 

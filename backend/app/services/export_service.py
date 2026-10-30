@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -106,7 +107,9 @@ def pick_folder(ctx: AppContext) -> dict[str, Any]:
 
 
 def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str, Any],
-                  content: str = "originals") -> dict[str, Any]:
+                  content: str = "originals", on_created: Callable[[int], None] | None = None) -> dict[str, Any]:
+    # `on_created(export_id)`: chamado dentro da MESMA transação que grava a exportação (exportação automática:
+    # registra o id no lote/grupo/pedido atomicamente; se levantar, nada é gravado).
     kind = source["kind"]
     fields: dict[str, Any] = {"kind": kind}
     edit_batch = False
@@ -164,7 +167,7 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
                 f"Já há {MAX_PENDING_EXPORTS} exportações na fila. Aguarde alguma terminar antes de pedir outra.",
             )
         if use_zip:
-            export = _create_zip(ctx, kind, fields, content, empty_message, edit_batch)
+            export = _create_zip(ctx, kind, fields, content, empty_message, edit_batch, on_created)
             logger.info("ZIP %s criado (%s, %s, %s arquivos)", export["id"], kind, content, export["total"])
             if ctx.export_runner is not None:
                 ctx.export_runner.wake()
@@ -186,7 +189,7 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
                 export_destination.remove_if_empty(created)   # pasta padrão recém-criada e recusada: não fica
             raise _app_error(exc) from None
 
-        export = ctx.exports.create(dest_path=str(dest), dest_created=use_default, **fields)
+        export = ctx.exports.create(dest_path=str(dest), dest_created=use_default, on_created=on_created, **fields)
         if export is None:
             if created is not None:
                 export_destination.remove_if_empty(created)   # pasta padrão recém-criada e vazia: não fica
@@ -201,7 +204,8 @@ def create_export(ctx: AppContext, source: dict[str, Any], destination: dict[str
 
 
 def _create_zip(ctx: AppContext, kind: str, fields: dict[str, Any], content: str = "originals",
-                empty_message: str = _EMPTY_MESSAGE, edit_batch: bool = False) -> dict[str, Any]:
+                empty_message: str = _EMPTY_MESSAGE, edit_batch: bool = False,
+                on_created: Callable[[int], None] | None = None) -> dict[str, Any]:
     """Cria a exportação em modo ZIP depois de conferir o espaço livre para o temporário: soma agregada de
     `file_size` + margem, contra o espaço livre menos a reserva dos downloads e menos o que os ZIPs já na fila ainda
     vão escrever (reserva lógica)."""
@@ -210,7 +214,7 @@ def _create_zip(ctx: AppContext, kind: str, fields: dict[str, Any], content: str
     folder = export_zip.zip_dir(ctx.settings)
     export = ctx.exports.create(dest_path=str(folder), mode="zip",
                                 zip_fields=export_zip.new_zip_fields(kind, content=content, edit_batch=edit_batch),
-                                **fields)
+                                on_created=on_created, **fields)
     if export is None:
         raise AppError(409, "export_empty", empty_message)
     problem = export_zip.space_problem(ctx, export)

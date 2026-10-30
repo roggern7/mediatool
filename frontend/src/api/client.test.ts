@@ -30,6 +30,12 @@ describe("cliente: keyset, resumo do lote e processar por filtro", () => {
     expect(page.next_before_id).toBeUndefined();
   });
 
+  it("getMediaByIds lê as mídias em lote por ?ids=", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0, next_before_id: null }));
+    await api.getMediaByIds([3, 1, 2]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/media?ids=3%2C1%2C2");
+  });
+
   it("getBatch pede só o resumo por padrão", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ id: 9 }));
     await api.getBatch(9);

@@ -3,15 +3,20 @@ import { ApiError, api, messageOf } from "../api/client";
 import type { EditSettings, MediaChoice, UnifiedImportResult } from "../api/types";
 import { ConfirmDialog, ErrorLine, Field, Spinner } from "./ui";
 import {
+  AUTO_EXPORT_CHOICES,
+  AUTO_EXPORT_NEEDS_PROCESSING_TEXT,
+  autoExportNeedsProcessing,
   CONFIRM_ALL_TEXT,
   MEDIA_CHOICES,
   QUANTITY_PRESETS,
   classificationText,
   entriesOf,
   needsConfirmAll,
+  postProcessingApplies,
   resolveQuantity,
   unifiedBody,
   viewsAllowed,
+  type AutoExportChoice,
   type QuantityMode,
 } from "../lib/importUnified";
 import type { PostProcessing } from "../lib/importOptions";
@@ -117,6 +122,8 @@ export function ImportUnifiedForm({
 }) {
   const [text, setText] = useState("");
   const [media, setMedia] = useState<MediaChoice>("videos");
+  // Capas e fotos nunca são processadas: sem versão editada para exportar.
+  const noEdited = (post: string) => post === "none" || media === "covers" || media === "photos";
   const [quantityMode, setQuantityMode] = useState<QuantityMode>("50");
   const [quantityText, setQuantityText] = useState("");
   const [periodMode, setPeriodMode] = useState<PeriodMode>("any");
@@ -125,6 +132,7 @@ export function ImportUnifiedForm({
   const [minText, setMinText] = useState("");
   const [maxMode, setMaxMode] = useState<MaxViewsMode>("off");
   const [maxText, setMaxText] = useState("");
+  const [autoExport, setAutoExport] = useState<AutoExportChoice>("off");
   const [confirming, setConfirming] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -151,7 +159,8 @@ export function ImportUnifiedForm({
     (hasProfiles && !period.ok ? period.error : null) ??
     (hasProfiles && !views.ok ? views.error : null) ??
     editProblem ??
-    (post === "preset" && presetId === null ? "Escolha um preset." : null);
+    (post === "preset" && presetId === null ? "Escolha um preset." : null) ??
+    (noEdited(post) && autoExportNeedsProcessing(autoExport) ? AUTO_EXPORT_NEEDS_PROCESSING_TEXT : null);
 
   async function send(confirmAll: boolean) {
     const body = unifiedBody({
@@ -165,6 +174,7 @@ export function ImportUnifiedForm({
       post,
       presetId,
       edit,
+      autoExport,
     });
     if (!body) return;
     setSubmitting(true);
@@ -337,7 +347,7 @@ export function ImportUnifiedForm({
         {VIEWS_FILTER_ENABLED ? (
           <div className={`small${hasProfiles && !views.ok ? " tone-err" : " muted"}`}>
             {!allowViews
-              ? "O filtro de visualizações só vale para vídeos: escolha “Somente vídeos” ou “Somente capas”."
+              ? "O filtro de visualizações só vale para vídeos: escolha “Somente vídeos”, “Somente capas” ou “Vídeos e capas”."
               : hasProfiles && !views.ok
                 ? views.error
                 : "Vídeos fora do intervalo ou sem contagem de visualizações não são baixados. A capa usa as visualizações do vídeo."}
@@ -346,9 +356,48 @@ export function ImportUnifiedForm({
       </fieldset>
 
       {processing}
-      {media === "covers" && post !== "none" ? (
-        <div className="muted small">Com “Somente capas” as capas são só baixadas (sem processamento ou edição).</div>
+      {!postProcessingApplies(media) && post !== "none" ? (
+        <div className="muted small">
+          Com “{MEDIA_CHOICES.find((c) => c.value === media)?.label}” as mídias são só baixadas (sem processamento ou
+          edição).
+        </div>
       ) : null}
+      {media === "all" || media === "videos_covers" ? (
+        post !== "none" ? (
+          <div className="muted small">Só os vídeos são processados ou editados; fotos e capas são só baixadas.</div>
+        ) : null
+      ) : null}
+
+      <div style={{ marginTop: 12 }}>
+        <Field label="Exportar ZIP automaticamente ao concluir" htmlFor="imp-auto-export">
+          <select
+            id="imp-auto-export"
+            value={autoExport}
+            onChange={(e) => setAutoExport(e.target.value as AutoExportChoice)}
+          >
+            {AUTO_EXPORT_CHOICES.map((choice) => (
+              <option
+                key={choice.value}
+                value={choice.value}
+                disabled={noEdited(post) && autoExportNeedsProcessing(choice.value)}
+              >
+                {choice.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {post === "none" ? (
+          <div className={`small${autoExportNeedsProcessing(autoExport) ? " tone-err" : " muted"}`}>
+            {AUTO_EXPORT_NEEDS_PROCESSING_TEXT}
+          </div>
+        ) : null}
+        {autoExport !== "off" ? (
+          <div className="muted small">
+            Quando a importação terminar (e o processamento dela também), um único ZIP é preparado; o botão de
+            baixar aparece no painel da importação.
+          </div>
+        ) : null}
+      </div>
 
       <div className="row" style={{ marginTop: 16 }}>
         <button type="submit" className="btn btn-primary" disabled={problem !== null || submitting}>

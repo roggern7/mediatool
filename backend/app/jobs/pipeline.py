@@ -268,7 +268,12 @@ class JobExecutor:
         finally:
             self.ctx.storage.remove_job_temp(self.job_id)
             if job["batch_id"] is not None:
-                self.ctx.batches.refresh_status(job["batch_id"])
+                if self.ctx.batches.refresh_status(job["batch_id"]):
+                    # Lote concluído: a exportação automática dele (ou do grupo dele) pode ter ficado devida
+                    # (migration 0023). Nunca levanta; a manutenção do worker também confere.
+                    from app.services import auto_export
+
+                    auto_export.run_due(self.ctx)
                 if job["kind"] == "ingest":
                     # Backpressure: um ingest a menos pendente pode liberar a retomada da listagem do lote.
                     self.ctx.wake_import_runner()

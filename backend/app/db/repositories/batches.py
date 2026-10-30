@@ -139,6 +139,8 @@ class BatchRepository:
         posted_after: str | None = None,
         max_views: int | None = None,
         media_role: str | None = None,
+        media_set: str | None = None,
+        auto_export_content: str | None = None,
     ) -> int:
         now = utc_now()
         cursor = self.db.execute(
@@ -163,6 +165,11 @@ class BatchRepository:
             self.db.execute("UPDATE batches SET max_views = ? WHERE id = ?", (max_views, cursor.lastrowid))
         if media_role is not None and media_role != "original":   # "Somente capas" (migration 0021)
             self.db.execute("UPDATE batches SET media_role = ? WHERE id = ?", (media_role, cursor.lastrowid))
+        if media_set is not None:   # tipo de mídia da importação unificada (migration 0023)
+            self.db.execute("UPDATE batches SET media_set = ? WHERE id = ?", (media_set, cursor.lastrowid))
+        if auto_export_content is not None:   # exportação automática ao concluir (migration 0023)
+            self.db.execute("UPDATE batches SET auto_export_content = ?, auto_export_state = 'waiting' WHERE id = ?",
+                            (auto_export_content, cursor.lastrowid))
         return cursor.lastrowid
 
     def get(self, batch_id: int) -> dict[str, Any] | None:
@@ -364,7 +371,8 @@ class BatchRepository:
                      preset_name: str | None, params: dict[str, Any] | None, process: bool,
                      min_views: int | None = None, posted_within_days: int | None = None,
                      posted_after: str | None = None, max_views: int | None = None,
-                     media_role: str | None = None) -> int:
+                     media_role: str | None = None, media_set: str | None = None,
+                     auto_export_content: str | None = None) -> int:
         cursor = self.db.execute(
             "INSERT INTO import_groups (content_type, requested_limit, preset_id, preset_name, params, process,"
             " created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -380,7 +388,130 @@ class BatchRepository:
             self.db.execute("UPDATE import_groups SET max_views = ? WHERE id = ?", (max_views, cursor.lastrowid))
         if media_role is not None and media_role != "original":   # "Somente capas" (migration 0021)
             self.db.execute("UPDATE import_groups SET media_role = ? WHERE id = ?", (media_role, cursor.lastrowid))
+        if media_set is not None:   # migration 0023
+            self.db.execute("UPDATE import_groups SET media_set = ? WHERE id = ?", (media_set, cursor.lastrowid))
+        if auto_export_content is not None:   # migration 0023
+            self.db.execute("UPDATE import_groups SET auto_export_content = ?, auto_export_state = 'waiting'"
+                            " WHERE id = ?", (auto_export_content, cursor.lastrowid))
         return cursor.lastrowid
+
+    # ---- exportação automática ao concluir (migration 0023) ----------------------------------------------------
+    def auto_export_due(self) -> tuple[list[int], list[int]]:
+        """(lotes avulsos, grupos) com a exportação automática esperando e já encerrados: lote `completed`; grupo
+        sem filho aberto e com ao menos um filho `completed`. Nenhum job aberto que processe mídia deles (processamento
+        pendente, inclusive em outro lote) adia o disparo."""
+        open_process = (
+            "EXISTS (SELECT 1 FROM jobs p WHERE p.status IN ('pending', 'downloading', 'downloaded', 'processing')"
+            " AND p.media_id IN (SELECT j.media_id FROM jobs j WHERE j.batch_id = {batch} AND j.media_id IS NOT NULL))"
+        )
+        batches = [int(row["id"]) for row in self.db.fetchall(
+            "SELECT id FROM batches b WHERE auto_export_state = 'waiting' AND group_id IS NULL"
+            " AND status = 'completed' AND NOT " + open_process.format(batch="b.id")
+        )]
+        groups = [int(row["id"]) for row in self.db.fetchall(
+            "SELECT g.id FROM import_groups g WHERE g.auto_export_state = 'waiting'"
+            " AND NOT EXISTS (SELECT 1 FROM batches c WHERE c.group_id = g.id"
+            "   AND c.status NOT IN ('completed', 'failed', 'cancelled'))"
+            " AND EXISTS (SELECT 1 FROM batches c WHERE c.group_id = g.id AND c.status = 'completed')"
+            " AND NOT EXISTS (SELECT 1 FROM batches c WHERE c.group_id = g.id AND "
+            + open_process.format(batch="c.id") + ")"
+        )]
+        return batches, groups
+
+    def auto_export_waiting(self) -> bool:
+        """Há alguma exportação automática esperando (lote, grupo ou pedido)? Consulta barata (índices parciais da
+        0023): quando não há, a verificação periódica não faz nenhuma escrita."""
+        return bool(self.db.scalar(
+            "SELECT EXISTS (SELECT 1 FROM batches WHERE auto_export_state = 'waiting')"
+            " OR EXISTS (SELECT 1 FROM import_groups WHERE auto_export_state = 'waiting')"
+            " OR EXISTS (SELECT 1 FROM import_requests WHERE auto_export_state = 'waiting')"))
+
+    def auto_export_closed_without_result(self) -> None:
+        """Lotes/grupos com exportação automática esperando que terminaram sem nada concluído (cancelados ou
+        falhos): o disparo deixa de esperar e fica registrado como falho, visível no painel."""
+        message = "A importação não foi concluída; nenhuma exportação automática foi criada."
+        self.db.execute(
+            "UPDATE batches SET auto_export_state = 'failed', auto_export_error = ? WHERE auto_export_state = 'waiting'"
+            " AND group_id IS NULL AND status IN ('failed', 'cancelled')", (message,))
+        self.db.execute(
+            "UPDATE import_groups SET auto_export_state = 'failed', auto_export_error = ?"
+            " WHERE auto_export_state = 'waiting'"
+            " AND NOT EXISTS (SELECT 1 FROM batches c WHERE c.group_id = import_groups.id"
+            "   AND c.status NOT IN ('failed', 'cancelled'))"
+            " AND EXISTS (SELECT 1 FROM batches c WHERE c.group_id = import_groups.id)", (message,))
+        # Pedido com várias partes (migration 0024): todas encerradas e nenhuma concluída.
+        self.db.execute(
+            "UPDATE import_requests SET auto_export_state = 'failed', auto_export_error = ?"
+            " WHERE auto_export_state = 'waiting' AND NOT EXISTS (SELECT 1 FROM batches c"
+            "   WHERE (c.request_id = import_requests.id OR c.group_id IN (SELECT g.id FROM import_groups g"
+            "     WHERE g.request_id = import_requests.id))"
+            "   AND c.status NOT IN ('failed', 'cancelled'))", (message,))
+
+    # ---- pedido com várias partes (migration 0024): UM ZIP quando todas terminarem -----------------------------
+    # Lotes de um pedido `r`: os avulsos que apontam para ele e os filhos do grupo que aponta para ele (SQL fixo).
+    _REQUEST_PART = ("(c.request_id = r.id OR c.group_id IN (SELECT g.id FROM import_groups g"
+                     " WHERE g.request_id = r.id))")
+    _REQUEST_BATCHES = f"SELECT c.id FROM batches c WHERE {_REQUEST_PART}"
+
+    def create_request(self, *, auto_export_content: str, batch_ids: list[int], group_id: int | None) -> int:
+        """Pedido com a exportação automática e as partes dele (lotes avulsos e/ou o grupo) apontando para ele."""
+        request_id = int(self.db.execute(
+            "INSERT INTO import_requests (auto_export_content, created_at) VALUES (?, ?)",
+            (auto_export_content, utc_now()),
+        ).lastrowid)
+        for batch_id in batch_ids:
+            self.db.execute("UPDATE batches SET request_id = ? WHERE id = ?", (request_id, batch_id))
+        if group_id is not None:
+            self.db.execute("UPDATE import_groups SET request_id = ? WHERE id = ?", (request_id, group_id))
+        return request_id
+
+    def get_request(self, request_id: int) -> dict[str, Any] | None:
+        return row_dict(self.db.fetchone("SELECT * FROM import_requests WHERE id = ?", (request_id,)))
+
+    def requests_by_id(self, ids: list[int]) -> dict[int, dict[str, Any]]:
+        if not ids:
+            return {}
+        rows = self.db.fetchall(f"SELECT * FROM import_requests WHERE id IN ({','.join('?' * len(ids))})",
+                                tuple(ids))
+        return {int(row["id"]): dict(row) for row in rows}
+
+    def request_auto_export_due(self) -> list[int]:
+        """Pedidos esperando cuja TODAS as partes encerraram (nenhum lote aberto), com ao menos um lote `completed`
+        e sem processamento pendente das mídias de qualquer parte."""
+        part = self._REQUEST_PART
+        return [int(row["id"]) for row in self.db.fetchall(
+            "SELECT r.id FROM import_requests r WHERE r.auto_export_state = 'waiting'"
+            f" AND NOT EXISTS (SELECT 1 FROM batches c WHERE {part}"
+            "   AND c.status NOT IN ('completed', 'failed', 'cancelled'))"
+            f" AND EXISTS (SELECT 1 FROM batches c WHERE {part} AND c.status = 'completed')"
+            " AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.status IN ('pending', 'downloading', 'downloaded',"
+            " 'processing') AND p.media_id IN (SELECT j.media_id FROM jobs j WHERE j.media_id IS NOT NULL"
+            f" AND j.batch_id IN ({self._REQUEST_BATCHES})))"
+        )]
+
+    def request_media_ids(self, request_id: int) -> list[int]:
+        """Mídias de todas as partes do pedido (mesma regra da exportação de um lote: jobs de ingest/process
+        concluídos, inclusive duplicatas, unidos a `batch_media`), cada uma uma vez."""
+        parts = self._REQUEST_BATCHES
+        rows = self.db.fetchall(
+            f"SELECT j.media_id FROM import_requests r JOIN jobs j ON j.batch_id IN ({parts}) WHERE r.id = ?"
+            " AND j.kind IN ('ingest', 'process') AND j.status = 'completed' AND j.media_id IS NOT NULL"
+            f" UNION SELECT bm.media_id FROM import_requests r JOIN batch_media bm ON bm.batch_id IN ({parts})"
+            " WHERE r.id = ? ORDER BY 1",
+            (request_id, request_id),
+        )
+        return [int(row[0]) for row in rows]
+
+    def finish_auto_export(self, table: str, row_id: int, *, export_id: int | None, error: str | None) -> bool:
+        """'waiting' -> 'created'/'failed' (uma vez só: True só para quem fez a transição). `table`: "batch",
+        "group" ou "request" (pedido com várias partes, migration 0024)."""
+        name = {"batch": "batches", "group": "import_groups", "request": "import_requests"}[table]
+        cursor = self.db.execute(
+            f"UPDATE {name} SET auto_export_state = ?, auto_export_id = ?, auto_export_error = ?"
+            " WHERE id = ? AND auto_export_state = 'waiting'",
+            ("created" if export_id is not None else "failed", export_id, error, row_id),
+        )
+        return cursor.rowcount == 1
 
     def get_group(self, group_id: int) -> dict[str, Any] | None:
         return row_dict(self.db.fetchone("SELECT * FROM import_groups WHERE id = ?", (group_id,)))

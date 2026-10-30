@@ -52,6 +52,15 @@ class MediaRepository:
     def get(self, media_id: int) -> dict[str, Any] | None:
         return row_dict(self.db.fetchone("SELECT * FROM media WHERE id = ?", (media_id,)))
 
+    def get_many(self, media_ids: list[int]) -> list[dict[str, Any]]:
+        """Mídias destes ids, na ordem pedida; ids inexistentes ficam de fora."""
+        if not media_ids:
+            return []
+        rows = self.db.fetchall(
+            f"SELECT * FROM media WHERE id IN ({placeholders(len(media_ids))})", tuple(media_ids))
+        found = {row["id"]: row_dict(row) for row in rows}
+        return [found[media_id] for media_id in media_ids if media_id in found]
+
     def find_by_source(self, platform: str, source_post_id: str, index: int,
                        role: str = "original") -> dict[str, Any] | None:
         """Mídia da chave de origem COM o papel (migration 0021): a capa de um vídeo e o próprio vídeo têm a mesma
