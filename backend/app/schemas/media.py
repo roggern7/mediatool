@@ -34,6 +34,8 @@ class MediaOut(BaseModel):
     source_post_id: str | None
     source_media_index: int
     media_type: Literal["video", "image"]
+    # "cover" = capa de um vídeo/Reel baixada sozinha (migration 0021); "original" = a mídia da publicação.
+    role: Literal["original", "cover"] = "original"
     original_filename: str | None
     original_sha256: str
     file_size: int
@@ -70,6 +72,7 @@ class BulkProcessRequest(StrictModel):
 class ProcessByFilterRequest(StrictModel):
     view: Literal["all", "originals", "processed"] = "all"
     media_type: Literal["video", "image"] | None = None
+    role: Literal["original", "cover"] | None = None
     q: Annotated[SafeText | None, Field(max_length=200)] = None
     profile: Annotated[SafeText | None, Field(max_length=64)] = None
     preset_id: PositiveId

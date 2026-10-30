@@ -68,7 +68,7 @@ def test_photo_reel_video_and_whole_carousel_are_imported_in_pasted_order(harnes
     done = h.batch(batch["id"])
     assert (done["status"], done["error_code"], done["error_message"]) == ("completed", None, None)
     assert done["progress"] == {"found": 7, "downloaded": 7, "processed": 0, "skipped": 0, "failed": 0,
-                                "pending": 0, "active": 0}
+                                "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
     assert dl.calls == [D, B, A, C] and h.ctx.batches.has_active_work() is False
     # Biblioteca: todas as mídias, com o perfil do dono da publicação.
     media = h.client.get("/api/media", params={"limit": 50}).json()

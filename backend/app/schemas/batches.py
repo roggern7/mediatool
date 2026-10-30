@@ -99,6 +99,83 @@ class ImportLinksRequest(StrictModel):
     posted_within_days: Any = None
 
 
+class SkippedProfile(BaseModel):
+    profile: str
+    reason: str
+
+
+# Importação unificada (docs/CONTRACTS.md, seção 8.6): publicações e/ou perfis numa entrada só.
+# "videos": Reels e qualquer vídeo (inclusive de carrossel); "all": fotos, vídeos e carrosséis inteiros; "covers": só a
+# capa de cada vídeo/Reel (fotos ignoradas, contadas em `filtered`).
+MediaChoice = Literal["videos", "all", "covers"]
+
+
+class ClassifyRequest(StrictModel):
+    # Exatamente um dos dois: lista de entradas ou texto colado (quebra de linha, vírgula e ponto e vírgula separam;
+    # espaço só separa URLs do Instagram e `@usuario`).
+    inputs: list[str] | None = Field(default=None, min_length=1, max_length=100_000)
+    text: str | None = Field(default=None, max_length=2_000_000)
+
+    @model_validator(mode="after")
+    def _one_source(self) -> ClassifyRequest:
+        if (self.inputs is None) == (self.text is None):
+            raise ValueError("Informe `inputs` ou `text` (um dos dois).")
+        return self
+
+
+class UnifiedImportRequest(ClassifyRequest):
+    media: MediaChoice = "videos"
+    # POR PERFIL; `null` = todas as publicações disponíveis (exige `confirm_all: true` quando há perfil).
+    limit: ImportLimit | None = None
+    confirm_all: bool = Field(default=False, strict=True)
+    # Filtros: só perfis (publicações por link não têm filtro; ignorados com aviso em `notes`). Visualizações só com
+    # `media` "videos" ou "covers" quando há perfis.
+    posted_within_days: ImportPostedWithinDays | None = None
+    min_views: ImportMinViews | None = None
+    max_views: ImportMinViews | None = None
+    # Pós-processamento: vale para vídeos; capas e fotos só são baixadas.
+    post_processing: Literal["none", "preset", "edit"] = "none"
+    preset_id: PositiveId | None = None
+    edit: EditSettings | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> UnifiedImportRequest:
+        if self.min_views is not None and self.max_views is not None and self.max_views < self.min_views:
+            raise ValueError("O máximo de visualizações precisa ser maior ou igual ao mínimo.")
+        if (self.post_processing == "edit") != (self.edit is not None):
+            raise ValueError("`edit` só vale (e é obrigatório) com post_processing \"edit\".")
+        if self.preset_id is not None and self.post_processing != "preset":
+            raise ValueError("`preset_id` só vale com post_processing \"preset\".")
+        return self
+
+
+class ClassifiedLink(BaseModel):
+    shortcode: str
+    url: str
+    kind: Literal["p", "reel"]
+
+
+class ClassifyOut(BaseModel):
+    profiles: list[str]
+    links: list[ClassifiedLink]
+    invalid: list[InvalidProfileEntry]
+    duplicates: int
+
+
+class UnifiedImportOut(BaseModel):
+    batch_ids: list[int]          # lotes avulsos criados (perfil único e/ou links)
+    group_id: int | None          # grupo quando há 2+ perfis
+    links_batch_id: int | None    # lote de links quando há publicações
+    profiles: int
+    links: int
+    invalid: list[InvalidProfileEntry]
+    duplicates: int               # entradas repetidas na colagem
+    # Perfis do grupo pulados por já terem importação em andamento (os demais foram criados).
+    skipped: list[SkippedProfile] = Field(default_factory=list)
+    # Avisos sem erro (ex.: filtros de perfil ignorados nas publicações por link).
+    notes: list[str] = Field(default_factory=list)
+
+
 class HistoryHideRequest(StrictModel):
     """Remover do histórico de importações (POST /imports/history/hide): itens (`batch_ids` de lotes avulsos e/ou
     `group_ids`) OU `all_finished: true` (todos os terminados). Só oculta; `delete_media: true` também apaga os vídeos
@@ -165,6 +242,10 @@ class BatchProgress(BaseModel):
     failed: int
     pending: int
     active: int
+    # Importação unificada: mídias que já existiam (dedup por origem ou sha256) e itens ignorados pelo tipo de mídia,
+    # período ou visualizações (a listagem não cria job para eles). `skipped` continua como antes.
+    duplicates: int = 0
+    filtered: int = 0
 
 
 class ListingDropped(BaseModel):
@@ -183,6 +264,7 @@ class ViewsFilterOut(BaseModel):
     # progress.downloaded). `below`/`no_count` só com `min_views`; `out_of_period` só com o período. `pending`: parte
     # dos analisados que ainda é da página aberta (sem checkpoint).
     min_views: int | None = None
+    max_views: int | None = None   # migration 0021
     posted_within_days: int | None = None
     posted_after: str | None = None   # corte gravado na criação (UTC)
     analyzed: int = 0
@@ -190,6 +272,7 @@ class ViewsFilterOut(BaseModel):
     below: int = 0
     no_count: int = 0
     out_of_period: int = 0
+    above: int = 0   # acima do máximo (só com `max_views`)
     pending: int = 0
 
 
@@ -227,9 +310,13 @@ class BatchOut(BaseModel):
     # Por que a listagem terminou: "profile_end" (fim real do perfil; pode ter menos que o pedido) ou "limit"
     # (quantidade pedida atingida). None enquanto lista, em erro/cancelamento e em lotes antigos.
     # "period_end": a listagem chegou às publicações mais antigas que o corte do período de postagem.
-    listing_end: Literal["profile_end", "limit", "period_end"] | None = None
+    # "empty_first_page": a 1a página do perfil veio vazia e sem próxima (sem posts, privado ou limite temporário).
+    listing_end: Literal["profile_end", "limit", "period_end", "empty_first_page"] | None = None
     # Filtro de visualizações mínimas do lote; None = sem filtro (lotes antigos e criados sem ele).
     views_filter: ViewsFilterOut | None = None
+    # Tipo de mídia pedido (importação unificada): "videos", "all" ou "covers"; None em lotes antigos de outro
+    # conteúdo e nos da Biblioteca.
+    media: Literal["videos", "all", "covers"] | None = None
     # Como o lote foi criado: "profile" (importação por perfil), "links" (importação por link) ou None (Biblioteca).
     import_mode: Literal["profile", "links"] | None = None
     # Só em lote por link: quantos links há e em que estado (lista: GET /api/batches/{id}/links).
@@ -292,6 +379,7 @@ class ImportGroupOut(BaseModel):
     listing_dropped_total: int
     # Filtro de visualizações mínimas do grupo (soma dos filhos); None = sem filtro.
     views_filter: ViewsFilterOut | None = None
+    media: Literal["videos", "all", "covers"] | None = None
     # Última exportação para pasta CONCLUÍDA do grupo inteiro (None se nunca foi exportado).
     last_export: LastExport | None = None
 
@@ -300,11 +388,6 @@ class ImportGroupList(BaseModel):
     items: list[ImportGroupOut]
     total: int
     next_before_id: int | None = None
-
-
-class SkippedProfile(BaseModel):
-    profile: str
-    reason: str
 
 
 class ImportGroupDetail(BaseModel):

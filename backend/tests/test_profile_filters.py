@@ -92,10 +92,12 @@ def test_gallery_dl_method_refuses_the_period(harness):
     assert harness.ctx.db.scalar("SELECT COUNT(*) FROM batches") == 0
 
 
-def test_views_filter_is_switched_off_in_the_app_with_a_clear_422(harness):
+def test_views_filter_is_switched_off_in_the_app_with_a_clear_422(harness, monkeypatch):
     from app.services import import_service
 
-    assert import_service.MIN_VIEWS_ENABLED is False
+    # Ligado por padrão desde 2026-10-29 (importação unificada); o interruptor desligado continua recusando.
+    assert import_service.MIN_VIEWS_ENABLED is True
+    monkeypatch.setattr(import_service, "MIN_VIEWS_ENABLED", False)
     for response in (post_single(harness, min_views=MIN), post_group(harness, min_views=MIN),
                      post_single(harness, min_views=MIN, posted_within_days=30)):
         assert response.status_code == 422, response.text
@@ -181,9 +183,12 @@ def views_on(monkeypatch):
     monkeypatch.setattr(import_service, "MIN_VIEWS_ENABLED", True)
 
 
-def test_stored_min_views_is_ignored_while_the_filter_is_switched_off(harness_factory, caplog):
+def test_stored_min_views_is_ignored_while_the_filter_is_switched_off(harness_factory, caplog, monkeypatch):
     """Lote antigo com `min_views` gravado + interruptor desligado: lista SEM o filtro, sem nenhuma requisição à aba
     Reels, com UM aviso por lote."""
+    from app.services import import_service
+
+    monkeypatch.setattr(import_service, "MIN_VIEWS_ENABLED", False)
     site = MirroredSite(gp.body(1, [reel(1, i, play_count=LOW) for i in range(3)], has_next=False))
     h = harness_factory(downloader=WebListingFakeDownload(gp.downloader(site)))
     batch_id = single_batch(h, min_views=MIN)
@@ -288,7 +293,8 @@ def test_group_of_five_profiles_counts_per_profile_and_in_aggregate(harness_fact
         approved, below, no_count = expected[child["source_profile"]]
         assert child["views_filter"] == {"min_views": MIN, "posted_within_days": None, "posted_after": None,
                                          "analyzed": approved + below + no_count, "approved": approved,
-                                         "below": below, "no_count": no_count, "out_of_period": 0, "pending": 0}
+                                         "below": below, "no_count": no_count, "out_of_period": 0, "pending": 0,
+                                         "max_views": None, "above": 0}
         assert child["progress"]["downloaded"] == approved == child["found"]
     group = detail["group"]["views_filter"]
     assert (group["analyzed"], group["approved"], group["below"], group["no_count"]) == (26, 12, 6, 8)

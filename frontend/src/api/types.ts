@@ -3,6 +3,10 @@
 /** Interface: "all" | "reels" | "photos_carousels". "posts", "videos" e "images" só aparecem em lotes antigos. */
 export type ContentType = "reels" | "posts" | "videos" | "images" | "all" | "photos_carousels";
 export type MediaType = "video" | "image";
+/** Papel da mídia na Biblioteca: "cover" = capa de um vídeo/Reel baixada sozinha. */
+export type MediaRole = "original" | "cover";
+/** Tipo de mídia da importação unificada. */
+export type MediaChoice = "videos" | "all" | "covers";
 
 export type JobStatus =
   | "pending"
@@ -143,6 +147,8 @@ export interface Media {
   source_post_id: string | null;
   source_media_index: number;
   media_type: MediaType;
+  /** Ausente em backends antigos (= "original"). */
+  role?: MediaRole;
   original_filename: string | null;
   original_sha256: string;
   file_size: number;
@@ -170,6 +176,10 @@ export interface BatchProgress {
   failed: number;
   pending: number;
   active: number;
+  /** Mídias que já existiam na Biblioteca (ausente em backends antigos). */
+  duplicates?: number;
+  /** Ignoradas por tipo de mídia, período ou visualizações (ausente em backends antigos). */
+  filtered?: number;
 }
 
 export interface Batch {
@@ -209,7 +219,8 @@ export interface Batch {
   listing_dropped?: ListingDropped | null;
   /** Por que a listagem terminou: fim real do perfil ou quantidade atingida; null enquanto lista/erro/antigo. */
   /** "period_end": a listagem chegou às publicações mais antigas que o período de postagem pedido. */
-  listing_end?: "profile_end" | "limit" | "period_end" | null;
+  /** "empty_first_page": a 1a página do perfil veio vazia e sem próxima (sem posts, privado ou limite temporário). */
+  listing_end?: "profile_end" | "limit" | "period_end" | "empty_first_page" | null;
   /** Filtro de visualizações mínimas do lote; null/ausente = sem filtro (e em backends antigos). */
   views_filter?: ViewsFilter | null;
   /** Grupo de importação (vários perfis); null/ausente em lotes avulsos e antigos. */
@@ -222,6 +233,8 @@ export interface Batch {
   import_mode?: "profile" | "links" | null;
   /** Só em lote por link: links por situação. */
   links?: BatchLinksSummary | null;
+  /** Tipo de mídia pedido (importação unificada); null/ausente em lotes antigos de outro conteúdo. */
+  media?: MediaChoice | null;
 }
 
 export interface BatchLinksSummary {
@@ -316,6 +329,7 @@ export interface ImportGroup {
   views_filter?: ViewsFilter | null;
   /** Última exportação para pasta concluída do grupo inteiro; null/ausente se nunca foi exportado. */
   last_export?: LastExport | null;
+  media?: MediaChoice | null;
 }
 
 export interface SkippedProfile {
@@ -346,6 +360,8 @@ export interface ImportGroupList {
 export interface ViewsFilter {
   /** null = sem filtro de visualizações (só o período). */
   min_views: number | null;
+  /** Máximo de visualizações; null/ausente = sem máximo. */
+  max_views?: number | null;
   /** "Últimos N dias"; null = qualquer data. */
   posted_within_days?: number | null;
   /** Corte gravado na criação (UTC). */
@@ -356,6 +372,8 @@ export interface ViewsFilter {
   no_count: number;
   /** Publicações mais antigas que o corte do período (não baixadas). */
   out_of_period?: number;
+  /** Acima do máximo de visualizações (só com `max_views`). */
+  above?: number;
   /** Parte dos analisados que ainda é da página aberta da listagem. */
   pending: number;
 }
@@ -540,11 +558,58 @@ export interface ImportGroupRequest {
   posted_within_days?: number;
 }
 
+/** Corpo de POST /api/imports/classify (exatamente um dos dois). */
+export type ClassifyRequest = { inputs: string[] } | { text: string };
+
+export interface ClassifiedLink {
+  shortcode: string;
+  url: string;
+  kind: "p" | "reel";
+}
+
+export interface ClassifyResult {
+  profiles: string[];
+  links: ClassifiedLink[];
+  invalid: InvalidProfileEntry[];
+  duplicates: number;
+}
+
+/** Corpo de POST /api/imports/start (importação unificada). */
+export interface UnifiedImportRequest {
+  inputs: string[];
+  media: MediaChoice;
+  /** POR PERFIL; null = todas (exige confirm_all). */
+  limit: number | null;
+  confirm_all: boolean;
+  /** Só perfis; chaves omitidas sem filtro. */
+  posted_within_days?: number;
+  min_views?: number;
+  max_views?: number;
+  post_processing: "none" | "preset" | "edit";
+  preset_id?: number;
+  edit?: EditSettings;
+}
+
+export interface UnifiedImportResult {
+  batch_ids: number[];
+  group_id: number | null;
+  links_batch_id: number | null;
+  profiles: number;
+  links: number;
+  invalid: InvalidProfileEntry[];
+  duplicates: number;
+  skipped?: SkippedProfile[];
+  /** Avisos sem erro (ex.: filtros de perfil ignorados nas publicações por link). Ausente em backends antigos. */
+  notes?: string[];
+}
+
 export type MediaView = "all" | "originals" | "processed";
 
 export interface MediaQuery {
   view?: MediaView;
   media_type?: MediaType;
+  /** "cover" = só capas; omitido = todas. */
+  role?: MediaRole;
   profile?: string;
   q?: string;
   limit?: number;
@@ -556,6 +621,7 @@ export interface MediaQuery {
 export interface ProcessByFilterRequest {
   view: MediaView;
   media_type?: MediaType;
+  role?: MediaRole;
   q?: string;
   profile?: string;
   preset_id: number;
@@ -620,6 +686,7 @@ export interface ExportJob extends LastExport {
 export interface ExportFilter {
   view: MediaView;
   media_type?: MediaType;
+  role?: MediaRole;
   q?: string;
   profile?: string;
 }

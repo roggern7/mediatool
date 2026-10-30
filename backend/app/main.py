@@ -199,7 +199,9 @@ def create_app(
     # O upload de vídeo local tem teto próprio (max_download_bytes) e lê o corpo em streaming.
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES, exempt_paths=(UPLOAD_PATH,))
     # Origens do Vite (5173) só em modo de desenvolvimento; em produção só o próprio backend.
-    install_security(app, port=settings.port, cors_origins=DEFAULT_CORS_ORIGINS if settings.dev_mode else ())
+    # Extensão do Chrome: só o ID fixo da nossa + IDs extras de MEDIA_TOOL_EXTENSION_IDS (docs/EXTENSION.md).
+    install_security(app, port=settings.port, cors_origins=DEFAULT_CORS_ORIGINS if settings.dev_mode else (),
+                     extension_ids=settings.env.get("MEDIA_TOOL_EXTENSION_IDS"))
     app.include_router(api_router)
     _mount_frontend(app, settings.frontend_dist)
     return app

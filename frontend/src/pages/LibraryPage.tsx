@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { ExternalLink, FolderOpen, Trash2, Wand2, X } from "lucide-react";
 import { api, messageOf } from "../api/client";
-import type { ExportContent, Media, MediaType, MediaView, Preset, Rendition } from "../api/types";
+import type { ExportContent, Media, MediaView, Preset, Rendition } from "../api/types";
+import { LIBRARY_TYPE_FILTERS, isCover, libraryTypeQuery, mediaKindLabel, type LibraryTypeFilter } from "../lib/importCovers";
 import { Link } from "../components/Layout";
 import { ExportContentSelect, ExportStatus } from "../components/ExportPanel";
 import { PresetPickerDialog } from "../components/PresetPicker";
@@ -54,7 +55,7 @@ const VIEWS: { value: MediaView; label: string }[] = [
   { value: "processed", label: "Processados" },
 ];
 
-type TypeFilter = "all" | MediaType;
+type TypeFilter = LibraryTypeFilter;
 
 type Dialog =
   | { kind: "process"; mediaIds: number[]; reprocess: boolean }
@@ -94,7 +95,7 @@ export function LibraryPage() {
   const stack = stackFor(pager, scope);
   const cursor = currentCursor(stack);
   const onFirstPage = stack.length === 1;
-  const filterQuery = { view, media_type: typeFilter === "all" ? undefined : typeFilter, q: q || undefined };
+  const filterQuery = { view, ...libraryTypeQuery(typeFilter), q: q || undefined };
   const list = useQuery(
     `media:${scope}:${JSON.stringify(cursor)}`,
     async () => {
@@ -277,11 +278,7 @@ export function LibraryPage() {
       <div className="toolbar">
         <div className="seg" role="group" aria-label="Tipo">
           {(
-            [
-              ["all", "Todos"],
-              ["video", "Vídeos"],
-              ["image", "Imagens"],
-            ] as const
+            LIBRARY_TYPE_FILTERS
           ).map(([value, label]) => (
             <button
               key={value}
@@ -491,7 +488,9 @@ export function LibraryPage() {
                           <td>
                             <Thumb src={m.thumbnail_url} mediaType={m.media_type} size={36} />
                           </td>
-                          <td className="muted col-opt">{m.media_type === "video" ? "Vídeo" : "Imagem"}</td>
+                          <td className="muted col-opt">
+                            {isCover(m) ? <Pill tone="accent">Capa</Pill> : mediaKindLabel(m)}
+                          </td>
                           <td className="cell-trunc" style={{ maxWidth: 160 }} title={m.source_profile ?? undefined}>
                             {m.source_profile ? `@${m.source_profile}` : "-"}
                           </td>
@@ -756,7 +755,7 @@ function MediaDetail({
 
       <dl className="kv small">
         <dt>Tipo</dt>
-        <dd>{media.media_type === "video" ? "Vídeo" : "Imagem"}</dd>
+        <dd>{mediaKindLabel(media)}</dd>
         {media.source_post_id ? (
           <>
             <dt>Post</dt>

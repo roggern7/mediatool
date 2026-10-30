@@ -401,7 +401,8 @@ Job = { id, batch_id|null, media_id|null, rendition_id|null, kind, preset_id|nul
   started_at|null, finished_at|null, updated_at, elapsed_seconds|null }
 Batch = { id, source, source_profile|null, content_type|null, requested_limit|null, preset_id|null, preset_name|null,
   process, status, found, error_code|null, error_message|null, created_at, updated_at, finished_at|null,
-  progress: {found, downloaded, processed, skipped, failed, pending, active}, counts: {<status>: n}, jobs?: Job[],
+  progress: {found, downloaded, processed, skipped, failed, pending, active, duplicates, filtered /*seção 8.6*/},
+  counts: {<status>: n}, jobs?: Job[],
   listing_state: "pending"|"running"|"waiting_backpressure"|"waiting_rate_limit"|"paused"|"needs_attention"|"done"|
     "cancelled"|null,
   rate_limit_resume_at: string|null /*ISO UTC*/, rate_limit_pages_used: number|null, rate_limit_pages_max: number|null,
@@ -553,7 +554,8 @@ ImportGroup = { id, content_type, requested_limit: number|null /*POR PERFIL*/, p
   profiles: { total, waiting, active, completed, attention, failed, cancelled } /*os seis somam total*/,
   profile_end_count: number /*filhos que chegaram ao fim REAL do perfil (listing_end = profile_end, sem os do período)*/,
   period_end_count: number /*filhos cuja listagem terminou pelo corte do período de postagem (listing_end = period_end)*/,
-  progress: { found, downloaded, processed, skipped, failed, pending, active } /*soma das mídias dos filhos*/,
+  progress: { found, downloaded, processed, skipped, failed, pending, active, duplicates, filtered }
+    /*soma das mídias dos filhos; duplicates/filtered: seção 8.6*/,
   listing_dropped_total: number /*soma de listing_dropped definitivo dos filhos; o detalhe fica em cada filho*/,
   views_filter: ViewsFilter|null /*soma dos filhos (com a página aberta de cada um); null = sem filtro*/,
   last_export: LastExport|null /*última exportação para pasta concluída do grupo inteiro; seção 8.2*/ }
@@ -1443,6 +1445,99 @@ POST /api/library/uploads   (multipart/form-data; campo file)
   também responde 507 `disk_full` (sem `free_bytes`) e o temporário é apagado.
 - A vaga de um envio só é liberada quando a análise termina (SHA-256, ffprobe, integridade), mesmo se o cliente
   desistiu nessa fase; o painel trata 429 tentando de novo após 1, 2, 4, 8 e 15 s.
+
+### Extensão do Chrome (`/api/ext/*`)
+
+Visão geral, instalação e permissões em `docs/EXTENSION.md`. Segurança (core/security.py + app/api/extension.py):
+origem `chrome-extension://<32 letras a-p>` só em `/api/ext/*` (fora dela: 403 `origin_not_allowed` em qualquer
+método, inclusive nas rotas de gerenciamento abaixo); CORS e preflight `OPTIONS` (204, com
+`Access-Control-Allow-Private-Network: true` quando pedido) só para essa origem e só em `/api/ext/*`; demais origens
+que não sejam do app: 403. Token obrigatório (`Authorization: Bearer <token>` ou `X-Media-Tool-Token`) em todas as
+rotas, exceto `POST /api/ext/pair`; ausente/inválido/revogado: 401 `extension_unauthorized`. Mutações continuam
+exigindo `X-Media-Tool-Client`. Sem migração: `app_state.extension_pairing` (hash do código, validade, tentativas,
+bloqueio) e `app_state.extension_devices` (id, nome, `sha256(token)`, `created_at`, `last_used_at`).
+
+- `POST /api/ext/pair` `{code (1..32), device_name (1..60)}` -> 200 `{token, device_id}` (`Cache-Control: no-store`;
+  única resposta com o token). Código: 8 caracteres de `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, maiúsculas/minúsculas,
+  espaços e hífen ignorados; uso único; 5 min. Erros: 400 `pairing_code_invalid`, 400 `pairing_code_expired`
+  (expirado, já usado ou nenhum gerado), 429 `pairing_locked` (5 erros seguidos: bloqueio de 5 min e o código vigente
+  deixa de valer; gerar um código novo libera).
+- `GET /api/ext/status` -> `{ok: true, app: {version}, instagram: {session_configured, paused, pause_reason,
+  paused_until, message}, defaults: {media, limit, posted_within_days, post_processing}}`. `message`: texto do app para
+  pausa vigente ou sessão ausente; null se nada impede.
+- `POST /api/ext/page-info` `{url (1..2048)}` -> `{kind: "post"|"reel"|"profile"|"other", shortcode?, username?,
+  canonical_url?}`, sem rede. `/p/` -> post; `/reel/`, `/reels/`, `/tv/` -> reel (`/tv/` tem `canonical_url` em
+  `/p/<código>/`); `/<usuario>/p/<código>/` traz `username`; perfil: `/<usuario>/`, `/<usuario>/reels/`,
+  `/<usuario>/tagged/`; o resto é `other`.
+- `POST /api/ext/post-owner` `{url}` -> `{username, shortcode}`. Com o @ na URL, sem consulta; senão `resolve_post`
+  pelo downloader do app (portão, prazo e trava da prévia de perfil). Erros: 422 `invalid_input` (não é publicação),
+  404 `owner_not_found`, 409 `instagram_paused`/`profile_preview_in_progress`, 504 `timeout` e os códigos do
+  Instagram com os mesmos status de `POST /api/instagram/profile`.
+- `POST /api/ext/start` -> 202: mesmo corpo (`UnifiedImportRequest`) e mesma resposta de `POST /api/imports/start`
+  (chama `import_service.start_unified`), mais `open_url` (`http://127.0.0.1:<porta>/fila?lote=<id>` para um lote;
+  `/` para grupo ou vários lotes). Mesmos erros.
+- `GET /api/ext/progress?batch_ids=1,2&group_id=3` (até 50 lotes; pelo menos um dos dois; 422 `validation_error`) ->
+  `{batches: [{id, status, profile, found, downloaded, duplicates, filtered, skipped, failed, active, finished,
+  error_message, open_url}], group: {id, status, profiles, found, downloaded, duplicates, filtered, skipped, failed,
+  active, finished, open_url} | null, finished, missing: [ids não encontrados], open_url, library_url}`.
+
+Gerenciamento (só pelo app, guarda atual; origem de extensão recebe 403):
+- `POST /api/settings/extension/pairing-code` -> `{code, expires_at, ttl_seconds}` (`Cache-Control: no-store`;
+  substitui o código anterior e libera o bloqueio de tentativas).
+- `GET /api/settings/extension/devices` -> `{items: [{id, name, created_at, last_used_at}]}` (sem hash).
+- `DELETE /api/settings/extension/devices/{id}` (`id`: 16 hex) -> `{items}`; 404 `extension_device_not_found`. O token
+  revogado recebe 401 na próxima chamada.
+
+### 8.6 Importação unificada (publicações e/ou perfis)
+
+Builder A. Migration **0021** (aditiva). Serviço: `app.services.import_service.start_unified(ctx, req)` e
+`classify_inputs(entries)`; o endpoint da extensão (`/api/ext/start`) chama `start_unified` com o mesmo modelo.
+
+- `POST /api/imports/classify` (200, sem efeitos, sem Instagram): corpo `inputs` (lista) ou `text` (um dos dois).
+  Separadores: quebra de linha, vírgula e ponto e vírgula. Espaço só separa quando TODOS os pedaços do trecho são URLs
+  do Instagram ou `@usuario`; senão o trecho inteiro é UMA entrada inválida (motivo "entrada com espaço: use uma por
+  linha"; ex.: `lixo com espaço` nunca vira os perfis "lixo" e "com"). Resposta `{profiles: [usuario], links: [{shortcode,
+  url, kind: "p"|"reel"}], invalid: [{entry, reason}], duplicates}`. Publicação: `/p/`, `/reel/`, `/reels/` e `/tv/`
+  (só aqui; vira `/p/<código>/`). Perfil: URL do perfil, `@usuario` ou `usuario`. Tetos: 10.000 perfis
+  (`too_many_profiles`) e 500 publicações (`too_many_links`).
+- `POST /api/imports/start` (202): `inputs`|`text`, `media` ("videos" padrão | "all" | "covers"), `limit` (POR PERFIL,
+  1..1.000.000; `null` = todas e exige `confirm_all: true` quando há perfil, senão 422 `confirm_all_required`),
+  `posted_within_days`, `min_views`, `max_views` (>= mínimo; só perfis; com `media` "all" E perfis na entrada = 422
+  `views_filter_media`; só links: aceito, filtros ignorados com aviso em `notes`),
+  `post_processing` ("none"|"preset"|"edit"), `preset_id` (só com "preset"), `edit` (obrigatório com "edit").
+  1 perfil -> lote avulso (`create_import`); 2+ perfis -> grupo (`create_import_group`); publicações -> um lote de links
+  (`create_import_links`). Tudo é conferido antes de criar o primeiro lote (sessão 409 `session_missing`, pausa,
+  provider, preset, edição). A criação do lote/grupo de perfis e do lote de links é UMA transação: falha na 2a
+  criação desfaz a 1a. Resposta `{batch_ids, group_id, links_batch_id, profiles, links, invalid, duplicates,
+  skipped, notes}` (`skipped`: perfis do grupo já em andamento; `notes`: avisos sem erro, ex.: filtros de perfil
+  ignorados nas publicações por link; campos extras opcionais). Período e visualizações valem só para perfis
+  (ignorados nos links). "Somente capas" só baixa (o pós-processamento não se aplica às capas).
+- Tipo de mídia: "videos" -> `content_type = 'videos'` (Reels e qualquer vídeo, inclusive de carrossel); "all" ->
+  `'all'`; "covers" -> `'videos'` + `batches.media_role = 'cover'`. Nos lotes de links novos o tipo vale sobre as mídias
+  resolvidas (itens de outro tipo contam em `filtered`); lotes de links antigos (`all`) continuam baixando tudo.
+  "Somente capas" e o gallery-dl: 422 `not_supported_by_provider` (só o método web entrega a capa sozinha).
+- Capas (`media.role = 'cover'`): o job (`jobs.media_role = 'cover'`) baixa só `thumbnail_url` (a maior capa do vídeo)
+  como `media_type = 'image'`; o vídeo nunca é baixado. Dedup por origem inclui o papel (`ux_media_source` com `role`):
+  a capa nunca é duplicata do vídeo (e vice-versa); sha256 continua único. URL da capa expirada: a renovação de sempre
+  (página ou publicação) grava a capa renovada como `media_url` do job.
+- Capa de lote por PERFIL: antes de baixar, o job lê a publicação UMA vez (`resolve_post`: documento público anônimo
+  e, só se restrita, 2a tentativa com a sessão salva; pelo portão e pelo teto por hora) e usa a `thumbnail_url` dela
+  (a maior; a da listagem vem menor, ex.: 640x1136 contra 1080x1920). Falha, restrição ou pausa: fica a capa da
+  listagem, com log sem URL; erro do Instagram aplica a pausa de sempre, sem nova tentativa. Lotes por link não fazem
+  requisição extra. Imagens (capas e fotos) ganham `width`/`height` pelo ffprobe no download (opcional; sem ffprobe
+  ficam NULL).
+- Primeira página vazia (migration **0022**, `batches.listing_empty_first_page`): a 1a página da listagem de um perfil
+  com 0 publicações e sem próxima página encerra o lote com `listing_end: "empty_first_page"` (não `profile_end`) e
+  `error_message` "O Instagram não devolveu nenhuma publicação deste perfil agora (perfil sem posts, privado ou limite
+  temporário). Tente de novo mais tarde." (`error_code` null). Não conta em `profile_end_count` do grupo.
+- Lote/grupo: `media` ("videos"|"all"|"covers"; null em lotes antigos de outro conteúdo), `progress.duplicates`
+  (jobs `is_duplicate`; congelado em `final_duplicates`) e `progress.filtered` (abaixo/acima/sem contagem/fora do
+  período + `listing_dropped_reasons.expected.content_filter`). `views_filter` ganha `max_views` e `above`.
+- Biblioteca: `GET /api/media?role=cover|original` (omitido = todas), o mesmo `role` no filtro da exportação
+  (`LibraryFilter`) e em `process-by-filter`; `MediaOut.role`. A view "Originais" continua sendo "sem versão
+  processada" (capas entram nela). A página Editar continua só com vídeos (`media_type = 'video'`).
+- Exportação: o MESMO fluxo (lote, grupo, biblioteca por seleção ou filtro; pasta ou ZIP). Capa = original; o nome
+  ganha `_capa` antes da extensão (`perfil_AAAA-MM-DD_codigo[_n]_capa.jpg`), na pasta e no ZIP (plano, único).
 
 ## 9. Processor (`media_processor`)
 

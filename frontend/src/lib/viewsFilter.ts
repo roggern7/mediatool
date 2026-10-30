@@ -7,15 +7,57 @@ import { formatCount } from "./format";
 /**
  * Interruptor ÚNICO do filtro de visualizações na interface (o backend tem o seu: import_service.MIN_VIEWS_ENABLED).
  * Desligado: o campo some da tela Importar e os contadores de visualizações não aparecem; o período continua.
- * A paginação da aba Reels sem login recebeu 429 no teste real (2026-10-29).
+ * LIGADO desde 2026-10-29: a aba Reels sem login paginou 5 páginas seguidas no teste real, sem 429.
  */
-export const VIEWS_FILTER_ENABLED = false;
+export const VIEWS_FILTER_ENABLED = true;
 
 /** O que a tela mostra de `views_filter`: com o filtro de visualizações desligado, só o período (ou nada). */
 export function visibleFilter(vf: ViewsFilter | null | undefined): ViewsFilter | null {
   if (!vf) return null;
   if (VIEWS_FILTER_ENABLED) return vf;
-  return typeof vf.posted_within_days === "number" ? { ...vf, min_views: null } : null;
+  return typeof vf.posted_within_days === "number" ? { ...vf, min_views: null, max_views: null } : null;
+}
+
+/** Valores predefinidos do mínimo e do máximo na importação unificada (além do personalizado). */
+export const VIEWS_PRESETS = [1_000, 10_000, 50_000, 100_000, 500_000, 1_000_000] as const;
+/** Valor do seletor de máximo: "off" (Sem máximo), um atalho ou "custom". */
+export type MaxViewsMode = MinViewsMode;
+
+export type ViewsRangeChoice =
+  | { ok: true; minViews: number | null; maxViews: number | null }
+  | { ok: false; error: string };
+
+/** "1 mil", "10 mil", "1 mi": rótulo curto dos atalhos. */
+export function viewsPresetLabel(n: number): string {
+  if (n >= 1_000_000 && n % 1_000_000 === 0) return `${formatCount(n / 1_000_000)} mi`;
+  if (n >= 1_000 && n % 1_000 === 0) return `${formatCount(n / 1_000)} mil`;
+  return formatCount(n);
+}
+
+/**
+ * Mínimo e máximo enviados à API (importação unificada). Só valem com "Somente vídeos" ou "Somente capas"
+ * (`allowed`); com "Todas as mídias" nenhum vai no corpo. O máximo precisa ser maior ou igual ao mínimo.
+ */
+export function resolveViewsRange(
+  allowed: boolean,
+  min: { mode: MinViewsMode; text: string },
+  max: { mode: MaxViewsMode; text: string },
+): ViewsRangeChoice {
+  if (!allowed || !VIEWS_FILTER_ENABLED) return { ok: true, minViews: null, maxViews: null };
+  const one = (mode: MinViewsMode, text: string, label: string): { ok: true; n: number | null } | { ok: false; error: string } => {
+    if (mode === "off") return { ok: true, n: null };
+    if (mode !== "custom") return { ok: true, n: Number(mode) };
+    const n = parseMinViewsText(text);
+    return n === null ? { ok: false, error: `Informe um número inteiro de visualizações a partir de 1 no ${label}.` } : { ok: true, n };
+  };
+  const lo = one(min.mode, min.text, "mínimo");
+  if (!lo.ok) return lo;
+  const hi = one(max.mode, max.text, "máximo");
+  if (!hi.ok) return hi;
+  if (lo.n !== null && hi.n !== null && hi.n < lo.n) {
+    return { ok: false, error: "O máximo de visualizações precisa ser maior ou igual ao mínimo." };
+  }
+  return { ok: true, minViews: lo.n, maxViews: hi.n };
 }
 
 /** Atalhos do seletor (o "Personalizado…" aceita qualquer inteiro de 1 a MAX_MIN_VIEWS). */
@@ -67,16 +109,20 @@ export function resolveMinViews(content: ContentType, mode: MinViewsMode, text: 
 export function viewsFilterText(vf: ViewsFilter | null | undefined, downloaded?: number | null): string | null {
   if (!vf) return null;
   const views = typeof vf.min_views === "number";
+  const maxViews = typeof vf.max_views === "number" ? vf.max_views : null;
   const days = typeof vf.posted_within_days === "number" ? vf.posted_within_days : null;
   const parts = [
     `${formatCount(vf.analyzed)} ${vf.analyzed === 1 ? "analisado" : "analisados"}`,
     `${formatCount(vf.approved)} ${vf.approved === 1 ? "aprovado" : "aprovados"}`,
   ];
   if (typeof downloaded === "number") parts.push(`${formatCount(downloaded)} ${downloaded === 1 ? "baixado" : "baixados"}`);
-  if (views) parts.push(`${formatCount(vf.below)} abaixo do mínimo`, `${formatCount(vf.no_count)} sem contagem disponível`);
+  if (views) parts.push(`${formatCount(vf.below)} abaixo do mínimo`);
+  if (maxViews !== null) parts.push(`${formatCount(vf.above ?? 0)} acima do máximo`);
+  if (views || maxViews !== null) parts.push(`${formatCount(vf.no_count)} sem contagem disponível`);
   if (days !== null) parts.push(`${formatCount(vf.out_of_period ?? 0)} fora do período`);
   const labels = [
     ...(views ? [`Mín. ${formatCount(vf.min_views as number)} visualizações`] : []),
+    ...(maxViews !== null ? [`Máx. ${formatCount(maxViews)} visualizações`] : []),
     ...(days !== null ? [periodSummary(days)] : []),
   ];
   return `${labels.join(" • ")}: ${parts.join(" • ")}`;

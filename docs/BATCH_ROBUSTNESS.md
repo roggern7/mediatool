@@ -828,3 +828,25 @@ mas nunca acontece sozinho depois do download.
   suas renditions continuam lendo e exibindo igual.
 - Testes: `backend/tests/test_download_only.py`; escala offline de 1.000 e 10.000 itens em
   `backend/tests/scale/test_scale.py` (cenário `download_only`, marcado `slow`).
+
+## 11. Importação unificada: capas, máximo de visualizações e contadores (migration 0021)
+
+- Capas: lote "Somente capas" (`batches.media_role = 'cover'`) lista como "Somente vídeos" e cria jobs de capa
+  (`jobs.media_role = 'cover'`, `media_type = 'image'`, `media_url` = a capa). Dedup por origem inclui o papel; um job
+  de capa só espera (`duplicate_in_flight`) outro job de capa. Renovação de URL expirada: o mecanismo existente
+  (`refresh_page`/`resolve_post`) grava a capa renovada. Capa nunca é processada nem editada.
+- Filtro de visualizações religado, com mínimo e/ou máximo gravados no lote e no grupo (`min_views`, `max_views`).
+  Cada trecho da listagem (retomada, reinício do app, "retomar listagem") lê os valores GRAVADOS. Vereditos por página
+  no mesmo JSON da 0017 (`above` só nos lotes com máximo). "Sem contagem" nunca é baixado com o filtro ligado. O portão
+  de requisições, o teto por hora, a pausa em 429 e o tratamento de formato inesperado do `reels_tab.py`/`provider.py`
+  não mudaram.
+- Capa maior (lote por perfil): o job de capa lê a publicação UMA vez antes de baixar (`_largest_cover`, pelo portão
+  e teto) e usa a capa dela; erro/restrição/pausa: capa da listagem e log sem URL; erro do Instagram aplica a pausa de
+  sempre, sem repetir. Lote por link não faz requisição extra. Imagens em download puro ganham só largura/altura por
+  um ffprobe opcional (exceção à seção 10; nunca miniatura nem FFmpeg).
+- Primeira página vazia (migration 0022): 1a página com 0 publicações e sem próxima encerra o lote como antes, mas com
+  `listing_empty_first_page = 1` (API: `listing_end = "empty_first_page"`) e mensagem própria no lote, não como fim do
+  perfil. A linha de log "filtros:" usa os mesmos totais do `views_filter` da API (inclui "acima do máximo").
+- Contadores: `progress.duplicates` (mídias já existentes, por origem ou sha256; congelado em `final_duplicates`, NULL
+  = 0 nos lotes encerrados antes da 0021) e `progress.filtered` (abaixo, acima, sem contagem, fora do período e itens
+  de outro tipo, `expected.content_filter`, contados por página na listagem e por publicação nos links).

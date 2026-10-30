@@ -106,17 +106,16 @@ describe("período de postagem: contadores", () => {
   });
 });
 
-describe("filtro de visualizações desligado na interface", () => {
-  it("o interruptor está desligado e a tela só mostra o período", () => {
-    expect(VIEWS_FILTER_ENABLED).toBe(false);
+describe("filtro de visualizações ligado na interface", () => {
+  it("o interruptor está ligado (2026-10-29) e a tela mostra visualizações e período", () => {
+    expect(VIEWS_FILTER_ENABLED).toBe(true);
     const onlyViews: ViewsFilter = { min_views: 500_000, analyzed: 5, approved: 1, below: 2, no_count: 2, pending: 0 };
-    expect(visibleFilter(onlyViews)).toBeNull();
-    expect(viewsFilterText(visibleFilter(onlyViews))).toBeNull();
-    const both: ViewsFilter = { ...onlyViews, posted_within_days: 30, out_of_period: 4, analyzed: 9 };
-    expect(visibleFilter(both)?.min_views).toBeNull();
-    expect(viewsFilterText(visibleFilter(both))).toBe(
-      "Últimos 30 dias: 9 analisados • 1 aprovado • 4 fora do período",
+    expect(visibleFilter(onlyViews)).toBe(onlyViews);
+    expect(viewsFilterText(visibleFilter(onlyViews))).toBe(
+      "Mín. 500.000 visualizações: 5 analisados • 1 aprovado • 2 abaixo do mínimo • 2 sem contagem disponível",
     );
+    const both: ViewsFilter = { ...onlyViews, posted_within_days: 30, out_of_period: 4, analyzed: 9 };
+    expect(visibleFilter(both)?.min_views).toBe(500_000);
     expect(visibleFilter(null)).toBeNull();
   });
 });

@@ -193,7 +193,7 @@ def test_group_creates_one_child_per_profile_with_quantity_per_profile(harness_f
     assert group["profiles"] == {"total": 3, "waiting": 0, "active": 0, "completed": 3, "attention": 0, "failed": 0,
                                  "cancelled": 0}
     assert group["progress"] == {"found": 24, "downloaded": 24, "processed": 0, "skipped": 0, "failed": 0,
-                                 "pending": 0, "active": 0}
+                                 "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
     assert group["profile_end_count"] == 1 and group["listing_dropped_total"] == 0
 
     listing = h.client.get("/api/import-groups").json()
@@ -578,8 +578,8 @@ def test_migration_0012_over_schema_0011_with_data_keeps_old_batches(tmp_path, h
                    " listing_dropped_unexpected = 2 WHERE id = ?", (batch_id,))
         before = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
         # 0013 (exportações) e 0014 (links) só criam tabelas/colunas; 0015 só mexe no preset Anti-duplicidade;
-        # 0016 a 0019 só acrescentam colunas anuláveis
-        assert apply_migrations(db) == [12, 13, 14, 15, 16, 17, 18, 19, 20]
+        # 0016 a 0019 só acrescentam colunas anuláveis; 0021 só colunas com padrão (e troca de índice)
+        assert apply_migrations(db) == [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
         after = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
         assert {k: after[k] for k in before} == before, "nenhum dado antigo reescrito"
         assert (after["group_id"], after["group_position"], after["listing_end"]) == (None, None, None)

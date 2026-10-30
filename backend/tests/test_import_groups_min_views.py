@@ -66,7 +66,7 @@ def test_valid_min_views_is_stored_on_group_and_children(harness, content):
     assert single.status_code == 202
     assert single.json()["views_filter"] == {"min_views": MIN, "posted_within_days": None, "posted_after": None,
                                              "analyzed": 0, "approved": 0, "below": 0, "no_count": 0,
-                                             "out_of_period": 0, "pending": 0}
+                                             "out_of_period": 0, "pending": 0, "max_views": None, "above": 0}
     group = post_group(harness, content_type=content, min_views=1).json()
     assert group["group"]["views_filter"]["min_views"] == 1
     assert [child["views_filter"]["min_views"] for child in group["children"]] == [1, 1]

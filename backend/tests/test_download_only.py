@@ -91,7 +91,7 @@ def test_download_only_completes_right_after_original_is_saved_hashed_and_regist
     result = h.batch(batch)
     assert result["status"] == "completed" and result["process"] is False
     assert result["progress"] == {"found": 30, "downloaded": 30, "processed": 0, "skipped": 0, "failed": 0,
-                                  "pending": 0, "active": 0}
+                                  "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
     # Nenhum estado intermediário de espera do FFmpeg: o job vai de `downloading` direto a `completed`.
     assert set(seen) == {"downloading", "completed"}, sorted(set(seen))
     assert h.ctx.db.scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'process'") == 0
@@ -294,7 +294,7 @@ def test_processing_later_works_on_download_only_media_and_old_batches_read_the_
     assert h.ctx.db.scalar("SELECT COUNT(*) FROM renditions") == 7
 
 
-# ---- separação: download puro (zero ffprobe/FFmpeg) x análise opcional -------------------------------------------
+# ---- separação: download puro (zero FFmpeg; ffprobe só para as dimensões de imagens) x análise opcional ----------
 class CountingProcessor(FakeProcessor):
     """FakeProcessor (FFmpeg/ffprobe presentes e funcionando) que conta cada chamada de análise/processamento."""
 
@@ -317,18 +317,22 @@ def test_pure_download_with_working_ffmpeg_makes_zero_probe_thumbnail_and_proces
     assert _download_pool(h) == 3
     result = h.batch(batch)
     assert result["status"] == "completed" and result["progress"]["failed"] == 0
-    assert proc.probes == [] and proc.thumbnails == [] and proc.processed == []
+    # Só as 2 imagens passam pelo ffprobe (dimensões); o vídeo, nenhum. Nada de miniatura nem processamento.
+    assert len(proc.probes) == 2 and all(path.suffix == ".jpg" for path in proc.probes)
+    assert proc.thumbnails == [] and proc.processed == []
     for job in result["jobs"]:
         media = h.ctx.media.get(job["media_id"])
         assert job["status"] == "completed" and media["media_type"] == job["media_type"]
-        assert media["width"] is None and media["height"] is None and media["duration"] is None
+        image = job["media_type"] == "image"
+        assert (media["width"], media["height"]) == ((64, 48) if image else (None, None))
+        assert media["duration"] is None and media["fps"] is None and media["has_audio"] is None
         assert media["thumbnail_path"] is None
         assert media["original_path"].endswith(".mp4" if job["media_type"] == "video" else ".jpg")
         path = h.ctx.storage.resolve(media["original_path"])
         assert sha256_file(path) == media["original_sha256"]
         # API/UI com campos nulos: serializa sem erro e sem miniatura
         body = h.client.get(f"/api/media/{media['id']}").json()
-        assert body["width"] is None and body["thumbnail_url"] is None
+        assert body["width"] == media["width"] and body["thumbnail_url"] is None
         assert h.client.get(f"/api/media/{media['id']}/thumbnail").status_code == 404
         assert h.client.get(f"/api/media/{media['id']}/original").status_code == 200
     assert h.client.get("/api/media").status_code == 200
@@ -345,7 +349,7 @@ def test_pure_download_duplicate_by_sha256_makes_no_analysis_calls(harness_facto
     assert _download_pool(h) == 2
     assert h.ctx.db.scalar("SELECT COUNT(*) FROM media") == 1
     assert h.batch(batch)["progress"]["skipped"] == 1
-    assert proc.probes == [] and proc.thumbnails == []
+    assert len(proc.probes) == 1 and proc.thumbnails == []   # só as dimensões da imagem registrada; a duplicata nada
 
 
 def _pure_download(harness_factory, content):
@@ -354,7 +358,8 @@ def _pure_download(harness_factory, content):
     h = harness_factory(downloader=dl, processor=proc)
     batch = h.import_profile(limit=10)["id"]
     h.run_all()
-    assert proc.probes == [] and proc.thumbnails == []
+    # Item "imagem" registrado: um ffprobe só para as dimensões (o fake não lê estes bytes e a imagem fica sem elas).
+    assert len(proc.probes) == (1 if h.ctx.db.scalar("SELECT COUNT(*) FROM media") else 0) and proc.thumbnails == []
     return h, h.batch(batch)["jobs"][0]
 
 
@@ -393,9 +398,9 @@ def test_optional_analysis_after_pure_download_fills_metadata_and_thumbnail(harn
     h = harness_factory(downloader=dl, processor=proc)
     h.import_profile(limit=10)
     h.run_all()
-    assert proc.probes == [] and proc.thumbnails == []
-    rows = h.ctx.db.fetchall("SELECT id FROM media ORDER BY id")
-    assert all(h.ctx.media.get(r["id"])["width"] is None for r in rows)
+    assert len(proc.probes) == 1 and proc.thumbnails == []   # só as dimensões da imagem
+    rows = h.ctx.db.fetchall("SELECT id, media_type FROM media ORDER BY id")
+    assert all((h.ctx.media.get(r["id"])["width"] is None) == (r["media_type"] == "video") for r in rows)
     queued = h.client.post("/api/media/process-by-filter", json={"view": "all", "preset_id": _preset(h)})
     assert queued.status_code == 202, queued.text
     h.run_jobs()
@@ -423,7 +428,8 @@ def test_processing_after_pure_download_without_ffprobe_fails_as_before(harness_
     job = h.client.get(f"/api/jobs/{queued.json()['id']}").json()
     assert job["status"] == "failed" and job["error_code"] == "ffmpeg_not_found"
     media = h.ctx.media.get(media_id)
-    assert media["width"] is None and media["thumbnail_path"] is None
+    # As dimensões vieram no download (imagem); a miniatura não.
+    assert (media["width"], media["height"]) == (64, 48) and media["thumbnail_path"] is None
     assert h.ctx.db.scalar("SELECT COUNT(*) FROM renditions") == 0
 
 

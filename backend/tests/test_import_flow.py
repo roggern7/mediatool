@@ -180,7 +180,7 @@ def test_full_import_with_real_threads(harness_factory):
     assert wait_until(lambda: harness.batch(batch["id"])["status"] == "completed", timeout=20)
     result = harness.batch(batch["id"])
     assert result["progress"] == {"found": 6, "downloaded": 6, "processed": 6, "skipped": 0, "failed": 0,
-                                  "pending": 0, "active": 0}
+                                  "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
 
 
 def test_without_min_views_the_import_is_identical(harness_factory, caplog):

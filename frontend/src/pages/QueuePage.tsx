@@ -23,6 +23,7 @@ import {
 } from "../lib/labels";
 import { batchIdFromSearch } from "../lib/batchRoute";
 import { linksSummaryText } from "../lib/importLinks";
+import { progressExtrasText } from "../lib/importUnified";
 import {
   FIRST_PAGE,
   type PageCursor,
@@ -472,13 +473,14 @@ function BatchHeader({
       {batch ? (
         <div className="muted small" style={{ marginTop: 6 }}>
           {isLinksBatch(batch) && batch.links ? `${linksSummaryText(batch.links)} · ` : ""}
-          {isDownloadOnly(batch) ? "Somente originais · " : ""}
+          {isDownloadOnly(batch) ? (batch.media === "covers" ? "Somente capas · " : "Somente originais · ") : ""}
           {BATCH_COUNTS.map(
             ({ label, statuses }) =>
               `${isDownloadOnly(batch) && label === "Processando" ? "Baixando" : label}: ${formatCount(
                 statuses.reduce((sum, s) => sum + (batch.counts[s] ?? 0), 0),
               )}`,
           ).join(" · ")}
+          {progressExtrasText(batch.progress) ? ` · ${progressExtrasText(batch.progress)}` : ""}
           {listingDroppedSuffix(batch)}
         </div>
       ) : error ? (

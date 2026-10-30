@@ -208,16 +208,37 @@ def parse_post_document(html: str, shortcode: str) -> tuple[Mapping | None, Post
 # (``xdt_api__v1__clips__home__connection_v2``, com OUTRAS publicações): nunca é lido. Não há ``xig_polaris_media``,
 # ``if_not_gated_logged_out`` nem ``gating_ruling`` nessa página.
 SESSION_ROOT_FIELD = "xig_fetch_media"          # observado com a sessão
+# VERIFICADO no Instagram real (2026-10-29, sessão do dono): ``/p/<código>/`` aberto com a sessão (foto e carrossel)
+# NÃO traz ``xig_fetch_media``; traz, no mesmo caminho ``RelayPrefetchedStreamCache`` -> ``__bbox.result.data``, o
+# campo abaixo com ``items`` = lista de nós v1 (``code``, ``media_type`` inteiro, ``carousel_media`` lista no
+# carrossel / null na foto, ``carousel_media_count``, ``image_versions2``, ``video_versions`` null na foto,
+# ``taken_at``, ``user``...). Só o item com ``code`` EXATAMENTE igual ao pedido vira mídia.
+SESSION_POST_FIELD = "xdt_api__v1__media__shortcode__web_info"   # observado com a sessão (/p/)
+
+
+def _web_info_items(found: list[tuple[str | None, dict | None]]) -> list[Mapping]:
+    """Nós v1 de ``<SESSION_POST_FIELD>.items`` (envelope nulo ou sem lista: nenhum)."""
+    nodes: list[Mapping] = []
+    for _name, envelope in found:
+        items = envelope.get("items") if isinstance(envelope, dict) else None
+        if isinstance(items, list):
+            nodes.extend(item for item in items if isinstance(item, Mapping))
+    return nodes
 
 
 def parse_session_post_document(html: str, shortcode: str) -> tuple[Mapping | None, PostDocumentParse]:
-    """HTML do documento aberto com a sessão -> (nó ``xig_fetch_media`` cujo ``code`` é EXATAMENTE o pedido, ou None;
-    resumo seguro). ``outcome``: "ok"; "mismatch" (só nós de outra publicação); "gated" (o campo veio nulo e nenhum
-    nó do pedido: forma NÃO verificada, tratada como publicação ainda restrita); "envelope_missing"/"no_scripts".
+    """HTML do documento aberto com a sessão -> (nó ``xig_fetch_media`` ou item de
+    ``xdt_api__v1__media__shortcode__web_info.items`` cujo ``code`` é EXATAMENTE o pedido, ou None; resumo seguro).
+    ``outcome``: "ok"; "mismatch" (só nós de outra publicação); "gated" (o campo veio nulo/vazio e nenhum nó do
+    pedido: forma NÃO verificada, tratada como publicação ainda restrita); "envelope_missing"/"no_scripts".
     Mesmos tetos de ``parse_post_document``; o feed de Reels e qualquer outro campo nunca viram mídia."""
     parse = PostDocumentParse()
-    parse.scripts, parse.json_scripts, found = _load_scripts(iter_json_scripts(html), SESSION_ROOT_FIELD, True)
-    nodes = [node for _name, node in found if node is not None]
+    scripts = list(iter_json_scripts(html))
+    parse.scripts, parse.json_scripts, found = _load_scripts(scripts, SESSION_ROOT_FIELD, True)
+    _total, _valid, found_info = _load_scripts(scripts, SESSION_POST_FIELD, True)
+    del scripts
+    nodes = [node for _name, node in found if node is not None] + _web_info_items(found_info)
+    found = [*found, *found_info]
     parse.envelopes = len(nodes)
     if not parse.scripts:
         return None, parse

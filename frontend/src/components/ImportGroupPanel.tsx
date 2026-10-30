@@ -15,6 +15,7 @@ import {
   profileStateDetail,
   profileStateLabel,
 } from "../lib/importGroup";
+import { progressExtrasText } from "../lib/importUnified";
 import { useNow } from "../lib/pause";
 import { visibleFilter } from "../lib/viewsFilter";
 import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
@@ -137,6 +138,11 @@ export function ImportGroupPanel({
       <div className="muted small" style={{ marginTop: 6 }} aria-live="polite">
         {groupSummary(group)}
       </div>
+      {progressExtrasText(group.progress) ? (
+        <div className="muted small" style={{ marginTop: 4 }}>
+          {progressExtrasText(group.progress)}
+        </div>
+      ) : null}
       {groupViewsText({ ...group, views_filter: visibleFilter(group.views_filter) }) ? (
         <div className="muted small" style={{ marginTop: 4 }}>
           {groupViewsText({ ...group, views_filter: visibleFilter(group.views_filter) })}

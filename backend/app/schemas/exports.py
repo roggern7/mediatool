@@ -31,6 +31,7 @@ class LibraryFilter(StrictModel):
     # Mesmo filtro de GET /api/media e de POST /api/media/process-by-filter.
     view: Literal["all", "originals", "processed"] = "all"
     media_type: Literal["video", "image"] | None = None
+    role: Literal["original", "cover"] | None = None   # migration 0021: "cover" = só capas
     q: Annotated[SafeText | None, Field(max_length=200)] = None
     profile: Annotated[SafeText | None, Field(max_length=64)] = None
 

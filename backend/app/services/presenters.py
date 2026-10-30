@@ -5,13 +5,33 @@ from __future__ import annotations
 from typing import Any
 
 from app.db.connection import parse_utc, utc_now
-from app.db.repositories.batches import VIEWS_KEYS, load_listing_counts
+from app.db.repositories.batches import TYPE_FILTER_REASON, VIEWS_KEYS, VIEWS_KEYS_MAX, load_listing_counts
 from app.db.repositories.common import JOB_STATUSES
 from app.services.context import AppContext
 
-_PROGRESS_KEYS = ("downloaded", "processed", "skipped", "failed", "pending", "active")
-# Contadores congelados em `batches.final_*` quando o lote termina sem job aberto (migrations 0005/0006).
-_FROZEN_KEYS = ("downloaded", "processed", "skipped", "failed")
+_PROGRESS_KEYS = ("downloaded", "processed", "skipped", "failed", "pending", "active", "duplicates")
+# Contadores congelados em `batches.final_*` quando o lote termina sem job aberto (migrations 0005/0006; `duplicates`
+# na 0021, NULL = 0 em lotes encerrados antes dela).
+_FROZEN_KEYS = ("downloaded", "processed", "skipped", "failed", "duplicates")
+# Vereditos que NÃO baixam (contador `filtered`, com os itens ignorados pelo tipo de mídia).
+_FILTERED_VERDICTS = ("below", "no_count", "out_of_period", "above")
+
+
+def media_choice(row: dict[str, Any]) -> str | None:
+    """Tipo de mídia do pedido (importação unificada): "covers" (migration 0021), "videos" (Reels/vídeos) ou "all";
+    None nos lotes antigos com outro conteúdo (fotos, publicações do feed) e nos da Biblioteca."""
+    if row.get("media_role") == "cover":
+        return "covers"
+    content = row.get("content_type")
+    if content in ("videos", "reels"):
+        return "videos"
+    return "all" if content == "all" else None
+
+
+def _type_filtered(batch: dict[str, Any]) -> int:
+    expected = load_listing_counts(batch.get("listing_dropped_reasons")).get("expected")
+    value = expected.get(TYPE_FILTER_REASON) if isinstance(expected, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 _CLOSED_BATCH_STATUSES = ("completed", "failed", "cancelled")
 
 
@@ -90,11 +110,13 @@ def _listing_dropped(batch: dict[str, Any]) -> dict[str, Any]:
 
 
 def _filters_on(row: dict[str, Any]) -> bool:
-    return row.get("min_views") is not None or row.get("posted_after") is not None
+    return (row.get("min_views") is not None or row.get("max_views") is not None
+            or row.get("posted_after") is not None)
 
 
 def _filter_settings(row: dict[str, Any]) -> dict[str, Any]:
     return {"min_views": None if row.get("min_views") is None else int(row["min_views"]),
+            "max_views": None if row.get("max_views") is None else int(row["max_views"]),
             "posted_within_days": None if row.get("posted_within_days") is None else int(row["posted_within_days"]),
             "posted_after": row.get("posted_after")}
 
@@ -108,10 +130,10 @@ def _views_filter(batch: dict[str, Any]) -> dict[str, Any] | None:
     def counts(value: Any) -> dict[str, int]:
         data = load_listing_counts(value)
         return {key: v if isinstance(v := data.get(key), int) and not isinstance(v, bool) and v > 0 else 0
-                for key in VIEWS_KEYS}
+                for key in VIEWS_KEYS_MAX}
 
     total, partial = counts(batch.get("listing_views")), counts(batch.get("listing_views_partial"))
-    merged = {key: total[key] + partial[key] for key in VIEWS_KEYS}
+    merged = {key: total[key] + partial[key] for key in VIEWS_KEYS_MAX}
     return {**_filter_settings(batch), "analyzed": sum(merged.values()), **merged, "pending": sum(partial.values())}
 
 
@@ -119,7 +141,7 @@ def _group_views_filter(group: dict[str, Any], row: dict[str, Any]) -> dict[str,
     """Soma dos filhos (group_aggregates); None = grupo sem filtro."""
     if not _filters_on(group):
         return None
-    merged = {key: int(row.get(f"views_{key}") or 0) for key in VIEWS_KEYS}
+    merged = {key: int(row.get(f"views_{key}") or 0) for key in VIEWS_KEYS_MAX}
     return {**_filter_settings(group), "analyzed": sum(merged.values()), **merged, "pending": 0}
 
 
@@ -178,7 +200,10 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
             "profiles": {"total": total, **counts},
             "profile_end_count": int(row.get("profile_end") or 0),
             "period_end_count": int(row.get("period_end") or 0),
-            "progress": {"found": found, **{key: int(row.get(key, 0)) for key in _PROGRESS_KEYS}},
+            "media": media_choice(group),
+            "progress": {"found": found, **{key: int(row.get(key, 0)) for key in _PROGRESS_KEYS},
+                         "filtered": int(row.get("type_filtered") or 0) + sum(
+                             int(row.get(f"views_{key}") or 0) for key in _FILTERED_VERDICTS)},
             "listing_dropped_total": int(row.get("dropped", 0)),
             "views_filter": _group_views_filter(group, row),
             "last_export": _last_export(exports.get(group["id"])),
@@ -228,9 +253,14 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
         # contagem da página refeita) sem somar duas vezes.
         data["listing_dropped"] = _listing_dropped(batch)
         # Listagem encerrada pelo corte do período (migration 0019): a coluna da 0012 guarda 'profile_end'.
-        data["listing_end"] = ("period_end" if batch.get("listing_end") == "profile_end"
-                               and batch.get("listing_period_end") else batch.get("listing_end"))
+        # 1a página vazia sem próxima página (migration 0022): idem, apresentado como "empty_first_page".
+        data["listing_end"] = batch.get("listing_end")
+        if data["listing_end"] == "profile_end" and batch.get("listing_period_end"):
+            data["listing_end"] = "period_end"
+        elif data["listing_end"] == "profile_end" and batch.get("listing_empty_first_page"):
+            data["listing_end"] = "empty_first_page"
         data["views_filter"] = _views_filter(batch)
+        data["media"] = media_choice(batch) if batch["source"] == "instagram_import" else None
         if batch.get("import_mode") == "links":
             data["import_mode"] = "links"
             data["links"] = link_counts.get(batch["id"], {"total": 0, "pending": 0, "resolved": 0, "failed": 0})
@@ -260,7 +290,9 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
             progress = {key: row.get(key, 0) for key in _PROGRESS_KEYS}
             counts = {status: row.get(f"c_{status}", 0) for status in JOB_STATUSES}
         data["found"] = found
-        data["progress"] = {"found": found, **progress}
+        views = data["views_filter"] or {}
+        data["progress"] = {"found": found, **progress,
+                            "filtered": _type_filtered(batch) + sum(int(views.get(k) or 0) for k in _FILTERED_VERDICTS)}
         data["counts"] = counts
         if with_jobs:
             jobs, truncated = ctx.jobs.recent_for_batch(batch["id"], MAX_EMBEDDED_JOBS)
@@ -329,6 +361,7 @@ def media_out(ctx: AppContext, items: list[dict[str, Any]]) -> list[dict[str, An
                 "source_post_id": media["source_post_id"],
                 "source_media_index": media["source_media_index"],
                 "media_type": media["media_type"],
+                "role": media.get("role") or "original",
                 "original_filename": media["original_filename"],
                 "original_sha256": media["original_sha256"],
                 "file_size": media["file_size"],

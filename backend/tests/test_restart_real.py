@@ -288,7 +288,7 @@ def test_kill_during_downloading_recovers_and_completes(server, media_files):
     result = srv.wait_batch(batch_id)
     assert [j["status"] for j in result["jobs"]] == ["completed"] * 3
     assert result["progress"] == {"found": 3, "downloaded": 3, "processed": 3, "skipped": 0, "failed": 0,
-                                  "pending": 0, "active": 0}
+                                  "pending": 0, "active": 0, "duplicates": 0, "filtered": 0}
     assert srv.temp_files() == []
     _assert_never_false_completed(srv)
 
@@ -335,7 +335,7 @@ def test_partially_failed_batch_of_10_via_real_server(server, media_files, tmp_p
     result = srv.wait_batch(batch_id)
     assert result["found"] == 10 and len(result["jobs"]) == 10
     assert result["progress"] == {"found": 10, "downloaded": 6, "processed": 6, "skipped": 2, "failed": 2,
-                                  "pending": 0, "active": 0}
+                                  "pending": 0, "active": 0, "duplicates": 2, "filtered": 0}   # SEED1 e SHADUP
     by_code = {j["source_post_id"]: j for j in result["jobs"]}
     assert by_code["FAILPERM"]["status"] == "failed" and by_code["FAILPERM"]["attempts"] == 1
     assert by_code["FAILPERM"]["error_code"] == "content_unavailable"
@@ -363,7 +363,7 @@ def test_partially_failed_batch_of_10_via_real_server(server, media_files, tmp_p
     retried = {by_code["FAILPERM"]["id"], by_code["BADFILE"]["id"]}
     final = srv.wait_batch(batch_id)
     assert final["progress"] == {"found": 10, "downloaded": 8, "processed": 8, "skipped": 2, "failed": 0,
-                                 "pending": 0, "active": 0}
+                                 "pending": 0, "active": 0, "duplicates": 2, "filtered": 0}
     for job_id, old in before.items():
         now = srv.job(job_id)
         if job_id in retried:

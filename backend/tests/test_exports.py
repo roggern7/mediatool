@@ -921,13 +921,15 @@ def test_migration_0013_backfills_batch_media_over_schema_0012_with_data(tmp_pat
             db.execute(
                 "INSERT INTO jobs (batch_id, media_id, kind, status, source_post_id, source_media_index, created_at,"
                 " updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)", (batch_id, media_id, kind, status, f"J{index}", now, now))
-        before = [tuple(row) for row in db.fetchall("SELECT * FROM jobs ORDER BY id")]
+        before = [dict(row) for row in db.fetchall("SELECT * FROM jobs ORDER BY id")]
 
-        assert apply_migrations(db) == [13, 14, 15, 16, 17, 18, 19, 20]   # 0014/0016-0020: colunas/tabela; 0015: preset
+        assert apply_migrations(db) == [13, 14, 15, 16, 17, 18, 19, 20, 21, 22]   # 0014/0016-0020: colunas/tabela; 0015: preset
         pairs = [(row["batch_id"], row["media_id"]) for row in db.fetchall(
             "SELECT batch_id, media_id FROM batch_media ORDER BY batch_id, media_id")]
         assert pairs == [(1, 1), (1, 2), (2, 2)]
-        assert [tuple(row) for row in db.fetchall("SELECT * FROM jobs ORDER BY id")] == before   # nada reescrito
+        after = [dict(row) for row in db.fetchall("SELECT * FROM jobs ORDER BY id")]
+        assert [{k: row[k] for k in old_row} for row, old_row in zip(after, before)] == before   # nada reescrito
+        assert len(after) == len(before) and {row["media_role"] for row in after} == {"original"}   # coluna da 0021
         assert db.scalar("SELECT COUNT(*) FROM exports") == 0
         db.execute("DELETE FROM media WHERE id = 2")
         assert db.scalar("SELECT COUNT(*) FROM batch_media") == 1

@@ -19,6 +19,8 @@ MEDIA_COLUMNS = frozenset(
         "media_id_remote", "media_type", "original_filename", "original_path", "original_sha256", "file_size",
         "duration", "width", "height", "fps", "has_audio", "mime_type", "thumbnail_path", "taken_at",
         "video_codec",
+        # Papel da mídia (migration 0021): 'original' ou 'cover' (capa de um vídeo, baixada sozinha).
+        "role",
     }
 )
 RENDITION_COLUMNS = frozenset(
@@ -50,15 +52,20 @@ class MediaRepository:
     def get(self, media_id: int) -> dict[str, Any] | None:
         return row_dict(self.db.fetchone("SELECT * FROM media WHERE id = ?", (media_id,)))
 
-    def find_by_source(self, platform: str, source_post_id: str, index: int) -> dict[str, Any] | None:
+    def find_by_source(self, platform: str, source_post_id: str, index: int,
+                       role: str = "original") -> dict[str, Any] | None:
+        """Mídia da chave de origem COM o papel (migration 0021): a capa de um vídeo e o próprio vídeo têm a mesma
+        origem e nunca são duplicata um do outro."""
         return row_dict(
             self.db.fetchone(
-                "SELECT * FROM media WHERE source_platform = ? AND source_post_id = ? AND source_media_index = ?",
-                (platform, source_post_id, index),
+                "SELECT * FROM media WHERE source_platform = ? AND source_post_id = ? AND source_media_index = ?"
+                " AND role = ?",
+                (platform, source_post_id, index, role),
             )
         )
 
-    def ingest_in_flight(self, platform: str, source_post_id: str, index: int, *, exclude_batch_id: int) -> int | None:
+    def ingest_in_flight(self, platform: str, source_post_id: str, index: int, *, exclude_batch_id: int,
+                         role: str = "original") -> int | None:
         """Job de ingest de outro lote ainda não baixado para o mesmo item (ix_jobs_ingest_in_flight), ou None.
 
         Prefere o job que vai baixar de fato (não dependente); um dependente também serve (ele espera o próprio
@@ -66,8 +73,9 @@ class MediaRepository:
         return self.db.scalar(
             "SELECT id FROM jobs WHERE kind = 'ingest' AND status IN ('pending', 'downloading')"
             " AND source_post_id = ? AND source_media_index = ? AND COALESCE(source_platform, 'instagram') = ?"
-            " AND batch_id IS NOT NULL AND batch_id <> ? ORDER BY primary_job_id IS NOT NULL, id LIMIT 1",
-            (source_post_id, index, platform, exclude_batch_id),
+            " AND batch_id IS NOT NULL AND batch_id <> ? AND media_role = ?"
+            " ORDER BY primary_job_id IS NOT NULL, id LIMIT 1",
+            (source_post_id, index, platform, exclude_batch_id, role),
         )
 
     def find_by_sha(self, sha256: str) -> dict[str, Any] | None:
@@ -99,11 +107,17 @@ class MediaRepository:
 
     @staticmethod
     def filter_where(
-        *, view: str = "all", media_type: str | None = None, profile: str | None = None, q: str | None = None
+        *, view: str = "all", media_type: str | None = None, profile: str | None = None, q: str | None = None,
+        role: str | None = None,
     ) -> tuple[str, list[Any]]:
-        """Cláusula WHERE (sobre `media m`) do filtro da Biblioteca; SQL fixo, valores em parâmetros."""
+        """Cláusula WHERE (sobre `media m`) do filtro da Biblioteca; SQL fixo, valores em parâmetros. `role`
+        (migration 0021): 'cover' = só capas; 'original' = sem as capas; None = todas."""
         clauses: list[str] = []
         params: list[Any] = []
+        if role == "cover":
+            clauses.append("m.role = 'cover'")   # ix_media_cover
+        elif role == "original":
+            clauses.append("m.role = 'original'")
         if view == "processed":
             clauses.append("EXISTS (SELECT 1 FROM renditions r WHERE r.media_id = m.id)")
         elif view == "originals":
@@ -126,11 +140,11 @@ class MediaRepository:
     @classmethod
     def process_filter_where(
         cls, *, view: str, media_type: str | None, profile: str | None, q: str | None, preset_id: int | None,
-        params: dict[str, Any],
+        params: dict[str, Any], role: str | None = None,
     ) -> tuple[str, list[Any]]:
         """Filtro da Biblioteca menos as mídias com job aberto que vai processar com o MESMO preset/params e as que já
         têm rendition do mesmo preset/params (processar por filtro idempotente, seção 9 M3)."""
-        where, values = cls.filter_where(view=view, media_type=media_type, profile=profile, q=q)
+        where, values = cls.filter_where(view=view, media_type=media_type, profile=profile, q=q, role=role)
         extra = (
             "NOT EXISTS (SELECT 1 FROM jobs j WHERE j.media_id = m.id AND j.preset_id IS ? AND j.params = ?"
             f" AND j.status IN {OPEN_JOB_STATUSES_SQL})"
@@ -145,8 +159,8 @@ class MediaRepository:
         return int(self.db.scalar(f"SELECT COUNT(*) FROM media m {where}", tuple(params)))
 
     def count(self, *, view: str = "all", media_type: str | None = None, profile: str | None = None,
-              q: str | None = None) -> int:
-        where, params = self.filter_where(view=view, media_type=media_type, profile=profile, q=q)
+              q: str | None = None, role: str | None = None) -> int:
+        where, params = self.filter_where(view=view, media_type=media_type, profile=profile, q=q, role=role)
         return int(self.db.scalar(f"SELECT COUNT(*) FROM media m {where}", tuple(params)))
 
     def list(
@@ -160,12 +174,13 @@ class MediaRepository:
         offset: int = 0,
         before_id: int | None = None,
         scope: tuple[str, list[Any]] | None = None,
+        role: str | None = None,
     ) -> tuple[list[dict[str, Any]], int, int | None]:
         """Mídias em ordem id DESC. `before_id` (keyset): só ids menores; `next_before_id` None no fim.
 
         `total` ignora o keyset (vale para o filtro inteiro). `scope`: condição extra (sobre `media m`) com os
         parâmetros, ex.: a pasta da página Editar."""
-        where, params = self.filter_where(view=view, media_type=media_type, profile=profile, q=q)
+        where, params = self.filter_where(view=view, media_type=media_type, profile=profile, q=q, role=role)
         if scope is not None:
             where = f"{where} AND ({scope[0]})" if where else f"WHERE ({scope[0]})"
             params = [*params, *scope[1]]

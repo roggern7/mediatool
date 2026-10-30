@@ -5,14 +5,16 @@ export const MAX_BULK_PROCESS = 10_000;
 
 export interface LibraryFilter {
   view: MediaView;
-  typeFilter: "all" | MediaType;
+  /** "cover" = só capas (media.role, migration 0021). */
+  typeFilter: "all" | MediaType | "cover";
   q: string;
 }
 
 /** Corpo de process-by-filter com o mesmo filtro usado na listagem da Biblioteca. */
 export function processByFilterBody(filter: LibraryFilter, presetId: number): ProcessByFilterRequest {
   const body: ProcessByFilterRequest = { view: filter.view, preset_id: presetId };
-  if (filter.typeFilter !== "all") body.media_type = filter.typeFilter;
+  if (filter.typeFilter === "cover") body.role = "cover";
+  else if (filter.typeFilter !== "all") body.media_type = filter.typeFilter;
   if (filter.q) body.q = filter.q;
   return body;
 }

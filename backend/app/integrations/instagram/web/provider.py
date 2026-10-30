@@ -318,6 +318,7 @@ class InstagramWebDownloader(InstagramDownloader):
         on_checkpoint: Callable[[ListingCheckpoint], None] | None = None,
         min_views: int | None = None,
         posted_after: str | None = None,
+        max_views: int | None = None,
     ) -> Iterator[RemoteMedia]:
         username = self._username(username)
         if content not in CONTENT_TYPES:
@@ -328,11 +329,15 @@ class InstagramWebDownloader(InstagramDownloader):
             raise InstagramError("invalid_input", "Ponto de retomada da listagem inválido.")
         if min_views is not None and (isinstance(min_views, bool) or not isinstance(min_views, int) or min_views < 1):
             raise InstagramError("invalid_input", "Mínimo de visualizações inválido.")
+        if max_views is not None and (isinstance(max_views, bool) or not isinstance(max_views, int) or max_views < 1
+                                      or (min_views is not None and max_views < min_views)):
+            raise InstagramError("invalid_input", "Máximo de visualizações inválido.")
         cutoff = None if posted_after is None else _cutoff_timestamp(posted_after)
         if posted_after is not None and cutoff is None:
             raise InstagramError("invalid_input", "Corte do período de postagem inválido.")
         # ``limit=None`` ("Todos"): até o fim real do perfil, sem teto de quantidade nem de páginas.
-        return self._iter_media(username, content, limit, cancel, resume, on_checkpoint, min_views, cutoff)
+        return self._iter_media(username, content, limit, cancel, resume, on_checkpoint, min_views, cutoff,
+                                max_views)
 
     def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
                      path_kind: str | None = None, use_session: bool = True) -> list[RemoteMedia]:
@@ -789,7 +794,7 @@ class InstagramWebDownloader(InstagramDownloader):
     def _iter_media(
         self, username: str, content: str, limit: int | None, cancel: threading.Event | None,
         resume: ListingCheckpoint | None, on_checkpoint: Callable[[ListingCheckpoint], None] | None,
-        min_views: int | None = None, cutoff: int | None = None,
+        min_views: int | None = None, cutoff: int | None = None, max_views: int | None = None,
     ) -> Iterator[RemoteMedia]:
         """Lista página a página (gerador; nada de respostas/nós/itens acumulados).
 
@@ -811,7 +816,9 @@ class InstagramWebDownloader(InstagramDownloader):
         ``min_views`` (visualizações mínimas): só vídeos com ``play_count`` >= ``min_views`` na aba Reels SEM login
         (web/reels_tab.py, casado pelo código, páginas buscadas sob demanda) são entregues; abaixo ("below"), fora da
         aba Reels ou sem contagem ("no_count") não viram item, e item que não é vídeo também não ("no_count"). Erro da
-        aba Reels sobe como erro da listagem (nunca entrega sem o filtro). ``limit`` conta só os aprovados."""
+        aba Reels sobe como erro da listagem (nunca entrega sem o filtro). ``limit`` conta só os aprovados.
+        ``max_views`` (máximo, migration 0021; sozinho ou com o mínimo): ``play_count`` > ``max_views`` não vira item
+        ("above"); as demais regras são as do mínimo (sem contagem nunca é aprovado)."""
         from app.integrations.instagram.web.errors import InstagramWebError
         from app.integrations.instagram.web.normalize import (
             DEGRADED_REASONS,
@@ -843,10 +850,12 @@ class InstagramWebDownloader(InstagramDownloader):
         streak = resume.unproductive_streak if resume else 0
         page_compatible = 0
         # Vereditos dos filtros na página aberta (só totais; zerados no fim de cada página).
-        filters_on = min_views is not None or cutoff is not None
-        page_views: dict[str, int] | None = _views_zero() if filters_on else None
+        views_on = min_views is not None or max_views is not None
+        filters_on = views_on or cutoff is not None
+        with_above = max_views is not None
+        page_views: dict[str, int] | None = _views_zero(with_above) if filters_on else None
         if filters_on:
-            st.update(views_approved=0, views_below=0, views_no_count=0, views_out_of_period=0)
+            st.update(views_approved=0, views_below=0, views_no_count=0, views_out_of_period=0, views_above=0)
         old_streak = 0   # publicações seguidas mais antigas que o corte sem saber se são fixadas
         reels: Any = None   # mapa de visualizações da aba Reels (criado na 1a consulta)
         reels_http: Any = None
@@ -877,7 +886,7 @@ class InstagramWebDownloader(InstagramDownloader):
                     page_views=None if page_views is None else dict(page_views),
                 ))
             if page_views is not None:
-                page_views = _views_zero()
+                page_views = _views_zero(with_above)
             return reason is None
 
         # Teto global de páginas de listagem por hora (seção 9, A2), aplicado no portão antes de cada POST.
@@ -982,7 +991,7 @@ class InstagramWebDownloader(InstagramDownloader):
                         old_streak = 0
                     for item in items:
                         if page_views is not None:
-                            if min_views is None:
+                            if not views_on:
                                 verdict = "approved"
                             elif item.media_type != "video":
                                 verdict = "no_count"   # foto/carrossel sem vídeo: nunca aprovado pelo filtro
@@ -992,8 +1001,14 @@ class InstagramWebDownloader(InstagramDownloader):
                                     st["stop_reason"] = "cancelled"
                                     completed = True
                                     return
-                                verdict = "no_count" if views is None else (
-                                    "approved" if views >= min_views else "below")
+                                if views is None:
+                                    verdict = "no_count"
+                                elif min_views is not None and views < min_views:
+                                    verdict = "below"
+                                elif max_views is not None and views > max_views:
+                                    verdict = "above"
+                                else:
+                                    verdict = "approved"
                             page_views[verdict] += 1      # antes do yield, como `count`
                             st[f"views_{verdict}"] += 1
                             if verdict != "approved":
@@ -1077,9 +1092,10 @@ class InstagramWebDownloader(InstagramDownloader):
                 )
                 if filters_on:
                     # Só totais do trecho; nenhuma contagem individual nem id.
-                    log.info("Listagem web (filtros): views_approved=%s views_below=%s views_no_count=%s "
-                             "out_of_period=%s reels_pages=%s", st["views_approved"], st["views_below"],
-                             st["views_no_count"], st["views_out_of_period"], reels.pages if reels is not None else 0)
+                    log.info("Listagem web (filtros): views_approved=%s views_below=%s views_above=%s "
+                             "views_no_count=%s out_of_period=%s reels_pages=%s", st["views_approved"],
+                             st["views_below"], st["views_above"], st["views_no_count"], st["views_out_of_period"],
+                             reels.pages if reels is not None else 0)
                 self.last_listing_anomalies = anomalies = _listing_anomalies(ops, stats.reasons, EXPECTED_REASONS,
                                                                                  st)
                 if anomalies["pages_with_errors"] or anomalies["dropped_unexpected"]:
@@ -1099,8 +1115,12 @@ PERIOD_STOP_STREAK = 4
 LISTING_PINNED_FIELD = "timeline_pinned_user_ids"
 
 
-def _views_zero() -> dict[str, int]:
-    return {"approved": 0, "below": 0, "no_count": 0, "out_of_period": 0}
+def _views_zero(with_above: bool = False) -> dict[str, int]:
+    """Vereditos zerados da página; "above" só com o máximo de visualizações (os demais lotes mantêm o formato)."""
+    zero = {"approved": 0, "below": 0, "no_count": 0, "out_of_period": 0}
+    if with_above:
+        zero["above"] = 0
+    return zero
 
 
 def _cutoff_timestamp(value: object) -> int | None:
