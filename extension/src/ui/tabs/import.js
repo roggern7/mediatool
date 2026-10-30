@@ -1,13 +1,15 @@
 // Aba "Importar": um perfil ou vários links/perfis, tipo de mídia, quantidade, período, visualizações, fluxo após
-// o download, exportação automática e predefinições de operação. Envia POST /api/ext/start com client_request_id.
+// o download (Só baixar, Editar após baixar com o formulário de edição ali mesmo, Processar com preset, aguardar
+// edição manual), exportação automática e predefinições de operação. Envia POST /api/ext/start com client_request_id.
 import {
-  BUILTIN_PRESETS, DEFAULT_FORM, EXPORT_CONTENT_OPTIONS, FLOW_OPTIONS, FormError, LIMIT_PRESETS, MEDIA_OPTIONS,
-  PERIOD_PRESETS, RequestIdKeeper, VIEWS_DISABLED_TEXT, VIEWS_MEDIA, VIEWS_PRESETS, applyPreset, buildStartBody,
-  classifyEntries, daysSinceYearStart, describeStartBody, makeUserPreset, needsConfirmation, viewsLabel,
+  BUILTIN_PRESETS, DEFAULT_EDIT, DEFAULT_FORM, EXPORT_CONTENT_OPTIONS, FLOW_FIELDS, FormError, LIMIT_PRESETS,
+  MEDIA_OPTIONS, PERIOD_PRESETS, RequestIdKeeper, VIEWS_DISABLED_TEXT, VIEWS_MEDIA, VIEWS_PRESETS, applyPreset,
+  autoExportField, buildStartBody, classifyEntries, daysSinceYearStart, describeStartBody, makeUserPreset,
+  migrateUserPreset, needsConfirmation, viewsLabel,
 } from "../../lib/importModel.js";
-import { processSummary, DEFAULT_PROCESS } from "../../lib/editModel.js";
-import { loadUiState, saveUiState } from "../../lib/settings.js";
+import { loadFlowForm, loadUiState, saveFlowFields, saveUiState } from "../../lib/settings.js";
 import { button, checkbox, confirmBox, field, h, notice, select, setChildren } from "../dom.js";
+import { fetchEditOptions, flowChooser } from "../flowChooser.js";
 
 const LIMIT_OPTIONS = [...LIMIT_PRESETS.map((n) => ({ value: String(n), label: String(n) })),
   { value: "custom", label: "Personalizada" }, { value: "all", label: "Todas" }];
@@ -20,7 +22,6 @@ const viewsOptions = (empty) => [{ value: "", label: empty },
 export function importTab(panel, ctx) {
   let form = { ...DEFAULT_FORM };
   let userPresets = [];
-  let processForm = { ...DEFAULT_PROCESS };
   let message = null;
   let sending = false;
   let loaded = false;
@@ -57,8 +58,14 @@ export function importTab(panel, ctx) {
   const viewsSet = h("fieldset", { class: "fieldset", id: "views" }, h("legend", { text: "Visualizações" }),
     h("div", { class: "grid2" }, field("Mínimo", minSel), field("Máximo", maxSel)),
     h("div", { class: "grid2" }, minCustom, maxCustom), viewsHint);
-  const flowSel = select("flow", FLOW_OPTIONS);
-  const flowHint = h("p", { class: "hint" });
+  const chooser = flowChooser({ flow: "download", edit: { ...DEFAULT_EDIT }, presetId: null, presetName: null }, {
+    media: () => mediaSel.value, open: true, collapsible: true,
+    onChange: () => {
+      sync();
+      void persistFlow();
+    },
+  });
+  const zipProblem = h("p", { class: "small err-text", id: "zip-problem" });
   const autoExport = checkbox("autoExport", "Exportar ZIP automaticamente ao concluir");
   const exportContent = select("autoExportContent", EXPORT_CONTENT_OPTIONS);
   const submit = h("button", { type: "submit", class: "btn primary", id: "import-submit", text: "Iniciar importação" });
@@ -78,8 +85,8 @@ export function importTab(panel, ctx) {
     field("Tipo de mídia", mediaSel),
     linksNote,
     profileFilters,
-    h("fieldset", { class: "fieldset" }, h("legend", { text: "Depois do download" }), flowSel, flowHint,
-      autoExport.el, h("div", { dataset: { when: "export" } }, field("Conteúdo do ZIP", exportContent))),
+    h("fieldset", { class: "fieldset", id: "flow-set" }, h("legend", { text: "Depois do download" }), chooser.el,
+      autoExport.el, h("div", { dataset: { when: "export" } }, field("Conteúdo do ZIP", exportContent)), zipProblem),
     h("p", { class: "small muted", id: "import-summary" }),
     submit);
 
@@ -89,7 +96,8 @@ export function importTab(panel, ctx) {
       source: sourceSel.value, profile: profileIn.value, text: textIn.value, media: mediaSel.value,
       limit: limitSel.value, limitCustom: limitCustom.value, confirmAll: confirmAll.input.checked,
       period: periodSel.value, periodCustom: periodCustom.value, minViews: minSel.value, minViewsCustom: minCustom.value,
-      maxViews: maxSel.value, maxViewsCustom: maxCustom.value, flow: flowSel.value,
+      maxViews: maxSel.value, maxViewsCustom: maxCustom.value, flow: chooser.state.flow, edit: chooser.state.edit,
+      presetId: chooser.state.presetId, presetName: chooser.state.presetName,
       autoExport: autoExport.input.checked, autoExportContent: exportContent.value,
     };
     return form;
@@ -109,7 +117,7 @@ export function importTab(panel, ctx) {
     minCustom.value = form.minViewsCustom;
     maxSel.value = form.maxViews;
     maxCustom.value = form.maxViewsCustom;
-    flowSel.value = form.flow;
+    chooser.set(form);
     autoExport.input.checked = Boolean(form.autoExport);
     exportContent.value = form.autoExportContent;
     sync();
@@ -144,21 +152,32 @@ export function importTab(panel, ctx) {
     viewsHint.hidden = viewsOn;
     minCustom.hidden = !viewsOn || f.minViews !== "custom";
     maxCustom.hidden = !viewsOn || f.maxViews !== "custom";
-    flowHint.textContent = f.flow === "auto"
-      ? `Processamento (aba Processar): ${processSummary(processForm, null)}.`
-      : f.flow === "manual" ? "Os itens ficam na Biblioteca para você editar depois (aba Processar ou Media Tool)."
-        : "";
-    if (f.flow === "auto") {
-      flowHint.append(" ", button("Configurar", () => ctx.go("process"), "link"));
+    // Mesma validação do app: edição sem nada escolhido, preset faltando ou ZIP de editados sem edição bloqueiam.
+    const flowBlock = chooser.refresh();
+    let zipText = "";
+    try {
+      autoExportField(f);
+    } catch (err) {
+      zipText = err.message;
     }
-    submit.disabled = sending;
+    zipProblem.textContent = zipText;
+    zipProblem.hidden = !zipText;
+    submit.disabled = sending || Boolean(flowBlock || zipText);
     submit.textContent = sending ? "Enviando…" : "Iniciar importação";
     try {
       formEl.querySelector("#import-summary").textContent = `Resumo: ${describeStartBody(buildStartBody(f,
-        { mode: "edit", edit: {} }))}`;
+        { options: chooser.options }), chooser.options?.presets)}`;
     } catch {
       formEl.querySelector("#import-summary").textContent = "";
     }
+  }
+
+  /** Grava o fluxo após o download na configuração única (a Página atual usa a mesma). */
+  async function persistFlow() {
+    const f = readForm();
+    const values = {};
+    for (const key of FLOW_FIELDS) values[key] = f[key];
+    await saveFlowFields(values);
   }
 
   function renderPresets(selectedId = "") {
@@ -218,14 +237,14 @@ export function importTab(panel, ctx) {
     const f = readForm();
     let body;
     try {
-      const stored = f.flow === "auto" ? await loadUiState("processStored", null) : null;
-      body = buildStartBody(f, stored);
+      body = buildStartBody(f, { options: chooser.options });
     } catch (err) {
       setMessage("err", err instanceof FormError ? err.message : String(err.message || err));
       return;
     }
     const big = needsConfirmation(body);
-    if (big && !(await confirmBox("Confirmar operação grande", `${big} ${describeStartBody(body)}.`, "Iniciar"))) return;
+    if (big && !(await confirmBox("Confirmar operação grande",
+      `${big} ${describeStartBody(body, chooser.options?.presets)}.`, "Iniciar"))) return;
     body.client_request_id = keeper.idFor(body);
     sending = true;
     sync();
@@ -259,23 +278,25 @@ export function importTab(panel, ctx) {
       if (preset) {
         form = applyPreset(readForm(), preset);
         writeForm();
+        void persistFlow();
       }
       return;
     }
     sync();
+    if (event.target === autoExport.input || event.target === exportContent) void persistFlow();
   });
   formEl.addEventListener("submit", (event) => void onSubmit(event));
 
   async function loadState() {
-    const [last, presets, proc] = await Promise.all([loadUiState("importForm", {}), loadUiState("userPresets", []),
-      loadUiState("processForm", null)]);
+    const [last, presets, proc, stored] = await Promise.all([loadFlowForm(), loadUiState("userPresets", []),
+      loadUiState("processForm", null), loadUiState("processStored", null)]);
     form = { ...DEFAULT_FORM, ...(last || {}), confirmAll: false };
     if (!last || !last.limit) {
       const def = ctx.status?.defaults?.limit;
       if (def) form.limit = LIMIT_OPTIONS.some((o) => o.value === String(def)) ? String(def) : "custom";
     }
-    userPresets = Array.isArray(presets) ? presets : [];
-    processForm = { ...DEFAULT_PROCESS, ...(proc || {}) };
+    // Predefinições salvas com o antigo "Baixar e processar automaticamente" passam a editar ou usar o preset.
+    userPresets = (Array.isArray(presets) ? presets : []).map((p) => migrateUserPreset(p, proc, stored));
     renderPresets();
     loaded = true;
   }
@@ -283,9 +304,16 @@ export function importTab(panel, ctx) {
   return {
     async show(params = {}) {
       if (!loaded) await loadState();
-      else processForm = { ...DEFAULT_PROCESS, ...((await loadUiState("processForm", null)) || {}) };
+      else {
+        // A Página atual pode ter mudado o fluxo: relê a configuração única.
+        const flow = await loadFlowForm();
+        form = { ...readForm() };
+        for (const key of FLOW_FIELDS) if (key in flow) form[key] = flow[key];
+      }
       if (params.profile) form = { ...form, source: "profile", profile: `@${params.profile}` };
       writeForm();
+      chooser.setOptions(await fetchEditOptions(ctx));
+      sync();
     },
     get message() {
       return message;

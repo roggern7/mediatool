@@ -1,15 +1,13 @@
 // Aba "Processar": os controles REAIS da página Editar (GET /api/ext/edit/options) ou um preset de processamento;
-// aplica à seleção da Biblioteca (só vídeos) via POST /api/ext/edits ou /process. A configuração também é a usada
-// pelo "Baixar e processar automaticamente" da importação.
+// aplica à seleção da Biblioteca (só vídeos) via POST /api/ext/edits ou /process. Os controles são o componente
+// compartilhado com "Editar após baixar" (Importar e Página atual), mas a configuração desta aba é só dela.
 import {
-  DEFAULT_PROCESS, DURATION_NOTE, FALLBACK_OPTIONS, SPEED_NOTE, buildProcessRequest, durationOptions, editPagePath,
-  formatSpeed,
-  formatSpeedPreset, parseSpeedInput, processSummary, speedRange, splitForEdit, stepSpeed, toStoredProcess,
-  validateProcess,
+  DEFAULT_PROCESS, FALLBACK_OPTIONS, buildProcessRequest, editPagePath, processSummary, splitForEdit, validateProcess,
 } from "../../lib/editModel.js";
 import { selectionText } from "../../lib/selection.js";
 import { loadUiState, saveUiState } from "../../lib/settings.js";
-import { button, checkbox, confirmBox, field, h, notice, select, setChildren } from "../dom.js";
+import { button, confirmBox, field, h, notice, select, setChildren } from "../dom.js";
+import { editControls, presetPicker } from "../editControls.js";
 
 export function processTab(panel, ctx) {
   let options = null;
@@ -22,7 +20,6 @@ export function processTab(panel, ctx) {
 
   async function persist() {
     await saveUiState("processForm", form);
-    await saveUiState("processStored", toStoredProcess(form, options));
   }
 
   async function load() {
@@ -43,40 +40,6 @@ export function processTab(panel, ctx) {
     }
     loaded = true;
     render();
-  }
-
-  function speedControls() {
-    const range = speedRange(options);
-    const input = h("input", { type: "text", name: "speed", inputmode: "decimal", value: formatSpeed(form.speed)
-      .replace("x", ""), class: "speed-input", "aria-label": "Velocidade" });
-    const slider = h("input", { type: "range", min: range.min, max: range.max, step: range.step, value: form.speed,
-      name: "speedRange", "aria-label": "Velocidade (barra)" });
-    const error = h("span", { class: "hint err-text" });
-    const chips = range.presets.map((p) => button(formatSpeedPreset(p), () => setSpeed(p),
-      `chip${Number(form.speed) === p ? " on" : ""}`, { dataset: { speed: String(p) } }));
-    const setSpeed = (value) => {
-      form.speed = value;
-      input.value = formatSpeed(value).replace("x", "");
-      slider.value = String(value);
-      error.textContent = "";
-      for (const chip of chips) chip.classList.toggle("on", Number(chip.dataset.speed) === value);
-      void persist();
-      renderSummary();
-    };
-    input.addEventListener("change", () => {
-      const value = parseSpeedInput(input.value, range);
-      if (value === null) error.textContent = `Use um valor de ${formatSpeed(range.min)} a ${formatSpeed(range.max)}.`;
-      else setSpeed(value);
-    });
-    slider.addEventListener("input", () => setSpeed(stepSpeed(Number(slider.value), 0, range)));
-    return h("fieldset", { class: "fieldset" }, h("legend", { text: "Velocidade" }),
-      h("div", { class: "row" },
-        button("−", () => setSpeed(stepSpeed(form.speed, -1, range)), "btn small", { "aria-label": "Diminuir 0,01" }),
-        input, h("span", { text: "x" }),
-        button("+", () => setSpeed(stepSpeed(form.speed, 1, range)), "btn small", { "aria-label": "Aumentar 0,01" })),
-      slider,
-      h("div", { class: "row wrap" }, ...chips),
-      h("span", { class: "hint", text: SPEED_NOTE }), error);
   }
 
   const summaryEl = h("p", { class: "small", id: "process-summary" });
@@ -143,42 +106,12 @@ export function processTab(panel, ctx) {
       render();
     });
     const parts = [h("p", { class: "section-title", text: "Processar vídeos" }), field("Modo", modeSel)];
-    if (form.mode === "preset") {
-      const presets = options?.presets ?? [];
-      const presetSel = select("preset", [{ value: "", label: presets.length ? "Escolher…" : "Nenhum preset no app" },
-        ...presets.map((p) => ({ value: String(p.id), label: p.name }))], form.presetId ?? "");
-      presetSel.addEventListener("change", () => {
-        form.presetId = presetSel.value ? Number(presetSel.value) : null;
-        form.presetName = presets.find((p) => String(p.id) === presetSel.value)?.name ?? null;
-        void persist();
-        renderSummary();
-      });
-      parts.push(field("Preset", presetSel, "Os presets são criados na página Presets do Media Tool."));
-    } else {
-      const durSel = select("durationMode", durationOptions(options), form.durationMode);
-      const custom = h("input", { type: "text", name: "customText", inputmode: "decimal", value: form.customText,
-        placeholder: "segundos", hidden: form.durationMode !== "custom" });
-      durSel.addEventListener("change", () => {
-        form.durationMode = durSel.value;
-        custom.hidden = form.durationMode !== "custom";
-        void persist();
-        renderSummary();
-      });
-      custom.addEventListener("input", () => {
-        form.customText = custom.value;
-        void persist();
-        renderSummary();
-      });
-      const sharpen = checkbox("sharpen", "Nitidez sutil (realce leve)", form.sharpen);
-      sharpen.input.addEventListener("change", () => {
-        form.sharpen = sharpen.input.checked;
-        void persist();
-        renderSummary();
-      });
-      parts.push(field("Duração", durSel, DURATION_NOTE), custom, speedControls(),
-        options?.edit?.sharpen === false ? null : sharpen.el,
-        h("p", { class: "muted small", text: "Saída: MP4 (H.264 + AAC). Os originais nunca são alterados." }));
-    }
+    const changed = () => {
+      void persist();
+      renderSummary();
+    };
+    if (form.mode === "preset") parts.push(presetPicker(form, options, changed));
+    else parts.push(editControls(form, options, changed));
     parts.push(summaryEl, h("hr"), applyEl);
     setChildren(body, ...parts);
     renderSummary();

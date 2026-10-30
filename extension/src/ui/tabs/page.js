@@ -1,10 +1,13 @@
 // Aba "Página atual": o que é a aba do Instagram (sem rede: page-info), se já está na Biblioteca, análise da
-// publicação (post-preview, 1 leitura) e as ações de download conforme o tipo.
+// publicação (post-preview, 1 leitura), o bloco "Depois de baixar" (mesma configuração da aba Importar) e as ações
+// de download conforme o tipo.
 import { fromPageInfo, parseInstagramUrl } from "../../lib/instagramUrl.js";
-import { DEFAULT_FORM, FLOW_OPTIONS, RequestIdKeeper, buildPostBody, describeStartBody, postActions }
-  from "../../lib/importModel.js";
-import { loadUiState } from "../../lib/settings.js";
+import {
+  DEFAULT_EDIT, RequestIdKeeper, buildPostBody, describeStartBody, flowProblem, postActions,
+} from "../../lib/importModel.js";
+import { loadFlowForm, saveFlowFields } from "../../lib/settings.js";
 import { button, empty, h, notice, setChildren } from "../dom.js";
+import { fetchEditOptions, flowChooser } from "../flowChooser.js";
 
 const KIND_LABELS = { reel: "Reel", video: "Vídeo", photo: "Foto", carousel: "Carrossel", post: "Publicação",
   profile: "Perfil" };
@@ -18,6 +21,44 @@ export function pageTab(panel, ctx) {
   let busy = false;
   let loadedUrl = null;
   const keeper = new RequestIdKeeper();
+  let kind = "post";
+
+  // "Depois de baixar": a mesma escolha da aba Importar, gravada em `importForm` (uma fonte só).
+  const chooser = flowChooser({ flow: "download", edit: { ...DEFAULT_EDIT }, presetId: null, presetName: null,
+    autoExport: false, autoExportContent: "originals" }, {
+    choices: ["download", "edit", "preset"], open: false, collapsible: true, withZip: true,
+    onChange: () => {
+      const { flow, edit, presetId, presetName } = chooser.state;
+      void saveFlowFields({ flow, edit, presetId, presetName });
+      renderActions();
+    },
+  });
+  const flowBox = h("div", { class: "box flow-box", id: "flow-box" },
+    h("div", { class: "row between" }, h("p", { class: "box-title", text: "Depois de baixar" }),
+      button("ZIP e mais opções em Importar", () => ctx.go("import"), "link small")),
+    chooser.el);
+  const actionsEl = h("div", { class: "stack", id: "post-actions" });
+
+  /** Botões de download com o rótulo da ação completa ("Baixar e editar vídeo"). */
+  function renderActions() {
+    const flow = chooser.state.flow;
+    setChildren(actionsEl, ...postActions(kind, flow).map((a) => {
+      const problem = flowProblem(chooser.state, a.media, chooser.options);
+      return button(a.label, () => void download(a.media), a.primary ? "btn primary" : "btn",
+        { disabled: Boolean(busy) || Boolean(problem), title: problem || null, dataset: { media: a.media } });
+    }));
+  }
+
+  async function refreshFlow() {
+    chooser.set(await loadFlowForm());
+    renderActions();
+    if (ctx.client) {
+      void fetchEditOptions(ctx).then((options) => {
+        chooser.setOptions(options);
+        renderActions();
+      });
+    }
+  }
 
   async function load() {
     const url = ctx.pageUrl;
@@ -99,15 +140,14 @@ export function pageTab(panel, ctx) {
     message = null;
     render();
     try {
-      const flowForm = { ...DEFAULT_FORM, ...(await loadUiState("importForm", {})) };
-      const process = flowForm.flow === "auto" ? await loadUiState("processStored", null) : null;
-      const draft = buildPostBody(page.canonicalUrl, media, flowForm, process);
+      const draft = buildPostBody(page.canonicalUrl, media, chooser.state, null, chooser.options);
       const body = { ...draft, client_request_id: keeper.idFor(draft) };
       const result = await ctx.client.start(body);
       keeper.succeeded();
       const invalid = (result.invalid || []).map((i) => `${i.entry}: ${i.reason}`).join("; ");
       message = { tone: invalid ? "warn" : "ok",
-        text: invalid ? `Ignorado: ${invalid}` : `Enviado ao Media Tool: ${describeStartBody(body)}.` };
+        text: invalid ? `Ignorado: ${invalid}`
+          : `Enviado ao Media Tool: ${describeStartBody(body, chooser.options?.presets)}.` };
       busy = false;
       render();
       ctx.go("activity", { highlight: result.links_batch_id ?? result.batch_ids?.[0] ?? null });
@@ -135,14 +175,6 @@ export function pageTab(panel, ctx) {
     }
     busy = false;
     render();
-  }
-
-  async function flowLine() {
-    const form = { ...DEFAULT_FORM, ...(await loadUiState("importForm", {})) };
-    const flow = FLOW_OPTIONS.find((o) => o.value === form.flow)?.label ?? "Só baixar";
-    const zip = form.autoExport ? " · ZIP automático" : "";
-    return h("p", { class: "muted small" }, `Depois de baixar: ${flow}${zip}. `,
-      button("Alterar em Importar", () => ctx.go("import"), "link"));
   }
 
   function render() {
@@ -174,23 +206,22 @@ export function pageTab(panel, ctx) {
       return;
     }
     parts.push(previewBlock());
-    const kind = preview?.kind ?? (page.kind === "reel" ? "reel" : "post");
-    const actions = postActions(kind).map((a) => button(a.label, () => void download(a.media),
-      a.primary ? "btn primary" : "btn", { disabled: Boolean(busy), dataset: { media: a.media } }));
+    kind = preview?.kind ?? (page.kind === "reel" ? "reel" : "post");
+    parts.push(flowBox);
     if (!preview && kind === "post") {
       parts.push(h("p", { class: "muted small", text: "Tipo ainda não analisado: as opções valem para qualquer publicação." }));
     }
-    parts.push(h("div", { class: "stack", id: "post-actions" }, ...actions));
-    const flowHolder = h("div");
-    void flowLine().then((line) => flowHolder.replaceChildren(line));
-    parts.push(flowHolder);
+    renderActions();
+    parts.push(actionsEl);
     parts.push(h("div", { class: "stack" }, button(busy === "owner" ? "Descobrindo o perfil…" :
       "Importar o perfil desta publicação", () => void owner(), "btn", { disabled: Boolean(busy), id: "post-owner" })));
     setChildren(panel, ...parts);
   }
 
   return {
-    show() {
+    async show() {
+      // Relê a configuração única (a aba Importar pode tê-la mudado) antes de desenhar os botões.
+      await refreshFlow();
       if (loadedUrl !== ctx.pageUrl || (!info && page.kind !== "other")) void load();
       else render();
     },

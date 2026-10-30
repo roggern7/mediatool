@@ -21,7 +21,7 @@ A mesma interface (mesmo código, `extension/src/ui/`) aparece em dois lugares:
 
 ID da extensão: **`lnpealhnkmjaohdlkpapjmdealokkdbf`**. Ele é fixo porque o `manifest.json` tem o campo `key` (só a
 chave PÚBLICA RSA 2048; a privada não fica no repositório). O mesmo ID aparece em qualquer computador que carregue a
-pasta. Versão do manifesto: `0.2.0`.
+pasta. Versão do manifesto: `0.3.0`.
 
 ## Pareamento e persistência
 
@@ -55,15 +55,26 @@ ela é (`POST /api/ext/page-info`, sem rede):
   vídeos, fotos, capas e o @ do dono.
 - **Ações conforme o tipo** (todas viram `POST /api/ext/start` com um link):
   - Reel ou vídeo: Baixar vídeo (`videos`), Baixar capa (`covers`), Baixar tudo (vídeo e capa) (`all`; num Reel é o
-    mesmo que "Vídeos e capas", por isso só uma das duas aparece).
+    mesmo que "Vídeos e capas", por isso só uma das duas aparece). Com edição ou preset o botão diz a ação completa:
+    **Baixar e editar vídeo**, **Baixar tudo e editar (vídeo e capa)** (ou "processar", com preset); a capa continua
+    "Baixar capa".
   - Foto: Baixar foto(s) (`photos`).
   - Carrossel, ou publicação `/p/` ainda não analisada: Baixar todos os itens (`all`), Só fotos, Só vídeos, Capas dos
-    vídeos, Vídeos e capas (`videos_covers`).
+    vídeos, Vídeos e capas (`videos_covers`). Com edição: "Baixar todos os itens e editar os vídeos", "Só vídeos e
+    editar", "Vídeos e capas (editar os vídeos)".
   - Qualquer publicação: **Importar o perfil desta publicação** (`POST /api/ext/post-owner`; se o @ está na URL, sem
     consulta) leva à aba Importar com o @ preenchido.
   - Perfil: **Importar @perfil** leva à aba Importar com o @ preenchido.
-- As ações usam o **fluxo após o download** salvo na aba Importar (linha "Depois de baixar: …", com atalho para
-  alterar). Depois de enviar, a extensão abre a aba Atividade.
+- **Depois de baixar** (bloco compacto acima dos botões): a mesma escolha da aba Importar (Só baixar, Editar após
+  baixar, Processar com preset) e o resumo do que será aplicado ("Corte em 15 s · 1,05x · nitidez", `Preset "Nome"`,
+  mais o ZIP automático quando ligado). **Ajustar** abre ali mesmo os controles de edição (os mesmos da aba Importar)
+  ou o seletor de preset; **Ocultar ajustes** fecha. Lê e grava a MESMA configuração da aba Importar (`importForm` em
+  `chrome.storage.local`): mudar aqui muda lá e vice-versa. O ZIP automático e "aguardar edição manual" se escolhem
+  em Importar (atalho "ZIP e mais opções em Importar"); se "aguardar edição manual" estiver escolhido, ele aparece
+  no bloco.
+- Sem nenhuma edição escolhida ("Nenhuma edição selecionada.") ou sem preset, os botões que baixam vídeo ficam
+  desabilitados; "Baixar capa" e "Baixar foto(s)" continuam (capas e fotos só são baixadas, nunca editadas). Depois de
+  enviar, a extensão abre a aba Atividade.
 
 ### Importar
 
@@ -79,15 +90,35 @@ ela é (`POST /api/ext/page-info`, sem rede):
 - **Visualizações**: mínimo e máximo (sem filtro, 1 mil, 10 mil, 50 mil, 100 mil, 500 mil, 1 mi ou personalizado; o
   máximo precisa ser maior ou igual ao mínimo). Desabilitado, com explicação, com Somente fotos e Todas.
 - Quantidade, período e visualizações valem só para perfis; quando a lista só tem publicações, eles somem.
-- **Depois do download**: Só baixar; Baixar e processar automaticamente (usa a configuração da aba Processar: edição
-  com os controles reais ou um preset; vai como `post_processing: "edit"` + `edit`, ou `"preset"` + `preset_id`);
-  Baixar e aguardar edição manual (só baixa; edite depois pela aba Processar ou no Media Tool).
-- **Exportar ZIP automaticamente ao concluir** (originais, editados ou ambos) → `auto_export: {content}`. Editados
-  exigem "Baixar e processar automaticamente".
-- **Predefinições de operação** (guardadas só neste navegador): Somente baixar; Baixar e processar; Baixar, processar
-  e exportar (ZIP de editados); Baixar tudo sem processamento (tipo Todas); e **Salvar atual como…** (até 20; guardam
-  tipo, quantidade, período, visualizações, fluxo e exportação, nunca o perfil ou os links). As últimas escolhas são
-  lembradas.
+- **Depois do download** (escolha exclusiva, como no app):
+  - **Só baixar** → `post_processing: "none"`.
+  - **Editar após baixar**: o formulário de edição aparece ali mesmo (componente compartilhado com a aba Processar,
+    em versão compacta): Duração (Original, 15 s, 30 s, 60 s, Personalizada até 7200 s, com a nota "limite + 0,03 s;
+    vídeos menores não são prolongados"), Velocidade de 1,00x a 1,50x (atalhos 1x a 1,5x, barra de passo 0,01, campo
+    para digitar e botões − / +) e Nitidez sutil. Vai como `post_processing: "edit"` + `edit: {duration_mode,
+    custom_seconds, speed, sharpen, output_type: "mp4"}`. Sem corte, velocidade nem nitidez aparece "Nenhuma edição
+    selecionada." e o envio fica bloqueado (mesma regra do app); duração personalizada vazia, zero ou acima do
+    limite também bloqueia.
+  - **Processar com preset**: seletor dos presets do app ali mesmo → `"preset"` + `preset_id` (obrigatório).
+  - **Baixar e aguardar edição manual**: só baixa (`"none"`); edite depois pela aba Processar ou no Media Tool.
+  - Abaixo da escolha, o resumo do que será aplicado ("Corte em 15 s · 1,05x · nitidez") ou o problema em vermelho;
+    **Ocultar ajustes** / **Ajustar** recolhe e abre os controles. Limites e presets vêm de `GET /api/ext/edit/options`
+    (sem resposta, os controles padrão). Fotos e capas nunca são editadas: com "Somente fotos" ou "Somente capas" o
+    corpo vai com `"none"` e a tela avisa; com tipos mistos só os vídeos são editados.
+- **Exportar ZIP automaticamente ao concluir** (originais, editados ou ambos) → `auto_export: {content}`. Editados ou
+  ambos exigem "Editar após baixar" ou "Processar com preset" (e um tipo de mídia com vídeo); senão a tela mostra o
+  motivo e bloqueia o envio.
+- **Predefinições de operação** (guardadas só neste navegador): Somente baixar; **Baixar e editar** (Editar após
+  baixar com as últimas configurações de edição); **Baixar, editar e exportar ZIP** (edição + ZIP automático de
+  originais e editados); Baixar e processar (preset); Baixar, processar e exportar (preset + ZIP de editados); Baixar
+  tudo sem processamento (tipo Todas); e **Salvar atual como…** (até 20; guardam tipo, quantidade, período,
+  visualizações, fluxo, configurações de edição, preset e exportação, nunca o perfil ou os links).
+- **Configuração lembrada**: o fluxo, a edição, o preset e o ZIP ficam em `importForm` (`chrome.storage.local`) assim
+  que mudam, e a Página atual usa a mesma configuração. Compatibilidade com a versão 0.2.0: o antigo `flow: "auto"`
+  ("Baixar e processar automaticamente", que usava a configuração da aba Processar) é migrado na primeira abertura
+  para "Editar após baixar" (com a duração, velocidade e nitidez salvas na aba Processar) ou "Processar com preset"
+  (com o preset de lá), e o resultado é gravado. Predefinições do usuário com o fluxo antigo são convertidas do mesmo
+  jeito.
 - Pedidos grandes (mais de 1.000 publicações no total, ou mais de 50 entradas) pedem confirmação.
 - Cada envio leva um `client_request_id` (UUID). O botão fica desabilitado até a resposta; repetir o mesmo pedido
   depois de um erro de rede reaproveita o mesmo id (o backend devolve a mesma resposta em até 10 min, sem criar de
@@ -141,7 +172,8 @@ ela é (`POST /api/ext/page-info`, sem rede):
 - Aplica à seleção da Biblioteca, só a vídeos. A tela avisa quantos itens não são vídeo (fotos e capas) e serão
   ignorados; o backend devolve também `skipped`. Edição → `POST /api/ext/edits`; preset → `POST /api/ext/process`.
   Máximo de 500 vídeos por pedido; mais de 20 pede confirmação. O lote criado aparece na Atividade.
-- A mesma configuração é a usada por "Baixar e processar automaticamente" na aba Importar.
+- Os controles são o mesmo componente de "Editar após baixar" (`src/ui/editControls.js`), mas a configuração desta
+  aba (`processForm`) é só dela: editar itens já baixados não muda o que a importação aplica, e vice-versa.
 - **Recortar no Media Tool**: o recorte manual é feito na página Editar do app. O botão abre
   `http://127.0.0.1:<porta>/editar?ids=1,2,3` com os vídeos da seleção (até 500; sem vídeos, só `/editar`); o app
   adiciona só os vídeos à seleção dele, avisa quantos itens ignorou e limpa o parâmetro da URL.
@@ -247,9 +279,11 @@ tela; com `used` troca o código por "Extensão conectada." e atualiza a lista.
 
 - Backend: `backend/tests/test_extension_security.py` e `backend/tests/test_extension_api.py`.
 - Extensão: `cd extension` e `node --test` (Node 20+, sem dependências; testes em `extension/tests/`): cliente da API
-  (rotas, 401, 429, sem conexão e demora, miniatura), corpo do `start` para cada tipo, fluxo e predefinição, período
-  "ano atual", visualizações, estados e contadores da atividade, seleção, processamento, exportação e idempotência
-  local.
+  (rotas, 401, 429, sem conexão e demora, miniatura), corpo do `start` para cada tipo, fluxo (só baixar, editar com
+  cada duração/velocidade/nitidez, preset, edição manual) e predefinição, bloqueio sem edição, ZIP de editados só com
+  edição ou preset, rótulos completos dos botões da Página atual, migração do `flow: "auto"` antigo (também gravada em
+  `chrome.storage.local`, `tests/settings.test.js`), período "ano atual", visualizações, estados e contadores da
+  atividade, seleção, processamento, exportação e idempotência local.
 - Teste no Chrome: o popup pode ser aberto como página em
   `chrome-extension://lnpealhnkmjaohdlkpapjmdealokkdbf/popup.html?testUrl=<url>`. O parâmetro `testUrl` só existe
   para testes, só é aceito quando a extensão está instalada sem compactação ("Carregar sem compactação", manifesto
@@ -269,6 +303,9 @@ tela; com `used` troca o código por "Extensão conectada." e atualiza a lista.
 - **"sem miniatura"**: o app não conseguiu gerar a miniatura daquele item; o item continua utilizável.
 - **Aplicar desabilitado em Processar**: a seleção não tem vídeos ou a configuração tem erro (veja o resumo em
   vermelho).
+- **"Iniciar importação" ou "Baixar e editar vídeo" desabilitado**: em "Editar após baixar" nenhuma edição foi
+  escolhida ("Nenhuma edição selecionada.") ou a duração personalizada é inválida; em "Processar com preset" falta o
+  preset; ou o ZIP de editados foi pedido sem edição/preset. O motivo aparece em vermelho no bloco.
 
 ## Limitações
 
