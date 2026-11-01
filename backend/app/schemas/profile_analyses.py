@@ -59,6 +59,11 @@ class AnalysisOut(BaseModel):
     summary: AnalysisSummary
 
 
+class HistoryCleared(BaseModel):
+    deleted: int
+    kept_open: int
+
+
 class AnalysisList(BaseModel):
     items: list[AnalysisOut]
     total: int

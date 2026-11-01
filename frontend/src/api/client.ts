@@ -31,6 +31,7 @@ import type {
   ProfileAnalysis,
   ProfileAnalysisItem,
   ProfileAnalysisPage,
+  ProfileHistoryCleared,
   ProfileInfo,
   ProfilesPreview,
   SessionInput,
@@ -332,6 +333,8 @@ export const api = {
     request<Paged<ProfileAnalysisItem>>("GET", `/profile-analyses/${id}/items`, { query: { limit, offset } }),
   cancelProfileAnalysis: (id: number) => request<ProfileAnalysis>("POST", `/profile-analyses/${id}/cancel`),
   resumeProfileAnalysis: (id: number) => request<ProfileAnalysis>("POST", `/profile-analyses/${id}/resume`),
+  deleteProfileAnalysis: (id: number) => request<void>("DELETE", `/profile-analyses/${id}`),
+  clearProfileHistory: () => request<ProfileHistoryCleared>("DELETE", "/profile-analyses"),
 
   getSettings: () => request<Settings>("GET", "/settings"),
   updateSettings: (patch: SettingsUpdate) => request<Settings>("PUT", "/settings", { body: patch }),

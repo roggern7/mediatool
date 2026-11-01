@@ -1673,6 +1673,8 @@ sessão salva em nenhum ponto. A extensão não acessa estas rotas (origem de ex
 |---|---|---|---|
 | POST | /api/profile-analyses | `{text: string}` (corpo até 1 MiB; acima: 413 `payload_too_large`) | `Analysis` 202; 400 `no_profiles`\|`too_many_profiles` (mais de 10.000 perfis únicos) |
 | GET | /api/profile-analyses | `limit` 1..100 (20), `offset` | `{items: Analysis[], total, open_id}` (id DESC; `open_id`: análise que o executor atende agora) |
+| DELETE | /api/profile-analyses | | `{deleted, kept_open}`: apaga as análises encerradas e seus itens; as abertas ficam |
+| DELETE | /api/profile-analyses/{id} | | 204; apaga a análise encerrada e seus itens, sem desfazer; 409 `analysis_running` se aberta; 404 |
 | GET | /api/profile-analyses/{id} | | `Analysis`; 404 `analysis_not_found` |
 | GET | /api/profile-analyses/{id}/items | `limit` 1..200 (50), `offset` | `{items: Item[], total}` (por `position`); 404 |
 | POST | /api/profile-analyses/{id}/cancel | | `Analysis`; idempotente em aberta; terminal volta como está; 404 |

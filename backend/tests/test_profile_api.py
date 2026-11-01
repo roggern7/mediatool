@@ -144,6 +144,78 @@ def test_running_username_is_reported(harness):
 
 
 # ---- cancelamento -------------------------------------------------------------------------------------------------
+def finished(harness, *usernames: str) -> dict:
+    clock = SimClock()
+    runner = install_runner(harness, ScriptedFetcher(clock), clock)
+    analysis = create(harness, *usernames)
+    runner.run_next()
+    return analysis
+
+
+def item_rows(harness, analysis_id: int) -> int:
+    return harness.ctx.db.scalar("SELECT COUNT(*) FROM profile_analysis_items WHERE analysis_id = ?", (analysis_id,))
+
+
+def test_delete_removes_only_that_analysis_and_its_items(harness):
+    first = finished(harness, "a1", "a2")
+    second = finished(harness, "b1")
+    assert harness.client.delete(f"{API}/{first['id']}").status_code == 204
+    assert harness.client.get(f"{API}/{first['id']}").status_code == 404
+    assert harness.client.get(f"{API}/{first['id']}/report").status_code == 404
+    assert item_rows(harness, first["id"]) == 0
+    assert item_rows(harness, second["id"]) == 1
+    listed = harness.client.get(API).json()
+    assert [row["id"] for row in listed["items"]] == [second["id"]] and listed["total"] == 1
+    assert harness.client.delete(f"{API}/{first['id']}").status_code == 404
+
+
+def test_open_analysis_is_never_deleted(harness):
+    clock = SimClock()
+    install_runner(harness, ScriptedFetcher(clock), clock)
+    analysis = create(harness, "a1", "a2")
+    response = harness.client.delete(f"{API}/{analysis['id']}")
+    assert response.status_code == 409 and response.json()["code"] == "analysis_running"
+    assert item_rows(harness, analysis["id"]) == 2
+    harness.ctx.profile_analyses.claim_next("2026-11-01T12:00:00.000Z")
+    assert harness.client.delete(f"{API}/{analysis['id']}").status_code == 409
+    harness.ctx.profile_analyses.set_waiting(analysis["id"], "rate_limited", None, 1)
+    assert harness.client.delete(f"{API}/{analysis['id']}").status_code == 409
+
+
+def test_clear_history_keeps_what_is_open(harness):
+    clock = SimClock()
+    runner = install_runner(harness, ScriptedFetcher(clock), clock)
+    first = create(harness, "a1")
+    runner.run_next()
+    second = create(harness, "b1")
+    runner.run_next()
+    cancelled = create(harness, "c1")
+    harness.client.post(f"{API}/{cancelled['id']}/cancel")
+    running = create(harness, "d1", "d2")
+    response = harness.client.request("DELETE", API)
+    assert response.status_code == 200 and response.json() == {"deleted": 3, "kept_open": 1}
+    listed = harness.client.get(API).json()
+    assert [row["id"] for row in listed["items"]] == [running["id"]] and listed["open_id"] == running["id"]
+    for gone in (first, second, cancelled):
+        assert item_rows(harness, gone["id"]) == 0
+    assert item_rows(harness, running["id"]) == 2
+    assert harness.client.request("DELETE", API).json() == {"deleted": 0, "kept_open": 1}
+
+
+def test_numbers_of_deleted_analyses_are_not_reused(harness):
+    first = finished(harness, "a1")
+    assert harness.client.delete(f"{API}/{first['id']}").status_code == 204
+    assert finished(harness, "b1")["id"] > first["id"]
+
+
+def test_delete_requires_the_panel_client_header(harness):
+    analysis = finished(harness, "a1")
+    headers = {"X-Media-Tool-Client": ""}
+    assert harness.client.delete(f"{API}/{analysis['id']}", headers=headers).status_code == 403
+    assert harness.client.request("DELETE", API, headers=headers).status_code == 403
+    assert harness.client.get(f"{API}/{analysis['id']}").status_code == 200
+
+
 def test_cancel_queued_analysis_finishes_now(harness):
     analysis = create(harness, "a1", "a2")
     url = f"{API}/{analysis['id']}/cancel"

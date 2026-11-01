@@ -2,7 +2,7 @@ import { memo, useCallback, useDeferredValue, useId, useMemo, useState, type For
 import { api, messageOf } from "../api/client";
 import type { ProfileAnalysis, ProfileAnalysisItem } from "../api/types";
 import { Link } from "../components/Layout";
-import { Empty, ErrorLine, Field, Pill, ProgressBar, SkeletonRows, Spinner } from "../components/ui";
+import { ConfirmDialog, Empty, ErrorLine, Field, Pill, ProgressBar, SkeletonRows, Spinner } from "../components/ui";
 import { formatCount } from "../lib/format";
 import {
   ANALYSIS_STATUS_LABEL,
@@ -14,6 +14,7 @@ import {
   analysisRoute,
   analysisTone,
   confirmedCount,
+  clearedText,
   compactProfileText,
   countProfileLines,
   endNoticeText,
@@ -58,6 +59,53 @@ export function ProfileAnalysisPage() {
   );
   const currentId = urlId ?? watchedId;
   const reloadHistory = history.reload;
+  const toast = useToast();
+  const [toDelete, setToDelete] = useState<ProfileAnalysis | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [removing, setRemoving] = useState(false);
+
+  /** A análise aberta no painel acabou de ser apagada: fecha o painel e volta à página sem `?id=`. */
+  function closePanel() {
+    setWatchedId(null);
+    navigate(ROUTES.profiles);
+  }
+
+  async function removeOne(analysis: ProfileAnalysis) {
+    setRemoving(true);
+    try {
+      await api.deleteProfileAnalysis(analysis.id);
+      toast.push("ok", `Análise nº ${analysis.id} apagada.`);
+      if (analysis.id === currentId) closePanel();
+      // Era a única linha desta página do histórico: volta uma página.
+      if (history.data?.items.length === 1 && offset > 0) setOffset(Math.max(0, offset - HISTORY_PAGE));
+      else reloadHistory();
+    } catch (err) {
+      toast.push("err", messageOf(err));
+      reloadHistory();
+    } finally {
+      setRemoving(false);
+      setToDelete(null);
+    }
+  }
+
+  async function removeAll() {
+    setRemoving(true);
+    try {
+      const result = await api.clearProfileHistory();
+      toast.push("ok", clearedText(result));
+      // O painel de uma análise aberta volta sozinho pelo `open_id` do histórico.
+      closePanel();
+      if (offset > 0) setOffset(0);
+      else reloadHistory();
+    } catch (err) {
+      toast.push("err", messageOf(err));
+      reloadHistory();
+    } finally {
+      setRemoving(false);
+      setConfirmClear(false);
+    }
+  }
+
   // Referência estável: o polling do histórico não redesenha o cartão de entrada (`memo`).
   const onStarted = useCallback(
     (id: number) => {
@@ -89,6 +137,16 @@ export function ProfileAnalysisPage() {
         <div className="section-head">
           <h2>Histórico</h2>
           {history.loading && history.data ? <Spinner /> : null}
+          {history.data && history.data.total > 0 ? (
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              style={{ marginLeft: "auto" }}
+              onClick={() => setConfirmClear(true)}
+            >
+              Limpar histórico
+            </button>
+          ) : null}
         </div>
         {history.error ? <ErrorLine message={history.error} onRetry={history.reload} /> : null}
         {history.data === undefined ? (
@@ -99,11 +157,39 @@ export function ProfileAnalysisPage() {
           <Empty title="Nenhuma análise ainda" />
         ) : (
           <>
-            <HistoryTable items={history.data.items} currentId={currentId} />
+            <HistoryTable items={history.data.items} currentId={currentId} onDelete={setToDelete} />
             <Pager start={offset} total={history.data.total} size={HISTORY_PAGE} onGo={setOffset} />
           </>
         )}
       </section>
+      {toDelete ? (
+        <ConfirmDialog
+          title={`Apagar a análise nº ${toDelete.id}?`}
+          confirmLabel="Apagar"
+          danger
+          focusCancel
+          busy={removing}
+          onConfirm={() => void removeOne(toDelete)}
+          onCancel={() => setToDelete(null)}
+        >
+          Os resultados de {formatCount(toDelete.total)} perfis e o relatório desta análise serão apagados. Não dá para
+          desfazer.
+        </ConfirmDialog>
+      ) : null}
+      {confirmClear ? (
+        <ConfirmDialog
+          title="Limpar o histórico?"
+          confirmLabel="Limpar histórico"
+          danger
+          focusCancel
+          busy={removing}
+          onConfirm={() => void removeAll()}
+          onCancel={() => setConfirmClear(false)}
+        >
+          Todas as análises encerradas e seus relatórios serão apagados. Análise em andamento não é apagada. Não dá para
+          desfazer.
+        </ConfirmDialog>
+      ) : null}
     </div>
   );
 }
@@ -383,7 +469,15 @@ function ReportLink({ analysis, label }: { analysis: ProfileAnalysis; label: str
   );
 }
 
-function HistoryTable({ items, currentId }: { items: ProfileAnalysis[]; currentId: number | null }) {
+function HistoryTable({
+  items,
+  currentId,
+  onDelete,
+}: {
+  items: ProfileAnalysis[];
+  currentId: number | null;
+  onDelete: (analysis: ProfileAnalysis) => void;
+}) {
   return (
     <div className="table-wrap">
       <table className="table">
@@ -397,6 +491,7 @@ function HistoryTable({ items, currentId }: { items: ProfileAnalysis[]; currentI
             <th>Status</th>
             <th aria-label="Abrir" />
             <th aria-label="Baixar" />
+            <th aria-label="Apagar" />
           </tr>
         </thead>
         <tbody>
@@ -417,6 +512,13 @@ function HistoryTable({ items, currentId }: { items: ProfileAnalysis[]; currentI
               </td>
               <td>
                 <ReportLink analysis={analysis} label="Baixar" />
+              </td>
+              <td>
+                {isAnalysisActive(analysis.status) ? null : (
+                  <button type="button" className="btn btn-sm btn-ghost" onClick={() => onDelete(analysis)}>
+                    Apagar
+                  </button>
+                )}
               </td>
             </tr>
           ))}

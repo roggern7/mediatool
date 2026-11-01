@@ -605,6 +605,19 @@ describe("cliente: análise de perfis", () => {
     expect(created.id).toBe(3);
   });
 
+  it("apagar e limpar o histórico usam DELETE com o cabeçalho do painel", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ deleted: 1, kept_open: 0 })));
+    await api.deleteProfileAnalysis(7);
+    await api.clearProfileHistory();
+    const calls = fetchMock.mock.calls.map((call) => [call[0], (call[1] as RequestInit).method]);
+    expect(calls).toEqual([
+      ["/api/profile-analyses/7", "DELETE"],
+      ["/api/profile-analyses", "DELETE"],
+    ]);
+    const headers = (fetchMock.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Media-Tool-Client"]).toBe("panel");
+  });
+
   it("lista, detalhe, itens e cancelamento usam as rotas do contrato", async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ items: [], total: 0 })));
     await api.listProfileAnalyses(20, 40);

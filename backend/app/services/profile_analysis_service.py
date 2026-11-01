@@ -135,6 +135,19 @@ def cancel_analysis(ctx: AppContext, analysis_id: int) -> dict[str, Any]:
     return get_analysis(ctx, analysis_id)
 
 
+def delete_analysis(ctx: AppContext, analysis_id: int) -> None:
+    """Apaga do histórico uma análise encerrada. Aberta: 409, para cancelar antes."""
+    _require(ctx, analysis_id)
+    if not ctx.profile_analyses.delete_analysis(analysis_id):
+        raise AppError(409, "analysis_running", "A análise ainda está em andamento. Cancele antes de apagar.")
+
+
+def clear_history(ctx: AppContext) -> dict[str, int]:
+    """Apaga todas as análises encerradas. As abertas continuam rodando."""
+    deleted = ctx.profile_analyses.clear_finished()
+    return {"deleted": deleted, "kept_open": len(ctx.profile_analyses.open_analyses())}
+
+
 def resume_analysis(ctx: AppContext, analysis_id: int) -> dict[str, Any]:
     """Os perfis não consultados voltam à fila; o que já tem resultado não muda nem é consultado de novo."""
     _require(ctx, analysis_id)

@@ -882,6 +882,12 @@ export interface ProfileAnalysis {
   summary: ProfileAnalysisSummary;
 }
 
+export interface ProfileHistoryCleared {
+  deleted: number;
+  /** Análises abertas, que nunca são apagadas. */
+  kept_open: number;
+}
+
 export interface ProfileAnalysisPage extends Paged<ProfileAnalysis> {
   /** Análise que o executor atende agora, esteja ou não nesta página; null sem análise aberta. */
   open_id: number | null;
