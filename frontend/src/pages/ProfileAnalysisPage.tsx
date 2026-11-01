@@ -442,10 +442,16 @@ function Pager({
   if (total <= size) return null;
   const { page, pages } = pageInfo(start, size, total);
 
+  // Troca de página volta ao topo da tela: a nova lista começa lá em cima, não onde o botão estava.
+  function go(offset: number) {
+    onGo(offset);
+    document.querySelector(".main")?.scrollTo(0, 0);
+  }
+
   function jump() {
     const target = draft === null ? null : parsePage(draft);
     setDraft(null);
-    if (target !== null) onGo(pageOffset(target, size, total));
+    if (target !== null) go(pageOffset(target, size, total));
   }
 
   return (
@@ -453,20 +459,20 @@ function Pager({
       <span className="muted small">
         Página {formatCount(page)} de {formatCount(pages)}
       </span>
-      <button type="button" className="btn btn-sm" disabled={page === 1} onClick={() => onGo(0)}>
+      <button type="button" className="btn btn-sm" disabled={page === 1} onClick={() => go(0)}>
         Primeira
       </button>
-      <button type="button" className="btn btn-sm" disabled={page === 1} onClick={() => onGo(start - size)}>
+      <button type="button" className="btn btn-sm" disabled={page === 1} onClick={() => go(start - size)}>
         Anterior
       </button>
-      <button type="button" className="btn btn-sm" disabled={page === pages} onClick={() => onGo(start + size)}>
+      <button type="button" className="btn btn-sm" disabled={page === pages} onClick={() => go(start + size)}>
         Próxima
       </button>
       <button
         type="button"
         className="btn btn-sm"
         disabled={page === pages}
-        onClick={() => onGo(pageOffset(pages, size, total))}
+        onClick={() => go(pageOffset(pages, size, total))}
       >
         Última
       </button>
