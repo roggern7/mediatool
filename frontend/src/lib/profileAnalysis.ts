@@ -80,6 +80,13 @@ export function compactProfileText(text: string): string {
     .join("\n");
 }
 
+/** Resultado de "Limpar histórico" para o aviso da tela. */
+export function clearedText({ deleted, kept_open }: { deleted: number; kept_open: number }): string {
+  if (deleted === 0) return "Nenhuma análise encerrada para apagar.";
+  const done = deleted === 1 ? "1 análise apagada." : `${formatCount(deleted)} análises apagadas.`;
+  return kept_open > 0 ? `${done} A análise em andamento foi mantida.` : done;
+}
+
 /** "12 perfis · 2 linhas inválidas · 1 duplicata". */
 export function lineCountText({ profiles, invalid, duplicates }: LineCount): string {
   const parts = [plural(profiles, "perfil", "perfis")];

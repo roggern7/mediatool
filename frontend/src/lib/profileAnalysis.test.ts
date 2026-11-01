@@ -14,6 +14,7 @@ import {
   analysisTone,
   checkCell,
   confirmedCount,
+  clearedText,
   compactProfileText,
   countProfileLines,
   endNoticeText,
@@ -147,6 +148,14 @@ describe("estado da análise", () => {
     expect(analysisTone("completed")).toBe("ok");
     expect(analysisTone("interrupted")).toBe("warn");
     expect(analysisTone("cancelled")).toBe("muted");
+  });
+
+  it("resume o que Limpar histórico apagou", () => {
+    expect(clearedText({ deleted: 0, kept_open: 1 })).toBe("Nenhuma análise encerrada para apagar.");
+    expect(clearedText({ deleted: 1, kept_open: 0 })).toBe("1 análise apagada.");
+    expect(clearedText({ deleted: 1200, kept_open: 1 })).toBe(
+      "1.200 análises apagadas. A análise em andamento foi mantida.",
+    );
   });
 
   it("encurta links de compartilhamento e não mexe no resto", () => {

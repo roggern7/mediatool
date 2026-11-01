@@ -13,6 +13,7 @@ OPEN_STATUSES_SQL = "('pending', 'running', 'waiting')"
 # Quem já começou vem antes: uma análise antiga retomada (`pending`, id menor) não fura a que está em andamento.
 _QUEUE_ORDER = "ORDER BY status = 'pending', id"
 TERMINAL_STATUSES = ("completed", "cancelled", "interrupted")
+TERMINAL_STATUSES_SQL = "('completed', 'cancelled', 'interrupted')"
 RESUMABLE_STATUSES = ("cancelled", "interrupted")
 ITEMS_PAGE = 500
 SNAPSHOT_COLUMNS = ("account_status", "display_name", "posts_state", "posts_count", "posts_exact", "posts_text",
@@ -207,6 +208,19 @@ class ProfileAnalysisRepository:
     def set_resume_after(self, analysis_id: int, position: int) -> None:
         """Sequência confirmada pelo canário: ele só volta a olhar adiante desta posição."""
         self.db.execute("UPDATE profile_analyses SET resume_after = ? WHERE id = ?", (position, analysis_id))
+
+    def delete_analysis(self, analysis_id: int) -> bool:
+        """Apaga uma análise encerrada e seus itens (cascata). A condição no próprio DELETE fecha a corrida com uma
+        retomada: análise aberta nunca sai daqui. False = não apagou."""
+        with self.db.transaction() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM profile_analyses WHERE id = ? AND status IN {TERMINAL_STATUSES_SQL}", (analysis_id,))
+            return cursor.rowcount > 0
+
+    def clear_finished(self) -> int:
+        """Apaga as análises encerradas e seus itens; as abertas ficam. Retorna quantas foram apagadas."""
+        with self.db.transaction() as conn:
+            return conn.execute(f"DELETE FROM profile_analyses WHERE status IN {TERMINAL_STATUSES_SQL}").rowcount
 
     def resume_analysis(self, analysis_id: int) -> bool:
         """Retomada de análise terminal com itens não consultados, numa só transação: eles voltam à fila e a análise

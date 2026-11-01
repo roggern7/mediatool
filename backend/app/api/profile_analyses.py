@@ -7,7 +7,13 @@ from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from app.api.deps import Ctx, IdPath
-from app.schemas.profile_analyses import AnalysisCreate, AnalysisItemList, AnalysisList, AnalysisOut
+from app.schemas.profile_analyses import (
+    AnalysisCreate,
+    AnalysisItemList,
+    AnalysisList,
+    AnalysisOut,
+    HistoryCleared,
+)
 from app.services import profile_analysis_service
 
 router = APIRouter(tags=["análise de perfis"])
@@ -41,6 +47,19 @@ def create_analysis(ctx: Ctx, body: AnalysisCreate) -> dict[str, Any]:
 def list_analyses(ctx: Ctx, limit: Annotated[int, Query(ge=1, le=100)] = 20, offset: Offset = 0) -> dict[str, Any]:
     """Histórico (id DESC)."""
     return profile_analysis_service.list_analyses(ctx, limit=limit, offset=offset)
+
+
+@router.delete("/profile-analyses", response_model=HistoryCleared)
+def clear_history(ctx: Ctx) -> dict[str, int]:
+    """Apaga todas as análises encerradas; as abertas ficam. Sem desfazer."""
+    return profile_analysis_service.clear_history(ctx)
+
+
+@router.delete("/profile-analyses/{analysis_id}", status_code=204)
+def delete_analysis(ctx: Ctx, analysis_id: IdPath) -> Response:
+    """Apaga uma análise encerrada e seus resultados. Aberta: 409. Sem desfazer."""
+    profile_analysis_service.delete_analysis(ctx, analysis_id)
+    return Response(status_code=204)
 
 
 @router.get("/profile-analyses/{analysis_id}", response_model=AnalysisOut)
