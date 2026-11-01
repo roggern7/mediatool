@@ -23,6 +23,7 @@ locais. Nada é enviado para servidores de terceiros além das requisições ao 
 - [Biblioteca](#biblioteca)
 - [Baixar ZIP](#baixar-zip)
 - [Exportar para pasta](#exportar-para-pasta)
+- [Análise de Perfis](#análise-de-perfis)
 - [Diagnóstico](#diagnóstico)
 - [Segurança e privacidade](#segurança-e-privacidade)
 - [gallery-dl](#gallery-dl)
@@ -666,6 +667,39 @@ O que esperar:
 - **Se a janela de escolha de pasta não abrir**: o Media Tool tenta dois métodos do Windows. Se nenhum funcionar no
   seu computador, aparece um aviso com o botão **Exportar para a pasta padrão em Documentos** (na Biblioteca a pasta
   criada é `Documentos\Media Tool\Exports\Biblioteca-AAAA-MM-DD-HHMM`).
+
+## Análise de Perfis
+
+Levantamento de uma lista de perfis, sem baixar nada. Em **Análise de Perfis**, cole os @ ou links (um por linha, até
+10.000 perfis por análise) e clique em **Analisar**. O Media Tool consulta um perfil por vez, mostra o progresso na
+tabela e guarda tudo no histórico. Download, edição, Biblioteca, extensão e exportação não mudam.
+
+- **Tempo**: uma consulta por vez, cerca de 4 segundos por perfil (medido em 200 perfis reais). 10.000 perfis levam cerca de
+  11 horas. No primeiro sinal de limite do Instagram a análise passa para cerca de 10 segundos por perfil até o fim; a tela mostra
+  a estimativa. Os resultados podem ser vistos e paginados durante todo o processamento.
+
+- **Sem sessão**: cada perfil é lido da página pública da aba Reels, sem login. A sessão salva nunca é usada.
+- **Colunas**: Perfil, Posts, Views, Stories, Destaques, Status, Data e Horário. Data e horário são os do momento em que
+  aquele perfil respondeu, não os do início ou do fim da análise.
+- **Status**: Ativa (acessível sem login; não quer dizer que publica recentemente), Privada, Indisponível (não
+  encontrado, removido ou restrito para visitantes sem login) e Não verificado.
+- **Não verificado nunca significa Não**: quando a informação não pode ser confirmada, ela aparece como Não verificado.
+- **Views** é a soma dos últimos Reels lidos (até 12), não o total da vida da conta. Posts como `33K` são aproximados,
+  porque é assim que o Instagram informa sem login.
+- **Limites do Instagram**: a análise espera por conta própria (15, 30 e 60 minutos) e retoma; os downloads não são
+  afetados. Se o limite continuar, ela é interrompida e os perfis que faltavam ficam como Não consultado, sem data nem
+  horário. Pausas globais do Instagram são respeitadas. Fechar o Media Tool não perde nada: a análise é retomada, e só
+  o perfil que estava sendo consultado na hora é lido de novo.
+- **Retomar**: análise cancelada ou interrompida com perfis não consultados mostra o botão **Retomar**. Só esses perfis
+  voltam para a fila; o que já tem resultado, inclusive Não verificado, não muda nem é consultado de novo. Para ter um
+  relatório parcial: cancele, baixe e retome.
+- **Muitos perfis Indisponível seguidos**: a cada 10, o Media Tool consulta `@instagram` como controle. Se ele também não
+  responder como ativo, pode ser um bloqueio: esses 10 voltam para a fila e a análise espera, em vez de marcar tudo como
+  Indisponível.
+- **Relatório**: **Baixar relatório (ZIP)** traz `relatorio-perfis-AAAA-MM-DD.zip`. XLSX e CSV têm as 12 colunas (com Nome,
+  Posts exato, Reels somados e Observação); o HTML mostra as 8 colunas da tela e leva esses detalhes dentro das células.
+  Ele é gerado na hora a partir do histórico, sem nova consulta ao Instagram. No relatório, perfil Indisponível sai como
+  Não verificado em Posts, Views, Stories e Destaques, com data e horário reais.
 
 ## Diagnóstico
 

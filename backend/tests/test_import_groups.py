@@ -579,7 +579,7 @@ def test_migration_0012_over_schema_0011_with_data_keeps_old_batches(tmp_path, h
         before = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
         # 0013 (exportações) e 0014 (links) só criam tabelas/colunas; 0015 só mexe no preset Anti-duplicidade;
         # 0016 a 0019 só acrescentam colunas anuláveis; 0021 só colunas com padrão (e troca de índice)
-        assert apply_migrations(db) == [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        assert apply_migrations(db) == [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
         after = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
         assert {k: after[k] for k in before} == before, "nenhum dado antigo reescrito"
         assert (after["group_id"], after["group_position"], after["listing_end"]) == (None, None, None)

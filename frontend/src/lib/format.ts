@@ -11,6 +11,7 @@ const dateTimeFmt = new Intl.DateTimeFormat("pt-BR", {
   minute: "2-digit",
 });
 const dateFmt = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+const clockFmt = new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" });
 
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return "-";
@@ -48,6 +49,12 @@ export function formatDateTime(iso: string | null | undefined): string {
 export function formatDate(iso: string | null | undefined): string {
   const d = parseDate(iso);
   return d ? dateFmt.format(d) : "-";
+}
+
+/** Só o horário, como "14:05". */
+export function formatClock(iso: string | null | undefined): string {
+  const d = parseDate(iso);
+  return d ? clockFmt.format(d) : "-";
 }
 
 /** Velocidade como "1,05x". */

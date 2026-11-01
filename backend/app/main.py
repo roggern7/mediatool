@@ -8,10 +8,12 @@ endpoints são síncronos (threadpool) e o trabalho pesado fica nas threads do w
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from media_processor import MediaProcessor
@@ -32,15 +34,19 @@ from app.db.repositories import (
     JobRepository,
     MediaRepository,
     PresetRepository,
+    ProfileAnalysisRepository,
     SettingsRepository,
 )
 from app.integrations.instagram.composite import CompositeInstagramDownloader
 from app.integrations.instagram.downloader import InstagramDownloader
 from app.integrations.instagram.gallerydl import GalleryDlInstagramDownloader
 from app.integrations.instagram.session import InstagramSessionProvider, LocalInstagramSessionProvider
+from app.integrations.instagram.web.http import InstagramWebHttp, WebHttpConfig
+from app.integrations.instagram.web.profile_snapshot import ProfileSnapshot, fetch_profile_snapshot
 from app.integrations.instagram.web.provider import InstagramWebDownloader, WebStateCache
 from app.jobs.export_runner import ExportRunner, recover_interrupted_exports
 from app.jobs.import_runner import ImportRunner
+from app.jobs.profile_analysis_runner import ProfileAnalysisRunner, recover_profile_analyses
 from app.jobs.recovery import run_recovery
 from app.jobs.worker import Worker
 from app.services.context import AppContext
@@ -67,12 +73,33 @@ code{background:#1d2125;padding:2px 6px;border-radius:6px}a{color:#6b8afd}</styl
 <p>A API está ativa: <a href="/docs">/docs</a>.</p></body></html>"""
 
 
+def anonymous_profile_fetcher(
+    gate: InstagramRequestGate, *, transport: httpx.BaseTransport | None = None,
+) -> Callable[[str, threading.Event | None], ProfileSnapshot]:
+    """Consulta da Análise de Perfis: por chamada, um cliente ANÔNIMO (jar vazio; nenhuma sessão é lida) e UM GET da
+    aba Reels. Passa pelo portão global (1 em voo, intervalo, pausa publicada -> `InstagramPaused`). Não usa o teto de
+    páginas por hora das importações: o limite vem do ritmo do executor. O cliente é descartado ao fim da consulta, e
+    os cookies anônimos que ele recebe não viram segredo registrado (não são da conta do dono e seriam novos a cada
+    consulta)."""
+
+    def fetch(username: str, cancel: threading.Event | None) -> ProfileSnapshot:
+        http = InstagramWebHttp.anonymous(WebHttpConfig(), transport=transport, gate=gate, register_cookies=False)
+        http.cancel = cancel
+        try:
+            return fetch_profile_snapshot(http, username)
+        finally:
+            http.close()
+
+    return fetch
+
+
 def build_context(
     settings: Settings,
     *,
     session_provider: InstagramSessionProvider | None = None,
     downloader_factory: Callable[[], InstagramDownloader] | None = None,
     processor: MediaProcessor | None = None,
+    profile_fetcher: Callable[[str, threading.Event | None], ProfileSnapshot] | None = None,
 ) -> AppContext:
     db = Database(settings.database_path)
     storage = Storage(settings.storage_dir)
@@ -116,11 +143,14 @@ def build_context(
         batches=BatchRepository(db),
         app_settings=app_settings,
         exports=ExportRepository(db),
+        profile_analyses=ProfileAnalysisRepository(db),
+        profile_fetcher=profile_fetcher or anonymous_profile_fetcher(gate),
     )
     ctx.instagram_gate = gate
     ctx.worker = Worker(ctx, concurrency=settings.concurrency)
     ctx.import_runner = ImportRunner(ctx)
     ctx.export_runner = ExportRunner(ctx)
+    ctx.profile_runner = ProfileAnalysisRunner(ctx)
     return ctx
 
 
@@ -152,10 +182,12 @@ def create_app(
     downloader_factory: Callable[[], InstagramDownloader] | None = None,
     processor: MediaProcessor | None = None,
     start_worker: bool = True,
+    profile_fetcher: Callable[[str, threading.Event | None], ProfileSnapshot] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     ctx = build_context(
-        settings, session_provider=session_provider, downloader_factory=downloader_factory, processor=processor
+        settings, session_provider=session_provider, downloader_factory=downloader_factory, processor=processor,
+        profile_fetcher=profile_fetcher,
     )
     run_threads = start_worker and not settings.disable_worker
 
@@ -167,6 +199,7 @@ def create_app(
         apply_migrations(ctx.db)
         run_recovery(ctx)
         recover_interrupted_exports(ctx)
+        recover_profile_analyses(ctx)
         ctx.worker.set_concurrency(effective_concurrency(ctx))
         ctx.worker.set_download_concurrency(effective_download_concurrency(ctx))
         ctx.worker.load_pause_state()
@@ -175,10 +208,12 @@ def create_app(
             ctx.worker.start()
             ctx.import_runner.start()
             ctx.export_runner.start()
+            ctx.profile_runner.start()
         logger.info("Media Tool %s pronto em http://%s:%s", __version__, settings.host, settings.port)
         try:
             yield
         finally:
+            ctx.profile_runner.stop()
             ctx.export_runner.stop()
             ctx.import_runner.stop()
             ctx.worker.stop()

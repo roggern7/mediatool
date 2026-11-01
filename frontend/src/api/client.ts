@@ -28,6 +28,9 @@ import type {
   Preset,
   PresetParams,
   ProcessByFilterRequest,
+  ProfileAnalysis,
+  ProfileAnalysisItem,
+  ProfileAnalysisPage,
   ProfileInfo,
   ProfilesPreview,
   SessionInput,
@@ -319,6 +322,16 @@ export const api = {
   getJob: (id: number) => request<Job>("GET", `/jobs/${id}`),
   cancelJob: (id: number) => request<Job>("POST", `/jobs/${id}/cancel`),
   retryJob: (id: number) => request<Job>("POST", `/jobs/${id}/retry`),
+
+  /** Análise de Perfis: `text` é a lista colada; o backend normaliza e decide o que é válido. */
+  createProfileAnalysis: (text: string) => request<ProfileAnalysis>("POST", "/profile-analyses", { body: { text } }),
+  listProfileAnalyses: (limit = 20, offset = 0) =>
+    request<ProfileAnalysisPage>("GET", "/profile-analyses", { query: { limit, offset } }),
+  getProfileAnalysis: (id: number) => request<ProfileAnalysis>("GET", `/profile-analyses/${id}`),
+  listProfileAnalysisItems: (id: number, limit = 50, offset = 0) =>
+    request<Paged<ProfileAnalysisItem>>("GET", `/profile-analyses/${id}/items`, { query: { limit, offset } }),
+  cancelProfileAnalysis: (id: number) => request<ProfileAnalysis>("POST", `/profile-analyses/${id}/cancel`),
+  resumeProfileAnalysis: (id: number) => request<ProfileAnalysis>("POST", `/profile-analyses/${id}/resume`),
 
   getSettings: () => request<Settings>("GET", "/settings"),
   updateSettings: (patch: SettingsUpdate) => request<Settings>("PUT", "/settings", { body: patch }),

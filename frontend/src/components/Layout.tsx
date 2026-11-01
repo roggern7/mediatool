@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Download, Library, ListOrdered, Scissors, SlidersHorizontal, Settings } from "lucide-react";
+import { Download, Library, ListOrdered, ScanSearch, Scissors, SlidersHorizontal, Settings } from "lucide-react";
 import { api } from "../api/client";
 import { DiskBanner } from "./DiskBanner";
 import { navigate, ROUTES } from "../lib/router";
@@ -10,6 +10,7 @@ const NAV = [
   { to: ROUTES.library, label: "Biblioteca", icon: Library },
   { to: ROUTES.edit, label: "Editar", icon: Scissors },
   { to: ROUTES.queue, label: "Fila", icon: ListOrdered },
+  { to: ROUTES.profiles, label: "Análise de Perfis", icon: ScanSearch },
   { to: ROUTES.presets, label: "Presets", icon: SlidersHorizontal },
   { to: ROUTES.settings, label: "Configurações", icon: Settings },
 ] as const;

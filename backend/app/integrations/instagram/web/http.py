@@ -174,8 +174,11 @@ class InstagramWebHttp:
     BASE = "https://www.instagram.com"
 
     def __init__(self, session: InstagramSession, config: WebHttpConfig = WebHttpConfig(), *,
-                 transport: httpx.BaseTransport | None = None, gate: object | None = None) -> None:
+                 transport: httpx.BaseTransport | None = None, gate: object | None = None,
+                 register_cookies: bool = True) -> None:
         self._config = config
+        # False: cookies RECEBIDOS não entram em ``register_secret`` (ver ``anonymous``).
+        self._register_cookies = register_cookies
         # Portão global (seção 8 de docs/BATCH_ROBUSTNESS.md): cada requisição ao instagram.com ocupa UMA vaga
         # (``gate.slot(cancel)``) só durante o envio/leitura. Ninguém mais segura o portão para este cliente
         # (o portão não é reentrante). ``cancel`` é o evento da operação corrente (definido pelo provider).
@@ -196,10 +199,12 @@ class InstagramWebHttp:
 
     @classmethod
     def anonymous(cls, config: WebHttpConfig = WebHttpConfig(), *, transport: httpx.BaseTransport | None = None,
-                  gate: object | None = None) -> InstagramWebHttp:
+                  gate: object | None = None, register_cookies: bool = True) -> InstagramWebHttp:
         """Cliente SEM cookies do dono (jar vazio): nenhuma sessão salva viaja nas requisições dele. Usado para o
-        documento público de uma publicação; descartado ao fim da operação."""
-        return cls(InstagramSession({}), config, transport=transport, gate=gate)
+        documento público de uma publicação; descartado ao fim da operação. ``register_cookies=False``: para quem faz
+        milhares de consultas anônimas, cada uma com cookies novos que não são da conta do dono (``_secrets`` cresceria
+        sem limite); os padrões de redação seguem cobrindo ``csrftoken=`` e afins."""
+        return cls(InstagramSession({}), config, transport=transport, gate=gate, register_cookies=register_cookies)
 
     def __repr__(self) -> str:
         return "InstagramWebHttp(<redacted>)"
@@ -382,7 +387,8 @@ class InstagramWebHttp:
         return result
 
     def _normalize_jar(self, sessionid_deleted: bool) -> None:
-        """Mantém um cookie por nome no domínio ``.instagram.com`` path ``/`` e registra valores como segredo.
+        """Mantém um cookie por nome no domínio ``.instagram.com`` path ``/`` e registra valores como segredo (salvo
+        com ``register_cookies=False``).
 
         Set-Cookie sem ``Domain`` cria cookie só do host; ele passa a valer para ``.instagram.com`` (o mais
         recente vence). Set-Cookie apagando o ``sessionid`` remove todas as cópias dele.
@@ -393,7 +399,7 @@ class InstagramWebHttp:
             if sessionid_deleted and cookie.name == "sessionid":
                 jar.clear(cookie.domain, cookie.path, cookie.name)
                 continue
-            if cookie.value:
+            if cookie.value and self._register_cookies:
                 register_secret(cookie.value)
             if cookie.domain != COOKIE_DOMAIN or cookie.path != COOKIE_PATH:
                 moved[cookie.name] = cookie.value or ""

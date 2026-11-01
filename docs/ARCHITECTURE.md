@@ -50,7 +50,9 @@ documento explica como as peças se encaixam.
 | `app.services.export_service` | Exportar para pasta: escolha do destino (diálogo nativo + token), criação, cancelamento e "Abrir pasta". Nunca recebe caminho do cliente. |
 | `app.services.export_destination` | Validação do destino, pasta padrão em Documentos, registro de tokens de destino (`DestinationTokens`) e o seletor nativo (`pick_folder_native` + processo filho `folder_picker_child`). |
 | `app.services.export_names` | Nomes de arquivo da exportação (amigáveis, estáveis, válidos no Windows); funções puras. |
-| `app.jobs` | `worker` (claim com lease, heartbeat, pausa de downloads, manutenção), `pipeline` (etapas de ingest e process), `import_runner` (listagem), `recovery` (startup), `errors` (classificação retryable), `export_runner` (thread própria das exportações para pasta, uma por vez). |
+| `app.services.profile_analysis_service` | Análise de Perfis: leitura da lista colada, criação, cancelamento e apresentação. |
+| `app.services.profile_report` / `xlsx_writer` | Relatório da análise (ZIP com XLSX + CSV + HTML), sob demanda a partir do banco; XLSX em stdlib. |
+| `app.jobs` | `worker` (claim com lease, heartbeat, pausa de downloads, manutenção), `pipeline` (etapas de ingest e process), `import_runner` (listagem), `recovery` (startup), `errors` (classificação retryable), `export_runner` (thread própria das exportações para pasta, uma por vez), `profile_analysis_runner` (thread própria da Análise de Perfis, uma por vez, FIFO). |
 | `app.integrations.instagram.session` | `InstagramSession` (opaca), `LocalInstagramSessionProvider`, DPAPI via ctypes. |
 | `app.integrations.instagram.validation` | `parse_profile_input`, validação de shortcode e URL. |
 | `app.integrations.instagram.downloader` | Interface `InstagramDownloader`, `RemoteMedia`, `ProfileInfo`, `InstagramError`. |
@@ -208,6 +210,48 @@ ExportRunner (thread própria, 1 por vez) --> página de 500 mídias por keyset 
 - **Seletor:** dois métodos em processo filho sem shell (tkinter; se não inicializar, PowerShell com
   `FolderBrowserDialog` e script fixo); nenhum funcionou -> 501 `picker_unavailable` e o painel oferece a pasta padrão.
 
+## 5.2 Análise de Perfis
+
+Levantamento de uma lista de perfis, sem mídia, sobre as próprias tabelas. Contrato completo: [CONTRACTS.md](CONTRACTS.md),
+seção 8.8; fonte de dados: [INSTAGRAM_WEB_CONTRACT.md](INSTAGRAM_WEB_CONTRACT.md), `web/profile_snapshot.py`.
+
+- **Fonte:** um GET ANÔNIMO de `/<usuario>/reels/` por perfil (`ctx.profile_fetcher`, montado em `build_context`). Nenhuma
+  sessão é lida. Passa pelo portão global (1 em voo, 2 a 4 s, pausa publicada), mas NÃO pelo teto de páginas por hora
+  das importações: não consome a cota delas nem grava `instagram_listing_pages`, e o cancelamento não fica preso em
+  `_pages_lock`. O limite vem do ritmo adaptativo do executor: 10.000 perfis, o teto de uma análise, levam cerca de 11 h
+  (cerca de 28 h depois de um sinal de limite), e o ritmo não muda com o tamanho da lista. Os cookies anônimos recebidos não entram em
+  `register_secret` (`register_cookies=False`): seriam novos a cada consulta e cresceriam sem limite.
+- **Execução:** `ProfileAnalysisRunner`, thread própria, fila persistente, uma análise por vez. Intervalo sorteado entre
+  perfis: sem espera própria e descanso de 30 a 60 s a cada 100 perfis até o primeiro sinal de limite (429, recusa ou 2
+  `unverified` seguidos); depois, até o fim, 3 a 6 s com descanso a cada 30 (`cautious_pace`, gravado no banco); 10 a 20 s
+  em ritmo lento global. Espera sempre por `threading.Event`.
+- **Isolamento:** um 429 aqui é de requisição anônima e não diz nada sobre a conta. O backoff é LOCAL da análise (15, 30
+  e 60 min, em `waiting_until`/`wait_level`): não chama `worker.pause_for`, não toca em `slow_listing` nem em nenhum estado
+  global, e o fluxo de download não é afetado. A pausa global, ao contrário, é respeitada sem consumir tentativa.
+- **Disjuntor:** 5 perfis `unverified` seguidos entram no mesmo backoff (`too_many_failures`), só se ainda houver perfil
+  por consultar. Degraus esgotados: análise `interrupted`; o que faltava fica `cancelled` com o motivo em `error_code`, sem
+  `checked_at`. Cancelamento pedido antes disso prevalece.
+- **Canário:** `unavailable` não conta como sucesso, porque um IP bloqueado pode receber a mesma rota de erro. A cada 10
+  em sequência, UMA consulta de controle a `instagram`, sem criar item. Ativo: a sequência vale. Qualquer outra resposta: a
+  sequência volta a `pending`, sem resultado, e a análise entra no backoff local.
+- **Falha de banco ou disco:** resultado que o banco recusa vira `unverified` (`internal_error`). Se nada grava, `attempts`
+  limita o item (sem GET novo acima de `MAX_ATTEMPTS + 1`) e o executor espera em memória: nunca há laço de consulta.
+- **Honestidade:** ausência de campo é `unverified`, nunca negativa; só evidência positiva vira `unavailable`.
+- **Reinício:** item `running` volta a `pending` com a tentativa contada (`MAX_ATTEMPTS` vale entre reinícios: um ciclo de
+  quedas consulta o mesmo perfil no máximo `MAX_ATTEMPTS + 1` vezes, depois ele fecha `unverified`); análise aberta é
+  retomada, respeitando `waiting_until`.
+- **Retomada manual:** `POST .../resume` reabre análise `cancelled` ou `interrupted`, numa transação: só itens `cancelled`
+  voltam à fila. `resume_after` guarda a última posição `done`: o canário só olha adiante dela, então nenhum resultado de
+  antes da retomada volta para a fila.
+- **Escala:** índices para listar sem ordenar em memória (`ix_profile_items_position`) e para achar o próximo item sem ler
+  a fila (`ix_profile_items_open`, parcial). Os agregados são gravados em `final_stats` ao terminar: o histórico não varre
+  itens; só análise aberta faz essa varredura (um índice cobridor quase não ajudou). O passo do executor não guarda nada
+  por item em memória.
+- **Relatório:** gerado sob demanda a partir do banco, em fluxo: cada arquivo numa passada própria por `iter_items`
+  (keyset, 500 por vez), escrito linha a linha na entrada do ZIP. O XLSX interno sai em temporário. O ZIP fica em
+  `SpooledTemporaryFile` (1 MiB em memória) e `ReportResponse` o entrega em blocos e fecha em qualquer saída, inclusive na
+  desconexão do cliente. Não usa `exports`: não há mídia, TTL nem fila.
+
 ## 6. Processamento
 
 `ProcessingOptions` (`metadata_cleanup`, `trim_start`, `mirror`, `speed`, `auto_adjust`, `reencode`) vem dos params
@@ -270,7 +314,7 @@ no vídeo e 25 ms no áudio; fora dela o job falha e o temporário é apagado. N
 SQLite em `data\media-tool.db`, WAL, `foreign_keys=ON`, migrations em `backend\app\db\migrations\NNNN_nome.sql`
 registradas em `schema_migrations`: `0001_initial.sql` (schema e seed dos presets Padrão e Anti-duplicidade) e
 `0002_job_lease.sql` (coluna `jobs.claimed_by` e índice parcial para o lease). Tabelas: `presets`, `media`, `renditions`, `batches`, `jobs`, `settings`,
-`app_state`, e `exports`/`export_items`/`batch_media` (migration `0013`, exportar para pasta). Nenhuma tabela guarda sessão ou cookies; `app_state.instagram_session_last_test` guarda só o resultado
+`app_state`, `exports`/`export_items`/`batch_media` (migration `0013`, exportar para pasta) e `profile_analyses`/`profile_analysis_items` (migration `0025`, Análise de Perfis; reversível por `revert_migration` com `migrations\down\`, nunca no startup). Nenhuma tabela guarda sessão ou cookies; `app_state.instagram_session_last_test` guarda só o resultado
 do último teste (`ok`, `code`, `message`, `username`, `tested_at`). Datas em ISO 8601 UTC com `Z`.
 
 ## 9. Segurança

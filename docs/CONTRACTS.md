@@ -274,6 +274,13 @@ temporário em `dest_dir`; limite de tamanho; sem cookies; magic bytes (MP4/MOV,
   ids, `export_items` guarda os ids escolhidos; por filtro, guarda os ids EXCLUÍDOS e `selection` guarda o filtro
   congelado (`max_id`). Para lote e grupo nada é materializado (as mídias saem dos jobs de ingest ou process
   concluídos, unidos a `batch_media`).
+- `profile_analyses(id, status /*pending|running|waiting|completed|cancelled|interrupted*/, total, invalid_count,
+  duplicate_count, invalid_lines json, cancel_requested, waiting_until, wait_reason, wait_level, resume_after,
+  final_stats json, error, created_at, started_at, finished_at)` e `profile_analysis_items(id, analysis_id FK CASCADE, position, username,
+  state /*pending|running|done|cancelled*/, attempts, account_status, display_name, posts_state, posts_count, posts_exact,
+  posts_text, views_state, views_total, views_reels, stories, highlights, error_code, error_message, checked_at,
+  UNIQUE (analysis_id, username))`, índices `(analysis_id, state, position)`, `(analysis_id, position)` e parcial
+  `(analysis_id, position) WHERE state IN ('pending', 'running')` (migration 0025; seção 8.8).
 - `batch_media(batch_id FK CASCADE, media_id FK CASCADE, PK (batch_id, media_id))` (migration 0013): relação durável
   lote -> mídia, preenchida pelo backfill da migration e pelo purge de jobs antes de apagar (seção 8.2).
 - `settings(key PK, value json, updated_at)`; `app_state(key PK, value, updated_at)` (`export_last_folder`: última pasta
@@ -323,6 +330,7 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 |---|---|---|---|
 | GET | /api/health | | `{status:"ok", version, time}` |
 | GET | /api/diagnostics | | `Diagnostics` |
+| POST/GET | /api/profile-analyses | seção 8.8 | Análise de Perfis |
 | GET | /api/presets | | `Preset[]` |
 | POST | /api/presets | `{name, params}` | `Preset` 201 |
 | GET/PUT/DELETE | /api/presets/{id} | PUT `{name?, params?}` | `Preset` / 204 (409 builtin) |
@@ -1653,6 +1661,98 @@ exclusões). Erros `{detail, code}`. Respostas sem caminhos de arquivo, URLs de 
   erros (`export_already_running`, `export_queue_full`, `export_empty`, `export_no_space`).
 - `GET /api/ext/exports/{id}` -> `{id, status, content, processed, total, zip_ready, zip_bytes, download_url (absoluto,
   só com o ZIP pronto), error_message}`.
+
+### 8.8 Análise de Perfis
+
+Migration **0025** (estritamente aditiva; reversão manual por `app.db.migrate.revert_migration` com
+`migrations/down/0025_profile_analyses.down.sql`, só da ÚLTIMA versão aplicada e nunca no startup). Rotas em
+`app/api/profile_analyses.py`; regras de leitura em `docs/INSTAGRAM_WEB_CONTRACT.md`, `web/profile_snapshot.py`. Não usa a
+sessão salva em nenhum ponto. A extensão não acessa estas rotas (origem de extensão recebe 403 fora de `/api/ext/*`).
+
+| Método | Caminho | Corpo / query | Resposta |
+|---|---|---|---|
+| POST | /api/profile-analyses | `{text: string}` (corpo até 1 MiB; acima: 413 `payload_too_large`) | `Analysis` 202; 400 `no_profiles`\|`too_many_profiles` (mais de 10.000 perfis únicos) |
+| GET | /api/profile-analyses | `limit` 1..100 (20), `offset` | `{items: Analysis[], total, open_id}` (id DESC; `open_id`: análise que o executor atende agora) |
+| GET | /api/profile-analyses/{id} | | `Analysis`; 404 `analysis_not_found` |
+| GET | /api/profile-analyses/{id}/items | `limit` 1..200 (50), `offset` | `{items: Item[], total}` (por `position`); 404 |
+| POST | /api/profile-analyses/{id}/cancel | | `Analysis`; idempotente em aberta; terminal volta como está; 404 |
+| POST | /api/profile-analyses/{id}/resume | | `Analysis` 200; 409 `analysis_not_resumable` fora de `resumable` (inclusive o 2o clique); 404 |
+| GET | /api/profile-analyses/{id}/report | | ZIP (`application/zip`, `attachment; filename="relatorio-perfis-AAAA-MM-DD.zip"`, data local do início); 409 `analysis_running` com a análise aberta; 404 |
+
+`text`: uma entrada por linha (@, usuário ou link, com ou sem esquema/`www`, barra final, query), `parse_profile_input`.
+Linha em branco é ignorada; duplicata é comparada depois de normalizar e mantém a ordem da 1a aparição.
+
+```
+Analysis: {id, status: "pending"|"running"|"waiting"|"completed"|"cancelled"|"interrupted", total, done,
+  pending /*itens pending + running*/, running_username, invalid_count, duplicate_count,
+  invalid_lines: [{line /*até 120 caracteres*/, reason}] /*no máximo 50*/, waiting_until,
+  wait_reason: null|"rate_limited"|"too_many_failures"|"instagram_pause", error, created_at, started_at, finished_at,
+  created_date /*"31/10/2026"*/, created_time /*"23:58:01"*/, finished_time, report_ready /*análise terminal*/,
+  resumable /*cancelled ou interrupted com itens não consultados*/,
+  summary: {active, private, unavailable, unverified, cancelled, stories_yes, highlights_yes, views_total}}
+Item: {position, username, state: "pending"|"running"|"done"|"cancelled", account_status: null|"active"|"private"|
+  "unavailable"|"unverified", display_name, posts_state: null|"known"|"unverified", posts_count,
+  posts_exact: null|1|0 /*0 = aproximado*/, posts_text /*"33K"*/, views_state: null|"known"|"none"|"unverified",
+  views_total, views_reels /*Reels somados*/, stories, highlights /*null|"yes"|"no"|"unverified"*/, error_code,
+  error_message, checked_at, checked_date, checked_time, attempts}
+```
+
+`done + pending + summary.cancelled = total`. Datas de apresentação no fuso do servidor
+(`export_time.resolve_zone(settings.timezone)`), o mesmo na tela e nos relatórios. `checked_at` = instante UTC logo depois
+de ESTE perfil responder (com várias tentativas, o da que definiu o resultado).
+
+Item `cancelled`: com `error_code` nulo foi cancelado pelo usuário; com `error_code` (`rate_limited` ou
+`too_many_failures`) a análise foi interrompida antes dele. Nos dois casos o perfil não foi consultado: `account_status`
+e `checked_at` nulos. `summary.cancelled` conta os dois.
+
+Regras: `account_status`, Stories, Destaques, Posts e Views seguem o contrato de `web/profile_snapshot.py`; ausência de
+dado é `unverified`, nunca `no`. Em `unavailable`/`unverified` os campos ficam `unverified`/nulos (a tela mostra "—" em
+Indisponível; o relatório, Não verificado). Views é a soma dos Reels da 1a página lida (até 12), não o total da vida da
+conta.
+
+Limites: 10.000 perfis por análise, 1.000.000 de caracteres no texto; 10.000 links completos dão cerca de 580 KB e cabem
+no limite de corpo. No ritmo adaptativo, 10.000 perfis levam cerca de 11 h (cerca de 28 h depois de um sinal de limite). Agregados: `summary` e os contadores vêm de
+`final_stats` (gravado ao terminar, zerado ao retomar); só análise aberta varre os itens.
+
+Execução (`app/jobs/profile_analysis_runner.py`): uma análise por vez, FIFO, retomada depois de um reinício. Erros:
+`rate_limited` e o disjuntor (`BREAKER_LIMIT` = 5 perfis `unverified` seguidos, ignorando `unavailable`; não abre sem perfil
+restante) abrem o backoff LOCAL de 15, 30 e 60 min, sem efeito em pausa global, `slow_listing` ou `app_state`; só `active` e
+`private` zeram disjuntor e degrau. Esgotado, a análise fica `interrupted`, salvo cancelamento já pedido, que prevalece.
+`timeout`/`network_error`: uma nova tentativa do item (`MAX_ATTEMPTS` = 2), depois `unverified`. Item em voo num reinício
+volta para a fila e é consultado de novo, com a tentativa contada: `attempts` vale entre reinícios, então um ciclo de
+quedas faz no máximo `MAX_ATTEMPTS + 1` consultas, e o item fecha `unverified` com `internal_error`. Demais erros: `unverified`
+com `error_code`/`error_message` e segue. Pausa global: `waiting` com `wait_reason = "instagram_pause"`, sem consumir
+tentativa.
+
+Canário: a cada `CANARY_EVERY` = 10 perfis `unavailable` em sequência (derivada do banco por `position`), UMA consulta de
+controle a `CANARY_PROFILE` = `instagram`, sem criar item. `active`: a sequência vale e a contagem recomeça. Qualquer outra
+resposta: os itens da sequência voltam a `pending`, sem resultado nem `checked_at`, e a análise entra no mesmo backoff, com
+`wait_reason` `rate_limited` se o canário levou 429 e `too_many_failures` nos demais casos.
+
+Retomada (`POST .../resume`): em `cancelled` e `interrupted` com itens não consultados, numa transação. Itens `cancelled`
+voltam a `pending` (sem `error_code`, `error_message` e `attempts`); a análise vira `pending`, com `cancel_requested`,
+`error`, `waiting_*`, `finished_at`, `final_stats` e `wait_level` zerados. `started_at` e `created_*` ficam. Itens `done`,
+inclusive `unverified`, não são tocados nem consultados de novo: `resume_after` guarda a última posição `done`, e o canário
+só considera sequências depois dela. Para exportar parcial: cancelar, exportar e retomar.
+
+Ritmo: a análise usa o portão global (1 em voo, intervalo, pausa publicada), mas NÃO o teto de páginas por hora
+(`wait_listing_page`): não consome a cota das importações nem grava `instagram_listing_pages`. O limite vem do executor (3 a
+6 s entre perfis mais descansos depois do primeiro sinal de limite; antes dele só o portão, com descanso a cada 100). Falha de gravação: resultado recusado pelo banco vira
+`unverified` com `internal_error`; se nada grava, `attempts` limita o item (sem GET novo acima de `MAX_ATTEMPTS + 1`) e o
+executor espera em memória.
+
+Relatório (gerado em fluxo, sem memória proporcional ao total; `content-length` no ZIP, entregue em blocos):
+`relatorio-perfis-AAAA-MM-DD.{xlsx,csv,html}`. XLSX e CSV: Perfil, Nome, Posts, Posts exato, Views, Reels
+somados, Stories, Destaques, Status, Data, Horário, Observação (no XLSX o perfil sai com `@`; no CSV, sem, para não virar
+fórmula). HTML: as 8 colunas da tela (`table-layout:fixed` + `<colgroup>`), com nome, Reels somados e observação dentro das
+células; cartão Não consultados (Ativas + Privadas + Indisponíveis + Não verificadas + Não consultados = Total) e sem "—".
+Gerado sob demanda a partir do banco; não usa
+`exports` (sem mídia, TTL nem fila). CSV: UTF-8 com BOM, `;`, CRLF, `Nome`/`Observação` com neutralização de fórmula. HTML:
+arquivo único, sem JS nem recurso externo, tudo escapado. XLSX: `app/services/xlsx_writer.py`, em stdlib; aproximado
+guarda o número com Posts exato = Não. Status: Ativa, Privada, Restrita, Indisponível, Não verificado, Cancelado (usuário) e Não
+consultado (interrompida). Indisponível: Posts, Posts exato, Views, Reels somados, Stories e Destaques = "Não verificado",
+com Data e Horário reais. Cancelado e Não consultado: no CSV/XLSX, "Não consultado" por coluna e Data/Horário vazios; no
+HTML, uma célula `colspan=4`, a pill de Status e uma célula `colspan=2`, todas com texto.
 
 ## 9. Processor (`media_processor`)
 
