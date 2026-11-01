@@ -995,3 +995,52 @@ mídia; `items` vazio ou o campo nulo = "gated". Teste com fixture sintética: `
   `VIEWS_FILTER_ENABLED = true`) com mínimo e máximo (`max_views`; acima do máximo = "above"). O documento por post não
   traz visualizações; a consulta LOGADA da aba Reels dá field_exception e não é usada. Curtidas e comentários não são
   usados.
+
+### Análise de Perfis: `web/profile_snapshot.py` (VERIFICADO 2026-10-31/11-01)
+
+UM GET ANÔNIMO de `/<usuario>/reels/` (`InstagramWebHttp.anonymous`, jar vazio) traz tudo, sem requisição extra, com
+`max_bytes=MAX_DOCUMENT_BYTES`, `diagnostic_path="/reels/"` e `classify_public_document(resp, stage="profile_snapshot")`.
+Nunca usa sessão: com ela, `GET /api/v1/users/web_profile_info/` deu 429 e `GET /api/v1/feed/reels_media/` deu 500, e
+por isso não há fallback nem uso dessas rotas. Só nomes de campos e números públicos ficam registrados aqui.
+
+Observado (200 HTML, ~600 KB; `_load_scripts(iter_json_scripts(html), "xig_user_by_username")` devolve 2 envelopes):
+
+1. Usuário: `pk`, `username`, `is_private`, `is_unpublished`, `latest_reel_media` (int), `full_name`, `is_verified`,
+   `all_media_count` (SEMPRE null sem login), `id`, `lox_highlights_connection` {`edges`, `page_info`}, `has_any_clips`,
+   `is_memorialized`.
+2. `{pk, polaris_clips_connection: {edges: [{node: {code, pk, play_count, like_and_view_counts_disabled,
+   clips_tab_pinned_user_ids, ...}}], page_info}}`: 12 Reels na 1a página.
+3. Meta tags com entidades HTML: `og:description` e `description`, por exemplo `686M seguidores, seguindo 163, 8,630 posts
+   &#x2014; ...`. Número em formato inglês, arredondado em contas grandes (`33K posts`).
+4. `latest_reel_media`: 0 (sem Stories) e timestamps de 4,9 a 14,6 h atrás, honesto sem login. `lox_highlights_connection`
+   com 7 e 5 edges, e com `edges: []` e `page_info` presente num perfil cuja página confirma que não há destaques.
+5. Perfil inexistente: HTTP **200**, ~508 KB, SEM o envelope, com `"canonicalRouteName":"comet.igweb.PolarisErrorRoute"` e
+   `"tracePolicy":"polaris.httpErrorPage"`.
+
+NÃO observado (tratado por regra, com falha segura; o comportamento real destes casos não foi verificado): perfil privado,
+perfil com restrição de idade, redirect para login anônimo, `like_and_view_counts_disabled` verdadeiro.
+
+| Campo | Regra |
+|---|---|
+| `account_status` | `active`: envelope lido, `username` confere (sem diferenciar maiúsculas), `is_private` e `is_unpublished` False. `private`: `is_private` True. `unavailable`: marca de rota de erro sem envelope (com todos os scripts legíveis), HTTP 404 ou `is_unpublished` True. `unverified`: todo o resto (sem envelope nem marca, JSON quebrado, outro `username`, flag não booleana, 3xx, 401/403, 429 esgotado, 5xx, timeout, rede). Nunca vira `unavailable` por falha. |
+| `stories` | `latest_reel_media` int>0 com idade < 24 h ou no futuro: `yes`; idade >= 24 h: `no`; 0: `no` (privado: `unverified`); ausente/não int/bool/negativo: `unverified`. |
+| `highlights` | Mapping com `edges` lista: não vazia `yes`; vazia `no` (privado: `unverified`); resto: `unverified`. |
+| `posts` | Meta tag, só antes do travessão (depois dele há texto livre). Inteiro: `posts_exact=1`. K/M com até 2 casas: aproximado, `posts_exact=0`, `posts_text` original. Sem meta/ilegível: `unverified`. `all_media_count` só se vier int > 0 no futuro, como exato. |
+| `views` | Soma dos `play_count` int>=0 da 1a página, sem paginar. `known` com ao menos 1 somado; `none` só com `has_any_clips` False e conexão ausente ou `edges == []`; `unverified` nos demais casos (inclusive conexão malformada) e em privado. Conexão de outro `pk` é ignorada. Nós sem contagem ou com `like_and_view_counts_disabled` ficam fora de `views_reels`. |
+
+Valor fora de int64 (Posts, Views, `latest_reel_media`) é `unverified`. A rota de erro também poderia ser servida a um IP
+bloqueado (NÃO observado): por isso `unavailable` não conta como sucesso e passa pelo canário (`docs/CONTRACTS.md`, seção
+8.8). A consulta não usa o teto de páginas por hora, só o portão.
+
+Um envelope válido do usuário tem prioridade sobre as marcas de rota de erro, e o corpo HTML só é varrido por essas duas
+marcas exatas. `full_name` é dado não confiável: perde controles e surrogates soltos e é truncado. Nada do corpo ou de
+cookies vai para log, exceção ou `ProfileSnapshot`. Regras de execução (backoff local): `docs/CONTRACTS.md`, seção 8.8.
+
+### Análise de Perfis: observado em 200 perfis públicos (2026-11-01, sem sessão)
+
+- Ritmo: uma consulta por vez, 3,4 a 3,5 s por perfil, sem nenhum 429 em 16 minutos.
+- Perfil restrito por idade (@ambev): `canonicalRouteName` da aba Reels, meta tag com a contagem de posts e
+  `"xig_user_by_username":null`. Status `restricted`, com uma releitura antes de aceitar.
+- Resposta passageira: @cbf_futebol (conta real, 0 posts) saiu sem leitura uma vez e foi lida normalmente depois.
+- Rota de erro: 5 perfis reconsultados depois de minutos deram o mesmo resultado (inexistência estável).
+- Não observado: 429 anônimo nesta rota, redirect para login e limite em volume acima de 200 perfis.

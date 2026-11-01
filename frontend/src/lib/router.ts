@@ -42,6 +42,7 @@ export const ROUTES = {
   library: "/biblioteca",
   edit: "/editar",
   queue: "/fila",
+  profiles: "/analise-perfis",
   presets: "/presets",
   settings: "/configuracoes",
 } as const;

@@ -5,6 +5,7 @@ import { ImportPage } from "./pages/ImportPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { EditPage } from "./pages/EditPage";
 import { QueuePage } from "./pages/QueuePage";
+import { ProfileAnalysisPage } from "./pages/ProfileAnalysisPage";
 import { PresetsPage } from "./pages/PresetsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { Empty } from "./components/ui";
@@ -23,6 +24,8 @@ function Page({ path }: { path: string }) {
       return <EditPage />;
     case ROUTES.queue:
       return <QueuePage />;
+    case ROUTES.profiles:
+      return <ProfileAnalysisPage />;
     case ROUTES.presets:
       return <PresetsPage />;
     case ROUTES.settings:

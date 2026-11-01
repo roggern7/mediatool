@@ -15,6 +15,7 @@ from app.db.repositories import (
     JobRepository,
     MediaRepository,
     PresetRepository,
+    ProfileAnalysisRepository,
     SettingsRepository,
 )
 from app.integrations.instagram.downloader import InstagramDownloader
@@ -27,8 +28,10 @@ from app.services.storage import Storage
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from app.integrations.instagram.web.profile_snapshot import ProfileSnapshot
     from app.jobs.export_runner import ExportRunner
     from app.jobs.import_runner import ImportRunner
+    from app.jobs.profile_analysis_runner import ProfileAnalysisRunner
     from app.jobs.worker import Worker
 
 
@@ -46,6 +49,7 @@ class AppContext:
     batches: BatchRepository
     app_settings: SettingsRepository
     exports: ExportRepository
+    profile_analyses: ProfileAnalysisRepository
     # Serializa "checar duplicata -> promover arquivo -> inserir mídia" entre threads do worker.
     ingest_lock: threading.Lock = field(default_factory=threading.Lock)
     # Serializa o processamento por (mídia, preset, params): jobs simultâneos geram uma única rendition.
@@ -69,6 +73,10 @@ class AppContext:
     worker: Worker | None = None
     import_runner: ImportRunner | None = None
     export_runner: ExportRunner | None = None
+    # Análise de Perfis: (usuário, evento de cancelamento) -> retrato público de um perfil, sem sessão. Montado em
+    # `app.main.build_context`; nunca passa pelo `session_provider`.
+    profile_fetcher: Callable[[str, threading.Event | None], ProfileSnapshot] | None = None
+    profile_runner: ProfileAnalysisRunner | None = None
 
     def wake_worker(self) -> None:
         if self.worker is not None:

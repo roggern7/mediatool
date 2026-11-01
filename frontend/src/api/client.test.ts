@@ -582,3 +582,43 @@ describe("cliente: edição e upload de vídeo local", () => {
     expect(err.code).toBe("aborted");
   });
 });
+
+describe("cliente: análise de perfis", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it("createProfileAnalysis manda o texto colado com o header do painel", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 3 }, 202));
+    const created = await api.createProfileAnalysis("@a\n@b");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/profile-analyses");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ text: "@a\n@b" });
+    expect((init.headers as Record<string, string>)["X-Media-Tool-Client"]).toBe("panel");
+    expect(created.id).toBe(3);
+  });
+
+  it("lista, detalhe, itens e cancelamento usam as rotas do contrato", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ items: [], total: 0 })));
+    await api.listProfileAnalyses(20, 40);
+    await api.getProfileAnalysis(7);
+    await api.listProfileAnalysisItems(7, 50, 100);
+    await api.cancelProfileAnalysis(7);
+    await api.resumeProfileAnalysis(7);
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/profile-analyses?limit=20&offset=40",
+      "/api/profile-analyses/7",
+      "/api/profile-analyses/7/items?limit=50&offset=100",
+      "/api/profile-analyses/7/cancel",
+      "/api/profile-analyses/7/resume",
+    ]);
+    expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("POST");
+  });
+});

@@ -84,3 +84,25 @@ def apply_migrations(db: Database, directory: Path = MIGRATIONS_DIR) -> list[int
         logger.info("Migration %04d_%s aplicada", migration.version, migration.name)
         applied.append(migration.version)
     return applied
+
+
+def revert_migration(db: Database, version: int, directory: Path = MIGRATIONS_DIR) -> None:
+    """Reverte a ÚLTIMA migration aplicada com `down/NNNN_nome.down.sql`, numa transação, e apaga a linha dela em
+    `schema_migrations`. Ferramenta manual: nunca é chamada no startup. RuntimeError se `version` não for a última
+    aplicada ou se não houver arquivo de reversão."""
+    _ensure_table(db)
+    migration = next((m for m in discover_migrations(directory) if m.version == version), None)
+    if migration is None:
+        raise RuntimeError(f"Migration {version:04d} não encontrada")
+    down = directory / "down" / f"{migration.path.stem}.down.sql"
+    if not down.is_file():
+        raise RuntimeError(f"Migration {version:04d} não tem arquivo de reversão")
+    statements = split_statements(down.read_text(encoding="utf-8"))
+    with db.transaction() as conn:
+        latest = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
+        if latest != version:
+            raise RuntimeError(f"Só a última migration aplicada pode ser revertida (última: {latest:04d})")
+        for statement in statements:
+            conn.execute(statement)
+        conn.execute("DELETE FROM schema_migrations WHERE version = ?", (version,))
+    logger.info("Migration %04d_%s revertida", migration.version, migration.name)

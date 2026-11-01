@@ -834,3 +834,79 @@ export interface MediaDeleteResult {
   skipped: MediaDeleteIssue[];
   failed: MediaDeleteIssue[];
 }
+
+export type ProfileAnalysisStatus = "pending" | "running" | "waiting" | "completed" | "cancelled" | "interrupted";
+export type ProfileItemState = "pending" | "running" | "done" | "cancelled";
+export type ProfileAccountStatus = "active" | "private" | "restricted" | "unavailable" | "unverified";
+/** Sim, Não ou Não verificado: três estados distintos, falha nunca vira `no`. */
+export type ProfileCheck = "yes" | "no" | "unverified";
+export type ProfileViewsState = "known" | "none" | "unverified";
+
+export interface ProfileAnalysisSummary {
+  active: number;
+  private: number;
+  restricted: number;
+  unavailable: number;
+  unverified: number;
+  cancelled: number;
+  stories_yes: number;
+  highlights_yes: number;
+  views_total: number;
+}
+
+export interface ProfileAnalysis {
+  id: number;
+  status: ProfileAnalysisStatus;
+  total: number;
+  done: number;
+  pending: number;
+  running_username: string | null;
+  invalid_count: number;
+  duplicate_count: number;
+  /** Amostra das linhas recusadas (no máximo 50); o total está em `invalid_count`. */
+  invalid_lines: { line: string; reason: string }[];
+  waiting_until: string | null;
+  wait_reason: string | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  created_date: string | null;
+  created_time: string | null;
+  finished_time: string | null;
+  report_ready: boolean;
+  /** Houve sinal de limite do Instagram: a análise segue no ritmo cauteloso até o fim. */
+  cautious_pace: boolean;
+  /** Interrompida ou cancelada com perfis não consultados. */
+  resumable: boolean;
+  summary: ProfileAnalysisSummary;
+}
+
+export interface ProfileAnalysisPage extends Paged<ProfileAnalysis> {
+  /** Análise que o executor atende agora, esteja ou não nesta página; null sem análise aberta. */
+  open_id: number | null;
+}
+
+export interface ProfileAnalysisItem {
+  position: number;
+  username: string;
+  state: ProfileItemState;
+  account_status: ProfileAccountStatus | null;
+  display_name: string | null;
+  posts_state: "known" | "unverified" | null;
+  posts_count: number | null;
+  /** 1 = exato; 0 = aproximado, com o texto original ("33K") em `posts_text`. */
+  posts_exact: number | null;
+  posts_text: string | null;
+  views_state: ProfileViewsState | null;
+  views_total: number | null;
+  views_reels: number | null;
+  stories: ProfileCheck | null;
+  highlights: ProfileCheck | null;
+  error_code: string | null;
+  error_message: string | null;
+  checked_at: string | null;
+  checked_date: string | null;
+  checked_time: string | null;
+  attempts: number;
+}
