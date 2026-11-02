@@ -674,6 +674,8 @@ Levantamento de uma lista de perfis, sem baixar nada. Em **Análise de Perfis**,
 10.000 perfis por análise) e clique em **Analisar**. O Media Tool consulta um perfil por vez, mostra o progresso na
 tabela e guarda tudo no histórico. Download, edição, Biblioteca, extensão e exportação não mudam.
 
+- **Resumo da consulta**: cada análise mostra contas ativas (públicas, privadas e restritas), inativas (não encontradas ou
+  removidas), não verificadas e views totais (soma dos últimos Reels lidos), na tela, no histórico e no relatório HTML.
 - **Histórico**: **Apagar** remove uma análise encerrada e **Limpar histórico** remove todas as encerradas, com confirmação
   e sem desfazer. Análise em andamento nunca é apagada: cancele antes.
 - **Tempo**: uma consulta por vez, cerca de 4 segundos por perfil (medido em 200 perfis reais). 10.000 perfis levam cerca de

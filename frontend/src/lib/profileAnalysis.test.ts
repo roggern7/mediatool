@@ -13,7 +13,7 @@ import {
   analysisRoute,
   analysisTone,
   checkCell,
-  confirmedCount,
+  accountCards,
   clearedText,
   compactProfileText,
   countProfileLines,
@@ -166,19 +166,29 @@ describe("estado da análise", () => {
     expect(compactProfileText(Array(10_000).fill(share).join("\n")).length).toBeLessThan(1_000_000);
   });
 
-  it("confirmados não incluem Não verificado nem cancelados", () => {
+  it("resumo da consulta soma ativas, inativas e não verificadas", () => {
     const summary = {
       active: 5,
       private: 2,
-      restricted: 0,
-      unavailable: 1,
-      unverified: 30,
-      cancelled: 40,
+      restricted: 1,
+      unavailable: 10,
+      unverified: 2,
+      cancelled: 0,
       stories_yes: 0,
       highlights_yes: 0,
       views_total: 0,
     };
-    expect(confirmedCount(summary)).toBe(8);
+    const accounts = { active: 8, inactive: 10, unverified: 2, not_consulted: 0 };
+    const cards = accountCards({ total: 20, summary, accounts });
+    expect(cards.map((card) => [card.label, card.value, card.share])).toEqual([
+      ["Contas ativas", 8, 40],
+      ["Contas inativas", 10, 50],
+      ["Não verificadas", 2, 10],
+      ["Views totais", 0, null],
+    ]);
+    expect(cards[0]?.detail).toBe("5 públicas · 2 privadas · 1 restritas");
+    const cancelled = accountCards({ total: 20, summary, accounts: { ...accounts, not_consulted: 3 } });
+    expect(cancelled.at(-2)?.label).toBe("Não consultadas");
   });
 });
 

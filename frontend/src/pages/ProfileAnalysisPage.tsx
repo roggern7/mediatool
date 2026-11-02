@@ -8,12 +8,12 @@ import {
   ANALYSIS_STATUS_LABEL,
   EMPTY_CELL,
   analysisIdFromSearch,
+  accountCards,
   analysisIndicators,
   analysisPollMs,
   analysisReportUrl,
   analysisRoute,
   analysisTone,
-  confirmedCount,
   clearedText,
   compactProfileText,
   countProfileLines,
@@ -350,6 +350,18 @@ function AnalysisPanel({ id, onChanged, onClose }: { id: number; onChanged: () =
           </span>
         ))}
       </div>
+      <div className="account-report" role="group" aria-label="Resumo da consulta">
+        {accountCards(analysis).map((card) => (
+          <div key={card.label} className="account-card">
+            <strong>{formatCount(card.value)}</strong>
+            <span>
+              {card.label}
+              {card.share === null ? null : ` · ${card.share}%`}
+            </span>
+            <span className="muted small">{card.detail}</span>
+          </div>
+        ))}
+      </div>
       <div role="group" aria-label="Progresso geral" style={{ marginTop: 10 }}>
         <ProgressBar value={progressFraction(analysis)} />
       </div>
@@ -487,7 +499,12 @@ function HistoryTable({
             <th>Data</th>
             <th>Hora</th>
             <th className="num">Perfis</th>
-            <th className="num">Confirmados</th>
+            <th className="num">Ativas</th>
+            <th className="num">Inativas</th>
+            <th className="num">Não verificadas</th>
+            <th className="num" title="Soma dos últimos Reels lidos de cada conta">
+              Views
+            </th>
             <th>Status</th>
             <th aria-label="Abrir" />
             <th aria-label="Baixar" />
@@ -501,7 +518,10 @@ function HistoryTable({
               <td className="nowrap">{analysis.created_date ?? "—"}</td>
               <td className="muted nowrap">{analysis.created_time ?? "—"}</td>
               <td className="num">{formatCount(analysis.total)}</td>
-              <td className="num">{formatCount(confirmedCount(analysis.summary))}</td>
+              <td className="num">{formatCount(analysis.accounts.active)}</td>
+              <td className="num">{formatCount(analysis.accounts.inactive)}</td>
+              <td className="num">{formatCount(analysis.accounts.unverified)}</td>
+              <td className="num">{formatCount(analysis.summary.views_total)}</td>
               <td>
                 <Pill tone={analysisTone(analysis.status)}>{ANALYSIS_STATUS_LABEL[analysis.status]}</Pill>
               </td>

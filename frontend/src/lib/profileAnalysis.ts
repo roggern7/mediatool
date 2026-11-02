@@ -3,7 +3,6 @@ import { describeErrorCode } from "../api/errors";
 import type {
   ProfileAnalysis,
   ProfileAnalysisStatus,
-  ProfileAnalysisSummary,
   ProfileAnalysisItem,
   ProfileCheck,
 } from "../api/types";
@@ -144,9 +143,53 @@ export function analysisPollMs(current: number | null, active: boolean): number 
   return active ? nextPollMs(current, true) : null;
 }
 
-/** Perfis com status confirmado: tudo que não é Não verificado nem cancelado. */
-export function confirmedCount(summary: ProfileAnalysisSummary): number {
-  return summary.active + summary.private + summary.restricted + summary.unavailable;
+export interface AccountCard {
+  label: string;
+  value: number;
+  /** Parte do total da consulta, em %; null quando não é contagem de contas. */
+  share: number | null;
+  detail: string;
+}
+
+/** Resumo da consulta. "Não consultadas" só aparece quando houver: análise cancelada ou interrompida. */
+export function accountCards(a: Pick<ProfileAnalysis, "total" | "summary" | "accounts">): AccountCard[] {
+  const { summary, accounts } = a;
+  const share = (value: number) => (a.total > 0 ? Math.round((value * 100) / a.total) : 0);
+  const kinds = [
+    `${formatCount(summary.active)} públicas`,
+    `${formatCount(summary.private)} privadas`,
+    `${formatCount(summary.restricted)} restritas`,
+  ].join(" · ");
+  const cards: AccountCard[] = [
+    { label: "Contas ativas", value: accounts.active, share: share(accounts.active), detail: kinds },
+    {
+      label: "Contas inativas",
+      value: accounts.inactive,
+      share: share(accounts.inactive),
+      detail: "Não encontradas ou removidas",
+    },
+    {
+      label: "Não verificadas",
+      value: accounts.unverified,
+      share: share(accounts.unverified),
+      detail: "Sem confirmação do Instagram",
+    },
+  ];
+  if (accounts.not_consulted > 0) {
+    cards.push({
+      label: "Não consultadas",
+      value: accounts.not_consulted,
+      share: share(accounts.not_consulted),
+      detail: "A análise terminou antes delas",
+    });
+  }
+  cards.push({
+    label: "Views totais",
+    value: summary.views_total,
+    share: null,
+    detail: "Soma dos últimos Reels lidos de cada conta",
+  });
+  return cards;
 }
 
 export function progressFraction(a: Pick<ProfileAnalysis, "done" | "total">): number {

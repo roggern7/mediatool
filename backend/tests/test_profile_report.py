@@ -240,7 +240,8 @@ def test_file_date_is_local_start_date():
     analysis = {"started_at": "2026-11-01T01:00:00.000Z", "created_at": "2026-11-01T00:00:00.000Z", "total": 0, "id": 1,
                 "status": "completed", "finished_at": None, "error": None, "invalid_count": 0, "duplicate_count": 0,
                 "invalid_lines": [], "summary": dict.fromkeys(
-                    ("active", "private", "restricted", "unavailable", "unverified", "cancelled", "stories_yes", "highlights_yes"),
+                    ("active", "private", "restricted", "unavailable", "unverified", "cancelled", "stories_yes", "highlights_yes",
+                     "views_total"),
                     0)}
     assert profile_report.write_report(io.BytesIO(), analysis, lambda: [], zone) == "relatorio-perfis-2026-10-31.zip"
 
@@ -263,8 +264,10 @@ def test_html_header_cards_and_note(full_report):
     assert f"Análise nº {analysis_id}" in page and "Status: Concluída" in page
     found = re.findall(r'<div class="card"><b>(.*?)</b><span>(.*?)</span>', page)
     cards = {label: value for value, label in found}
-    assert cards == {"Total": "6", "Ativas": "3", "Privadas": "1", "Restritas": "0", "Indisponíveis": "1", "Não verificadas": "1",
-                     "Não consultados": "0", "Com Stories": "3", "Com Destaques": "0"}
+    assert cards == {"Total": "6", "Contas ativas · 67%": "4", "Contas inativas · 17%": "1",
+                     "Não verificadas · 17%": "1", "Não consultados · 0%": "0", "Views totais": "300",
+                     "Com Stories · 50%": "3", "Com Destaques · 0%": "0"}
+    assert "3 públicas · 1 privadas · 0 restritas" in page and "<b>Contas ativas</b> reúne" in page
     assert "não o total da vida da conta" in page and "Ativa não significa" in page
     assert "<b>≈</b> marca um valor de Posts arredondado pelo Instagram" in page
     assert "—" not in page and "Fim: 01/11/2026" in page
@@ -285,9 +288,9 @@ def test_html_cards_add_up_to_the_total(harness):
     runner.run_next()
     page = report_files(harness, analysis["id"])[f"{STEM}.html"].decode("utf-8")
     found = re.findall(r'<div class="card"><b>(.*?)</b><span>(.*?)</span>', page)
-    cards = {label: int(value) for value, label in found}
+    cards = {label.split(" · ")[0]: int(value) for value, label in found}
     assert cards["Não consultados"] == 2 and cards["Total"] == 6
-    assert sum(cards[label] for label in ("Ativas", "Privadas", "Indisponíveis", "Não verificadas",
+    assert sum(cards[label] for label in ("Contas ativas", "Contas inativas", "Não verificadas",
                                           "Não consultados")) == cards["Total"]
 
 
