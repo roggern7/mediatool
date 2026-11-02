@@ -34,6 +34,7 @@ HTML_WIDTHS = (28, 10.5, 10.5, 10.5, 10.5, 11, 10, 9)   # % por coluna: `table-l
 YES, NO, NOT_VERIFIED, NOT_QUERIED = "Sim", "Não", "Não verificado", "Não consultado"
 NO_REELS = "Sem Reels"
 CANCELLED = "Cancelado"
+VIEWS_CARD = "Views totais"
 TRISTATE = {"yes": YES, "no": NO}
 ACCOUNT_LABELS = {"active": "Ativa", "private": "Privada", "restricted": "Restrita", "unavailable": "Indisponível",
                   "unverified": NOT_VERIFIED}
@@ -214,14 +215,34 @@ def _moment_text(value: str | None, zone: export_time.Zone) -> str:
     return f"{date} {time}" if date else ""
 
 
+def account_totals(summary: dict[str, int]) -> dict[str, int]:
+    """Resumo da consulta, única regra para tela e relatório: `active` reúne públicas, privadas e restritas (a conta
+    existe) e `inactive` são as indisponíveis. Os quatro grupos somam o que já terminou; o resto ainda está na fila."""
+    return {"active": summary["active"] + summary["private"] + summary["restricted"],
+            "inactive": summary["unavailable"], "unverified": summary["unverified"],
+            "not_consulted": summary["cancelled"]}
+
+
+def _card(label: str, value: int, total: int, detail: str) -> str:
+    share = f" · {round(value * 100 / total)}%" if total and label not in ("Total", VIEWS_CARD) else ""
+    return (f'<div class="card"><b>{_thousands(value)}</b><span>{label}{share}</span>'
+            f"{f'<small>{detail}</small>' if detail else ''}</div>")
+
+
 def _html_head(analysis: dict[str, Any], zone: export_time.Zone) -> str:
     summary = analysis["summary"]
-    cards = (("Total", analysis["total"]), ("Ativas", summary["active"]), ("Privadas", summary["private"]), ("Restritas", summary["restricted"]),
-             ("Indisponíveis", summary["unavailable"]), ("Não verificadas", summary["unverified"]),
-             ("Não consultados", summary["cancelled"]), ("Com Stories", summary["stories_yes"]),
-             ("Com Destaques", summary["highlights_yes"]))
-    card_html = "".join(f'<div class="card"><b>{_thousands(int(value))}</b><span>{label}</span></div>'
-                        for label, value in cards)
+    accounts = account_totals(summary)
+    total = analysis["total"]
+    kinds = (f"{_thousands(summary['active'])} públicas · {_thousands(summary['private'])} privadas · "
+             f"{_thousands(summary['restricted'])} restritas")
+    cards = (("Total", total, ""), ("Contas ativas", accounts["active"], kinds),
+             ("Contas inativas", accounts["inactive"], "não encontradas ou removidas"),
+             ("Não verificadas", accounts["unverified"], "sem confirmação do Instagram"),
+             ("Não consultados", accounts["not_consulted"], ""),
+             (VIEWS_CARD, summary["views_total"], "soma dos últimos Reels lidos de cada conta"),
+             ("Com Stories", summary["stories_yes"], ""),
+             ("Com Destaques", summary["highlights_yes"], ""))
+    card_html = "".join(_card(label, int(value), total, detail) for label, value, detail in cards)
     head = "".join(f"<th>{html.escape(column)}</th>" for column in HTML_COLUMNS)
     cols = "".join(f'<col style="width:{width}%">' for width in HTML_WIDTHS)
     status = html.escape(ANALYSIS_LABELS.get(analysis["status"], str(analysis["status"])))
@@ -238,7 +259,8 @@ def _html_head(analysis: dict[str, Any], zone: export_time.Zone) -> str:
         f'<section class="cards">{card_html}</section>{error}'
         '<p class="note"><b>Views</b> é a soma dos últimos Reels lidos (quantidade abaixo do número), não o total da'
         " vida da conta. <b>≈</b> marca um valor de Posts arredondado pelo Instagram, que sem login informa, por"
-        " exemplo, 33K. <b>Status</b> mostra se o perfil estava acessível sem login: Ativa não significa que ele"
+        " exemplo, 33K. <b>Contas ativas</b> reúne públicas, privadas e restritas: a conta existe."
+        " <b>Status</b> mostra se o perfil estava acessível sem login: Ativa não significa que ele"
         " publica recentemente. <b>Não verificado</b> quer dizer que a informação não pôde ser confirmada; nunca"
         " significa Não. <b>Não consultado</b> quer dizer que a análise terminou antes de chegar a esse perfil.</p>"
         f'<h2>Perfis</h2><div class="table-wrap"><table><colgroup>{cols}</colgroup><thead><tr>{head}</tr></thead>'

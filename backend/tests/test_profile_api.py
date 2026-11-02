@@ -52,7 +52,7 @@ def test_post_returns_analysis_contract(harness):
     assert set(body) == {
         "id", "status", "total", "done", "pending", "running_username", "invalid_count", "duplicate_count",
         "invalid_lines", "waiting_until", "wait_reason", "error", "created_at", "started_at", "finished_at",
-        "created_date", "created_time", "finished_time", "report_ready", "resumable", "summary", "cautious_pace",
+        "created_date", "created_time", "finished_time", "report_ready", "resumable", "summary", "cautious_pace", "accounts",
     }
     assert body["status"] == "pending" and body["total"] == 2 and body["pending"] == 2 and body["done"] == 0
     assert body["invalid_count"] == 1 and body["duplicate_count"] == 1
@@ -154,6 +154,23 @@ def finished(harness, *usernames: str) -> dict:
 
 def item_rows(harness, analysis_id: int) -> int:
     return harness.ctx.db.scalar("SELECT COUNT(*) FROM profile_analysis_items WHERE analysis_id = ?", (analysis_id,))
+
+
+def test_accounts_are_the_total_of_each_consultation(harness):
+    clock = SimClock()
+    answers = {"p1": [snapshot("p1", "private")], "r1": [snapshot("r1", "restricted")],
+               "i1": [snapshot("i1", "unavailable")], "n1": [snapshot("n1", "unverified")]}
+    runner = install_runner(harness, ScriptedFetcher(clock, answers), clock)
+    first = create(harness, "a1", "p1", "r1", "i1", "n1")
+    runner.run_next()
+    second = create(harness, "b1", "b2")
+    harness.client.post(f"{API}/{second['id']}/cancel")
+    expected = {first["id"]: {"active": 3, "inactive": 1, "unverified": 1, "not_consulted": 0},
+                second["id"]: {"active": 0, "inactive": 0, "unverified": 0, "not_consulted": 2}}
+    for analysis_id, accounts in expected.items():
+        assert harness.client.get(f"{API}/{analysis_id}").json()["accounts"] == accounts
+    listed = {row["id"]: row["accounts"] for row in harness.client.get(API).json()["items"]}
+    assert listed == expected
 
 
 def test_delete_removes_only_that_analysis_and_its_items(harness):

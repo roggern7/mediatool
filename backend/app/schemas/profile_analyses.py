@@ -34,6 +34,13 @@ class AnalysisSummary(BaseModel):
     views_total: int
 
 
+class AccountTotals(BaseModel):
+    active: int
+    inactive: int
+    unverified: int
+    not_consulted: int
+
+
 class AnalysisOut(BaseModel):
     id: int
     status: AnalysisStatus
@@ -57,6 +64,7 @@ class AnalysisOut(BaseModel):
     cautious_pace: bool
     resumable: bool
     summary: AnalysisSummary
+    accounts: AccountTotals
 
 
 class HistoryCleared(BaseModel):

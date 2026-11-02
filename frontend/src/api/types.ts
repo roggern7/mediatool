@@ -880,12 +880,21 @@ export interface ProfileAnalysis {
   /** Interrompida ou cancelada com perfis não consultados. */
   resumable: boolean;
   summary: ProfileAnalysisSummary;
+  accounts: ProfileAccountTotals;
 }
 
 export interface ProfileHistoryCleared {
   deleted: number;
   /** Análises abertas, que nunca são apagadas. */
   kept_open: number;
+}
+
+/** Resumo da consulta: `active` reúne públicas, privadas e restritas; `inactive` são as indisponíveis. */
+export interface ProfileAccountTotals {
+  active: number;
+  inactive: number;
+  unverified: number;
+  not_consulted: number;
 }
 
 export interface ProfileAnalysisPage extends Paged<ProfileAnalysis> {

@@ -71,6 +71,7 @@ def analysis_out(ctx: AppContext, analysis: dict[str, Any], stats: dict[str, Any
     if stats is None:
         stats = ctx.profile_analyses.stats([analysis["id"]]).get(analysis["id"], {})
     zone = _zone(ctx)
+    summary = {key: stats.get(key) or 0 for key in SUMMARY_KEYS}
     created_date, created_time = profile_report.local_parts(analysis["created_at"], zone)
     _, finished_time = profile_report.local_parts(analysis["finished_at"], zone)
     return {
@@ -86,7 +87,8 @@ def analysis_out(ctx: AppContext, analysis: dict[str, Any], stats: dict[str, Any
         "report_ready": analysis["status"] in TERMINAL_STATUSES,
         "cautious_pace": bool(analysis["cautious_pace"]),
         "resumable": analysis["status"] in RESUMABLE_STATUSES and bool(stats.get("cancelled")),
-        "summary": {key: stats.get(key) or 0 for key in SUMMARY_KEYS},
+        "summary": summary,
+        "accounts": profile_report.account_totals(summary),
     }
 
 

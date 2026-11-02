@@ -1597,3 +1597,23 @@ details.more > summary:hover {
     min-height: 160px;
   }
 }
+
+/* Resumo da consulta na Análise de Perfis */
+.account-report {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.account-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.account-card strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
