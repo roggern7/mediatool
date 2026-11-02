@@ -1744,6 +1744,9 @@ Ritmo: a análise usa o portão global (1 em voo, intervalo, pausa publicada), m
 executor espera em memória.
 
 Relatório (gerado em fluxo, sem memória proporcional ao total; `content-length` no ZIP, entregue em blocos):
+`Analysis.accounts` `{active, inactive, unverified, not_consulted}` é o resumo da consulta, mesma regra na tela e no HTML:
+`active` = públicas + privadas + restritas; `inactive` = indisponíveis. Views totais vêm de `summary.views_total`.
+
 `relatorio-perfis-AAAA-MM-DD.{xlsx,csv,html}`. XLSX e CSV: Perfil, Nome, Posts, Posts exato, Views, Reels
 somados, Stories, Destaques, Status, Data, Horário, Observação (no XLSX o perfil sai com `@`; no CSV, sem, para não virar
 fórmula). HTML: as 8 colunas da tela (`table-layout:fixed` + `<colgroup>`), com nome, Reels somados e observação dentro das
