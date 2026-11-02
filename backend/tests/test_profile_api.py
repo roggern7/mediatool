@@ -165,8 +165,8 @@ def test_accounts_are_the_total_of_each_consultation(harness):
     runner.run_next()
     second = create(harness, "b1", "b2")
     harness.client.post(f"{API}/{second['id']}/cancel")
-    expected = {first["id"]: {"active": 3, "inactive": 1, "unverified": 1, "not_consulted": 0},
-                second["id"]: {"active": 0, "inactive": 0, "unverified": 0, "not_consulted": 2}}
+    expected = {first["id"]: {"active": 2, "restricted": 1, "inactive": 1, "unverified": 1, "not_consulted": 0},
+                second["id"]: {"active": 0, "restricted": 0, "inactive": 0, "unverified": 0, "not_consulted": 2}}
     for analysis_id, accounts in expected.items():
         assert harness.client.get(f"{API}/{analysis_id}").json()["accounts"] == accounts
     listed = {row["id"]: row["accounts"] for row in harness.client.get(API).json()["items"]}

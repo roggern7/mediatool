@@ -889,9 +889,10 @@ export interface ProfileHistoryCleared {
   kept_open: number;
 }
 
-/** Resumo da consulta: `active` reúne públicas, privadas e restritas; `inactive` são as indisponíveis. */
+/** Resumo da consulta: `active` reúne públicas e privadas; `restricted` não dá para confirmar sem login. */
 export interface ProfileAccountTotals {
   active: number;
+  restricted: number;
   inactive: number;
   unverified: number;
   not_consulted: number;

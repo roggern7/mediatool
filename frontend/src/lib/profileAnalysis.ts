@@ -143,6 +143,8 @@ export function analysisPollMs(current: number | null, active: boolean): number 
   return active ? nextPollMs(current, true) : null;
 }
 
+const ALL_CONFIRMED_TEXT = "Todas as consultadas foram confirmadas";
+
 export interface AccountCard {
   label: string;
   value: number;
@@ -155,13 +157,15 @@ export interface AccountCard {
 export function accountCards(a: Pick<ProfileAnalysis, "total" | "summary" | "accounts">): AccountCard[] {
   const { summary, accounts } = a;
   const share = (value: number) => (a.total > 0 ? Math.round((value * 100) / a.total) : 0);
-  const kinds = [
-    `${formatCount(summary.active)} públicas`,
-    `${formatCount(summary.private)} privadas`,
-    `${formatCount(summary.restricted)} restritas`,
-  ].join(" · ");
+  const kinds = `${formatCount(summary.active)} públicas · ${formatCount(summary.private)} privadas`;
   const cards: AccountCard[] = [
     { label: "Contas ativas", value: accounts.active, share: share(accounts.active), detail: kinds },
+    {
+      label: "Restritas",
+      value: accounts.restricted,
+      share: share(accounts.restricted),
+      detail: "Escondidas pelo Instagram para quem não está logado",
+    },
     {
       label: "Contas inativas",
       value: accounts.inactive,
@@ -172,7 +176,7 @@ export function accountCards(a: Pick<ProfileAnalysis, "total" | "summary" | "acc
       label: "Não verificadas",
       value: accounts.unverified,
       share: share(accounts.unverified),
-      detail: "Sem confirmação do Instagram",
+      detail: accounts.unverified > 0 ? "Sem confirmação do Instagram" : ALL_CONFIRMED_TEXT,
     },
   ];
   if (accounts.not_consulted > 0) {

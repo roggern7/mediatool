@@ -38,11 +38,13 @@ MAX_DISPLAY_NAME = 200
 # nunca passe do que o SQLite guarda em INTEGER.
 MAX_COUNT = 10**13
 
-# Perfil restrito (idade ou região), VERIFICADO em 2026-11-01 com @ambev: rota normal da aba Reels, meta tag com a
-# contagem de posts e usuário nulo. Como o usuário nulo também pode ser passageiro, o executor relê uma vez.
+# Perfil restrito, VERIFICADO em 2026-11-01: rota normal da aba Reels, meta tag com a contagem de posts e usuário nulo. O
+# Instagram esconde o perfil de quem não está logado, e o motivo não aparece: @ambev é restrição de idade, mas outras
+# contas vistas assim tinham 0 seguidores e algumas sumiram horas depois. Sem login não dá para confirmar que a conta
+# está ativa. Como o usuário nulo também pode ser passageiro, o executor relê uma vez.
 RESTRICTED_ROUTE = '"canonicalRouteName":"comet.igweb.PolarisLoggedOutDesktopWWWProfileReelsTabRoute"'
 NULL_USER = f'"{USER_FIELD}":null'
-MSG_RESTRICTED = "Perfil restrito por idade ou região: sem login, só a contagem de posts fica visível."
+MSG_RESTRICTED = "O Instagram esconde este perfil de quem não está logado: só a contagem de posts fica visível."
 MSG_UNAVAILABLE = "Perfil não encontrado, removido ou restrito para visitantes sem login."
 MSG_MISMATCH = "O Instagram devolveu outro perfil nesta consulta; o resultado não foi aceito."
 MSG_UNREADABLE = "A página do perfil não trouxe os dados esperados; o resultado não pôde ser confirmado."
