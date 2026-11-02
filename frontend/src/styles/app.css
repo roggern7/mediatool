@@ -1,26 +1,19 @@
 :root {
-  --bg: #120f1a;
-  --surface: #1a1625;
-  --surface-2: #231e31;
-  --surface-3: #2d273e;
-  --border: #322b45;
-  --border-strong: #463d60;
-  --text: #f2eff7;
-  --text-muted: #aaa2bc;
-  --text-dim: #7d7594;
-  --accent: #c0a9ff;
-  --accent-strong: #a98bff;
-  --on-accent: #17102b;
-  --ok: #58d6a7;
-  --warn: #f5be5b;
-  --err: #ff6b81;
-  --hover: rgba(192, 169, 255, 0.07);
-  --err-soft: rgba(255, 107, 129, 0.1);
-  --err-line: rgba(255, 107, 129, 0.35);
-  --warn-soft: rgba(245, 190, 91, 0.09);
-  --warn-line: rgba(245, 190, 91, 0.32);
-  /* Anel de Stories: só na marca, no item ativo do menu e na barra de progresso. */
-  --ring: linear-gradient(90deg, #f9b14a, #f0537a 55%, #a45cf0);
+  --bg: #0f1113;
+  --surface: #16191c;
+  --surface-2: #1d2125;
+  --surface-3: #252a2f;
+  --border: #2a3036;
+  --border-strong: #363d44;
+  --text: #e7e9eb;
+  --text-muted: #8d949b;
+  --text-dim: #646b72;
+  --accent: #6b8afd;
+  --accent-strong: #5574f0;
+  --ok: #4fae7b;
+  --warn: #d6a648;
+  --err: #e2574c;
+  --hover: rgba(255, 255, 255, 0.035);
   --radius: 9px;
   --radius-lg: 14px;
 
@@ -115,7 +108,7 @@ textarea {
   height: 18px;
   flex: none;
   border-radius: 50%;
-  background: var(--ring);
+  background: var(--accent);
   -webkit-mask: radial-gradient(circle, transparent 5.5px, #000 6px);
   mask: radial-gradient(circle, transparent 5.5px, #000 6px);
 }
@@ -149,7 +142,7 @@ textarea {
   bottom: 8px;
   width: 3px;
   border-radius: 0 3px 3px 0;
-  background: linear-gradient(180deg, #f9b14a, #f0537a 55%, #a45cf0);
+  background: var(--accent);
 }
 
 .sidebar-foot {
@@ -175,8 +168,8 @@ textarea {
   align-items: center;
   gap: 8px;
   padding: 8px 36px;
-  background: var(--err-soft);
-  border-bottom: 1px solid var(--err-line);
+  background: #221615;
+  border-bottom: 1px solid #5a2b28;
   color: var(--text);
   font-size: 12px;
 }
@@ -315,7 +308,7 @@ textarea {
 .btn-primary {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
-  color: var(--on-accent);
+  color: #fff;
   font-weight: 600;
 }
 .btn-primary:hover:not(:disabled) {
@@ -337,12 +330,12 @@ textarea {
 .btn-danger-solid {
   background: var(--err);
   border-color: var(--err);
-  color: var(--on-accent);
+  color: #fff;
   font-weight: 600;
 }
 .btn-danger-solid:hover:not(:disabled) {
-  background: #ff8a9b;
-  border-color: #ff8a9b;
+  background: #c94a40;
+  border-color: #c94a40;
 }
 .btn-sm {
   height: 26px;
@@ -372,7 +365,7 @@ textarea {
 .select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(192, 169, 255, 0.18);
+  box-shadow: 0 0 0 3px rgba(107, 138, 253, 0.18);
 }
 .input.invalid {
   border-color: var(--err);
@@ -576,7 +569,7 @@ textarea {
 .progress > span {
   display: block;
   height: 100%;
-  background: var(--ring);
+  background: var(--accent);
   transition: width 150ms ease;
 }
 .progress > span.err {
@@ -634,12 +627,12 @@ textarea {
   align-items: flex-start;
 }
 .alert.err {
-  border-color: var(--err-line);
-  background: var(--err-soft);
+  border-color: #5a2b28;
+  background: #221615;
 }
 .alert.warn {
-  border-color: var(--warn-line);
-  background: var(--warn-soft);
+  border-color: #4f4126;
+  background: #201c13;
 }
 
 /* ---------- Tabela ---------- */
