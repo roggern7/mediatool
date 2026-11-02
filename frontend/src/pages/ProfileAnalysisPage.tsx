@@ -1,4 +1,4 @@
-import { memo, useCallback, useDeferredValue, useId, useMemo, useState, type FormEvent } from "react";
+import { memo, useCallback, useDeferredValue, useId, useMemo, useState, type FormEvent, type MouseEvent } from "react";
 import { api, messageOf } from "../api/client";
 import type { ProfileAnalysis, ProfileAnalysisItem } from "../api/types";
 import { Link } from "../components/Layout";
@@ -481,6 +481,14 @@ function ReportLink({ analysis, label }: { analysis: ProfileAnalysis; label: str
   );
 }
 
+/** Clique na linha abre a análise; os botões da linha e seleção de texto continuam fazendo só o que fazem. */
+function openFromRow(e: MouseEvent<HTMLTableRowElement>, id: number) {
+  if ((e.target as HTMLElement).closest("a, button")) return;
+  if (window.getSelection()?.isCollapsed === false) return;
+  navigate(analysisRoute(id));
+  document.querySelector(".main")?.scrollTo(0, 0);
+}
+
 function HistoryTable({
   items,
   currentId,
@@ -500,35 +508,39 @@ function HistoryTable({
             <th>Hora</th>
             <th className="num">Perfis</th>
             <th className="num">Ativas</th>
+            <th className="num">Restritas</th>
             <th className="num">Inativas</th>
             <th className="num">Não verificadas</th>
             <th className="num" title="Soma dos últimos Reels lidos de cada conta">
               Views
             </th>
             <th>Status</th>
-            <th aria-label="Abrir" />
             <th aria-label="Baixar" />
             <th aria-label="Apagar" />
           </tr>
         </thead>
         <tbody>
           {items.map((analysis) => (
-            <tr key={analysis.id} className={analysis.id === currentId ? "selected" : undefined}>
-              <td className="muted">{analysis.id}</td>
+            <tr
+              key={analysis.id}
+              className={`clickable${analysis.id === currentId ? " selected" : ""}`}
+              onClick={(e) => openFromRow(e, analysis.id)}
+            >
+              <td>
+                <Link to={analysisRoute(analysis.id)} className="row-link">
+                  {analysis.id}
+                </Link>
+              </td>
               <td className="nowrap">{analysis.created_date ?? "—"}</td>
               <td className="muted nowrap">{analysis.created_time ?? "—"}</td>
               <td className="num">{formatCount(analysis.total)}</td>
               <td className="num">{formatCount(analysis.accounts.active)}</td>
+              <td className="num">{formatCount(analysis.accounts.restricted)}</td>
               <td className="num">{formatCount(analysis.accounts.inactive)}</td>
               <td className="num">{formatCount(analysis.accounts.unverified)}</td>
               <td className="num">{formatCount(analysis.summary.views_total)}</td>
               <td>
                 <Pill tone={analysisTone(analysis.status)}>{ANALYSIS_STATUS_LABEL[analysis.status]}</Pill>
-              </td>
-              <td>
-                <Link to={analysisRoute(analysis.id)} className="btn btn-sm btn-ghost">
-                  Abrir
-                </Link>
               </td>
               <td>
                 <ReportLink analysis={analysis} label="Baixar" />

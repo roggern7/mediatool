@@ -216,9 +216,10 @@ def _moment_text(value: str | None, zone: export_time.Zone) -> str:
 
 
 def account_totals(summary: dict[str, int]) -> dict[str, int]:
-    """Resumo da consulta, única regra para tela e relatório: `active` reúne públicas, privadas e restritas (a conta
-    existe) e `inactive` são as indisponíveis. Os quatro grupos somam o que já terminou; o resto ainda está na fila."""
-    return {"active": summary["active"] + summary["private"] + summary["restricted"],
+    """Resumo da consulta, única regra para tela e relatório: `active` reúne públicas e privadas, `restricted` são as
+    que o Instagram esconde sem login (não dá para confirmar que estão ativas) e `inactive` as indisponíveis. Os cinco
+    grupos somam o que já terminou; o resto ainda está na fila."""
+    return {"active": summary["active"] + summary["private"], "restricted": summary["restricted"],
             "inactive": summary["unavailable"], "unverified": summary["unverified"],
             "not_consulted": summary["cancelled"]}
 
@@ -233,11 +234,12 @@ def _html_head(analysis: dict[str, Any], zone: export_time.Zone) -> str:
     summary = analysis["summary"]
     accounts = account_totals(summary)
     total = analysis["total"]
-    kinds = (f"{_thousands(summary['active'])} públicas · {_thousands(summary['private'])} privadas · "
-             f"{_thousands(summary['restricted'])} restritas")
+    kinds = f"{_thousands(summary['active'])} públicas · {_thousands(summary['private'])} privadas"
     cards = (("Total", total, ""), ("Contas ativas", accounts["active"], kinds),
+             ("Restritas", accounts["restricted"], "escondidas pelo Instagram para quem não está logado"),
              ("Contas inativas", accounts["inactive"], "não encontradas ou removidas"),
-             ("Não verificadas", accounts["unverified"], "sem confirmação do Instagram"),
+             ("Não verificadas", accounts["unverified"],
+              "sem confirmação do Instagram" if accounts["unverified"] else "todas as consultadas foram confirmadas"),
              ("Não consultados", accounts["not_consulted"], ""),
              (VIEWS_CARD, summary["views_total"], "soma dos últimos Reels lidos de cada conta"),
              ("Com Stories", summary["stories_yes"], ""),
@@ -259,7 +261,7 @@ def _html_head(analysis: dict[str, Any], zone: export_time.Zone) -> str:
         f'<section class="cards">{card_html}</section>{error}'
         '<p class="note"><b>Views</b> é a soma dos últimos Reels lidos (quantidade abaixo do número), não o total da'
         " vida da conta. <b>≈</b> marca um valor de Posts arredondado pelo Instagram, que sem login informa, por"
-        " exemplo, 33K. <b>Contas ativas</b> reúne públicas, privadas e restritas: a conta existe."
+        " exemplo, 33K. <b>Contas ativas</b> reúne públicas e privadas. <b>Restritas</b> não dá para confirmar sem login."
         " <b>Status</b> mostra se o perfil estava acessível sem login: Ativa não significa que ele"
         " publica recentemente. <b>Não verificado</b> quer dizer que a informação não pôde ser confirmada; nunca"
         " significa Não. <b>Não consultado</b> quer dizer que a análise terminou antes de chegar a esse perfil.</p>"

@@ -264,10 +264,10 @@ def test_html_header_cards_and_note(full_report):
     assert f"Análise nº {analysis_id}" in page and "Status: Concluída" in page
     found = re.findall(r'<div class="card"><b>(.*?)</b><span>(.*?)</span>', page)
     cards = {label: value for value, label in found}
-    assert cards == {"Total": "6", "Contas ativas · 67%": "4", "Contas inativas · 17%": "1",
+    assert cards == {"Total": "6", "Contas ativas · 67%": "4", "Restritas · 0%": "0", "Contas inativas · 17%": "1",
                      "Não verificadas · 17%": "1", "Não consultados · 0%": "0", "Views totais": "300",
                      "Com Stories · 50%": "3", "Com Destaques · 0%": "0"}
-    assert "3 públicas · 1 privadas · 0 restritas" in page and "<b>Contas ativas</b> reúne" in page
+    assert "3 públicas · 1 privadas" in page and "<b>Contas ativas</b> reúne" in page
     assert "não o total da vida da conta" in page and "Ativa não significa" in page
     assert "<b>≈</b> marca um valor de Posts arredondado pelo Instagram" in page
     assert "—" not in page and "Fim: 01/11/2026" in page
@@ -290,7 +290,7 @@ def test_html_cards_add_up_to_the_total(harness):
     found = re.findall(r'<div class="card"><b>(.*?)</b><span>(.*?)</span>', page)
     cards = {label.split(" · ")[0]: int(value) for value, label in found}
     assert cards["Não consultados"] == 2 and cards["Total"] == 6
-    assert sum(cards[label] for label in ("Contas ativas", "Contas inativas", "Não verificadas",
+    assert sum(cards[label] for label in ("Contas ativas", "Restritas", "Contas inativas", "Não verificadas",
                                           "Não consultados")) == cards["Total"]
 
 

@@ -1743,8 +1743,8 @@ Ritmo: a análise usa o portão global (1 em voo, intervalo, pausa publicada), m
 `unverified` com `internal_error`; se nada grava, `attempts` limita o item (sem GET novo acima de `MAX_ATTEMPTS + 1`) e o
 executor espera em memória.
 
-`Analysis.accounts` `{active, inactive, unverified, not_consulted}` é o resumo da consulta, mesma regra na tela e no HTML:
-`active` = públicas + privadas + restritas; `inactive` = indisponíveis. Views totais vêm de `summary.views_total`.
+`Analysis.accounts` `{active, restricted, inactive, unverified, not_consulted}` é o resumo da consulta, mesma regra na tela e no HTML:
+`active` = públicas + privadas; `restricted` = escondidas sem login; `inactive` = indisponíveis. Views totais vêm de `summary.views_total`.
 
 Relatório (gerado em fluxo, sem memória proporcional ao total; `content-length` no ZIP, entregue em blocos):
 `relatorio-perfis-AAAA-MM-DD.{xlsx,csv,html}`. XLSX e CSV: Perfil, Nome, Posts, Posts exato, Views, Reels

@@ -178,15 +178,19 @@ describe("estado da análise", () => {
       highlights_yes: 0,
       views_total: 0,
     };
-    const accounts = { active: 8, inactive: 10, unverified: 2, not_consulted: 0 };
+    const accounts = { active: 7, restricted: 1, inactive: 10, unverified: 2, not_consulted: 0 };
     const cards = accountCards({ total: 20, summary, accounts });
     expect(cards.map((card) => [card.label, card.value, card.share])).toEqual([
-      ["Contas ativas", 8, 40],
+      ["Contas ativas", 7, 35],
+      ["Restritas", 1, 5],
       ["Contas inativas", 10, 50],
       ["Não verificadas", 2, 10],
       ["Views totais", 0, null],
     ]);
-    expect(cards[0]?.detail).toBe("5 públicas · 2 privadas · 1 restritas");
+    expect(cards[0]?.detail).toBe("5 públicas · 2 privadas");
+    expect(cards[3]?.detail).toBe("Sem confirmação do Instagram");
+    const clean = accountCards({ total: 20, summary, accounts: { ...accounts, unverified: 0 } });
+    expect(clean[3]?.detail).toBe("Todas as consultadas foram confirmadas");
     const cancelled = accountCards({ total: 20, summary, accounts: { ...accounts, not_consulted: 3 } });
     expect(cancelled.at(-2)?.label).toBe("Não consultadas");
   });

@@ -36,6 +36,7 @@ class AnalysisSummary(BaseModel):
 
 class AccountTotals(BaseModel):
     active: int
+    restricted: int
     inactive: int
     unverified: int
     not_consulted: int

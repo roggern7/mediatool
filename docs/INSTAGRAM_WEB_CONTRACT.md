@@ -1039,7 +1039,7 @@ cookies vai para log, exceção ou `ProfileSnapshot`. Regras de execução (back
 ### Análise de Perfis: observado em 200 perfis públicos (2026-11-01, sem sessão)
 
 - Ritmo: uma consulta por vez, 3,4 a 3,5 s por perfil, sem nenhum 429 em 16 minutos.
-- Perfil restrito por idade (@ambev): `canonicalRouteName` da aba Reels, meta tag com a contagem de posts e
+- Perfil escondido sem login (@ambev, restrição de idade; outras contas com 0 seguidores, algumas removidas horas depois): `canonicalRouteName` da aba Reels, meta tag com a contagem de posts e
   `"xig_user_by_username":null`. Status `restricted`, com uma releitura antes de aceitar.
 - Resposta passageira: @cbf_futebol (conta real, 0 posts) saiu sem leitura uma vez e foi lida normalmente depois.
 - Rota de erro: 5 perfis reconsultados depois de minutos deram o mesmo resultado (inexistência estável).
