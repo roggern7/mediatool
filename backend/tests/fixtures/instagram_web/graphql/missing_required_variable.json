@@ -1,0 +1,20 @@
+{
+ "errors": [
+  {
+   "message": "A server error missing_required_variable_value occured. Check server logs for details.",
+   "severity": "CRITICAL",
+   "code": 1675012,
+   "api_error_code": null,
+   "summary": "Erro de consulta",
+   "description": "Ocorreu um problema com essa solicitação. Tente novamente mais tarde.",
+   "is_silent": false,
+   "is_transient": false,
+   "requires_reauth": false,
+   "debug_info": null
+  }
+ ],
+ "data": null,
+ "extensions": {
+  "is_final": true
+ }
+}

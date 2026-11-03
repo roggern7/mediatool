@@ -1,0 +1,27 @@
+{
+ "errors": [
+  {
+   "message": "A server error field_exception occured. Check server logs for details.",
+   "severity": "CRITICAL",
+   "code": 1357005,
+   "api_error_code": null,
+   "summary": "Sua solicitação não pôde ser processada",
+   "description": "Houve um problema com esta solicitação. Estamos trabalhando para solucioná-lo o mais breve possível.",
+   "description_raw": "Houve um problema com esta solicitação. Estamos trabalhando para solucioná-lo o mais breve possível.",
+   "is_silent": false,
+   "is_transient": false,
+   "is_not_critical": false,
+   "requires_reauth": false,
+   "allow_user_retry": false,
+   "debug_info": null,
+   "query_path": null,
+   "fbtrace_id": "FAKE_TRACE_0001",
+   "www_request_id": "FAKE_REQUEST_0001",
+   "path": ["xdt_api__v1__feed__user_timeline_graphql_connection"]
+  }
+ ],
+ "data": null,
+ "extensions": {
+  "is_final": true
+ }
+}

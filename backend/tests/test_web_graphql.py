@@ -831,3 +831,68 @@ def test_code_is_a_stable_key_when_pk_and_id_are_missing(boot):
     nodes, error = _listing_until_error(http, boot, max_pages=None)
     assert [n["code"] for n in nodes] == ["A", "B"] and len(http.requests) == 3
     assert error.diagnostic["detail"] == "no_new_items"
+
+
+# --------------------------------------------------------------------------- perfil indisponível (1357005)
+# Formato observado no real em 2026-11-03 (perfil inexistente/indisponível para a conta): HTTP 200, data null e
+# errors só com code 1357005 + path [campo raiz]. Consulta quebrada responde 1675012 sem path (contract_changed).
+
+def _unavailable_payload(**changes) -> dict:
+    payload = json.loads(fixture_text("profile_unavailable.json"))
+    payload["errors"][0].update(changes)
+    return payload
+
+
+def test_profile_unavailable_first_page_is_profile_not_found(boot):
+    http = FakeHttp(resp(200, "for (;;);" + fixture_text("profile_unavailable.json"),
+                         content_type="text/javascript; charset=utf-8"))
+    with pytest.raises(InstagramWebError) as info:
+        list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=None))
+    exc = info.value
+    assert exc.code == "profile_not_found" and exc.stage == "graphql"
+    assert "não existe" in exc.message and "Instagram mudou" not in exc.message
+    assert exc.diagnostic["detail"] == "profile_unavailable" and exc.diagnostic["status"] == 200
+    assert exc.diagnostic["error_codes"] == [1357005]
+    assert len(http.requests) == 1 and boot.invalidations == 0 and boot.calls == [False]
+    assert_no_tokens(exc, boot)
+
+
+def test_profile_unavailable_via_query_without_cursor(boot):
+    with pytest.raises(InstagramWebError) as info:
+        gql(FakeHttp(ok("profile_unavailable.json")), boot).query(PROFILE_POSTS, {"username": "x"})
+    assert info.value.code == "profile_not_found"
+
+
+def test_profile_unavailable_shape_with_cursor_stays_contract_changed(boot):
+    """No meio da listagem (com cursor) o mesmo erro pode ser do cursor: não vira perfil inexistente."""
+    http = FakeHttp(ok("profile_unavailable.json"))
+    with pytest.raises(InstagramWebError) as info:
+        list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=None, start_cursor="FAKE_CURSOR_7",
+                                                start_page=8))
+    assert info.value.code == "contract_changed"
+    assert info.value.diagnostic["detail"] == "missing_data"
+
+
+def test_missing_required_variable_stays_contract_changed(boot):
+    with pytest.raises(InstagramWebError) as info:
+        list(gql(FakeHttp(ok("missing_required_variable.json")), boot).iter_profile_posts("perfil_fake",
+                                                                                         max_media=None))
+    assert info.value.code == "contract_changed"
+    assert info.value.diagnostic["error_codes"] == [1675012]
+
+
+@pytest.mark.parametrize("payload", [
+    _unavailable_payload(path=["xdt_some_other_root"]),
+    _unavailable_payload(path=[]),
+    _unavailable_payload(path=None),
+    _unavailable_payload(code=1675012),
+    _unavailable_payload(code="1357005"),
+    _unavailable_payload(is_transient=True),
+    {**_unavailable_payload(), "errors": _unavailable_payload()["errors"] + [{"code": 1675012, "message": "x"}]},
+    {**_unavailable_payload(), "errors": []},
+    {**_unavailable_payload(), "data": {}},
+])
+def test_profile_unavailable_requires_exact_shape(boot, payload):
+    with pytest.raises(InstagramWebError) as info:
+        list(gql(FakeHttp(resp(200, json.dumps(payload))), boot).iter_profile_posts("perfil_fake", max_media=None))
+    assert info.value.code == "contract_changed"

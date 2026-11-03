@@ -56,6 +56,13 @@ DEFAULT_PAGE_DELAY = (2.0, 4.0)   # segundos entre páginas (a partir da 2a), so
 NO_NEW_PAGES_LIMIT = 2            # páginas consecutivas só com nós já vistos antes de parar
 
 _CONTRACT_MESSAGE = "O Instagram mudou a forma de responder e o Media Tool precisa ser atualizado."
+# Perfil inexistente, removido ou indisponível para a conta da sessão ("Esta página não está disponível" no
+# navegador). Observado no real em 2026-11-03: 1a página do PolarisProfilePostsQuery com HTTP 200, `data` null e
+# `errors` só com code 1357005 ("field_exception") e `path` = [campo raiz]. A consulta quebrada (variável/doc_id
+# errado) responde diferente (1675012 missing_required_variable_value, sem `path`) e segue `contract_changed`.
+PROFILE_UNAVAILABLE_ERROR_CODE = 1357005
+_PROFILE_UNAVAILABLE_MESSAGE = ("Perfil não encontrado: ele não existe, foi removido ou não está disponível para a "
+                                "conta da sessão.")
 # Fim anômalo da paginação (has_next_page=true sem como continuar): não é fim do perfil nem conclui a importação.
 _PAGINATION_MESSAGE = ("O Instagram interrompeu a paginação do perfil antes do fim (resposta sem continuação "
                        "utilizável). A importação não foi dada como concluída e o ponto de retomada foi mantido.")
@@ -563,6 +570,24 @@ def account_confirmation(viewer_id: object, account_id: object) -> str:
     return CONFIRMED if viewer == account else DIFFERENT_ACCOUNT
 
 
+def _profile_unavailable(payload: object, root_field: str) -> bool:
+    """1a página sem dados com TODOS os errors = 1357005 apontando para o campo raiz (ver
+    PROFILE_UNAVAILABLE_ERROR_CODE). Qualquer outro formato (outro código, sem `path`, dados presentes) é False."""
+    if not isinstance(payload, Mapping) or payload.get("data") is not None:
+        return False
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return False
+    for entry in errors:
+        if not isinstance(entry, Mapping) or type(entry.get("code")) is not int \
+                or entry["code"] != PROFILE_UNAVAILABLE_ERROR_CODE or entry.get("is_transient") is True:
+            return False
+        path = entry.get("path")
+        if not isinstance(path, list) or not path or path[0] != root_field:
+            return False
+    return True
+
+
 def _missing_doc(payload: object) -> bool:
     for entry in _error_entries(payload):
         message = entry.get("message")
@@ -711,6 +736,13 @@ class InstagramWebGraphQL:
                 raise self._after_renewal_error(spec, resp, payload, err, secrets)
             if err is not None:
                 raise err
+            if (not has_root and spec.name == PROFILE_POSTS.name and variables.get("after") is None
+                    and _profile_unavailable(payload, spec.root_field)):
+                # Só no início da listagem (sem cursor): no meio dela o mesmo erro pode ser do cursor.
+                log.warning("GraphQL %s: perfil indisponível para a conta da sessão (1357005 no campo raiz, HTTP %s)",
+                            spec.name, resp.status)
+                raise InstagramWebError("profile_not_found", _PROFILE_UNAVAILABLE_MESSAGE, stage=STAGE,
+                                        diagnostic=_diagnostic(resp, payload, "profile_unavailable", secrets))
             return self._extract(spec, resp, payload, secrets)
 
     def _after_renewal_error(self, spec: QuerySpec, resp: WebResponse, payload: object,
