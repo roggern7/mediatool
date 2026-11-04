@@ -119,8 +119,9 @@ def test_items_contract_and_pagination(harness):
     assert body["total"] == 3 and [item["username"] for item in body["items"]] == ["a2", "b3"]
     assert set(body["items"][0]) == {
         "position", "username", "state", "account_status", "display_name", "posts_state", "posts_count", "posts_exact",
-        "posts_text", "views_state", "views_total", "views_reels", "stories", "highlights", "error_code",
-        "error_message", "checked_at", "checked_date", "checked_time", "attempts",
+        "posts_text", "views_state", "views_total", "views_reels", "reels_count", "reels_more", "latest_reel_at",
+        "latest_reel_date", "stories", "highlights", "error_code", "error_message", "checked_at", "checked_date",
+        "checked_time", "attempts",
     }
     assert harness.client.get(url, params={"limit": 201}).status_code == 422
     assert harness.client.get(url, params={"limit": 200}).status_code == 200

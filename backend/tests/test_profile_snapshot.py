@@ -392,3 +392,34 @@ def test_non_html_200_raises_contract_changed():
     with pytest.raises(InstagramWebError) as caught:
         fetch(lambda _r: httpx.Response(200, json={"ok": True}))
     assert caught.value.code == "contract_changed"
+
+
+# ---- Reels da aba Reels (conta que publica só lá) --------------------------------------------------------------------
+def reel_pk(epoch_s: int) -> str:
+    """pk sintético de um Reel publicado em `epoch_s` (inverso de `reel_taken_at_from_pk`, sem os 25 s)."""
+    return str((epoch_s * 1000 - 1314220021721) << 23)
+
+
+def test_reels_only_account_is_not_empty():
+    edges = [clip(10) for _ in range(12)]
+    for index, edge in enumerate(edges):
+        edge["node"]["pk"] = reel_pk(NOW - 86_400 * index)
+    edges[0]["node"]["pk"] = reel_pk(NOW - 86_400 * 400)      # fixado no topo, antigo: não é o mais recente
+    og = "2,909 seguidores, seguindo 10, 0 posts &#x2014; Veja as fotos e v&#xed;deos do Instagram"
+    snap = parse(profile_html(connection=clips_connection(edges, has_next=True), og=og))
+    assert (snap.account_status, snap.posts_state, snap.posts_count) == ("active", "known", 0)
+    assert (snap.reels_count, snap.reels_more) == (12, True)
+    assert snap.latest_reel_at == "2026-10-31T02:27:05Z"      # NOW - 1 dia, +25 s
+
+
+def test_reels_fields_follow_the_views_rule():
+    assert (parse(profile_html()).reels_count, parse(profile_html()).reels_more) == (2, False)
+    none = parse(profile_html(user_envelope(has_any_clips=False), connection=None))
+    assert (none.reels_count, none.reels_more, none.latest_reel_at) == (0, False, None)
+    for snap in (parse(profile_html(user_envelope(is_private=True))),
+                 parse(profile_html(connection={"edges": "x"})),
+                 parse(profile_html(connection=clips_connection([]))),        # has_any_clips verdadeiro: não prova 0
+                 parse(profile_html(connection={"edges": [clip()]}))):          # sem page_info: "há mais" desconhecido
+        assert snap.reels_more is None
+    assert parse(profile_html(connection={"edges": [clip()]})).reels_count == 1
+    assert parse(profile_html(user_envelope(is_private=True))).reels_count is None

@@ -929,6 +929,13 @@ export interface ProfileAnalysisItem {
   views_state: ProfileViewsState | null;
   views_total: number | null;
   views_reels: number | null;
+  /** Reels na 1a página da aba Reels (até 12); com `reels_more`, a aba tem mais. */
+  reels_count: number | null;
+  reels_more: boolean | null;
+  /** ISO UTC do Reel mais recente lido, estimado pelo id da publicação. */
+  latest_reel_at: string | null;
+  /** O mesmo em data local ("04/11/2026"). */
+  latest_reel_date: string | null;
   stories: ProfileCheck | null;
   highlights: ProfileCheck | null;
   error_code: string | null;
@@ -937,4 +944,93 @@ export interface ProfileAnalysisItem {
   checked_date: string | null;
   checked_time: string | null;
   attempts: number;
+}
+
+/** GET /api/post-times/report: relatório de padrões de publicação do lote ou do grupo, para ver na ferramenta. */
+export type PostTimesSegmentKind = "ritmo" | "rajada" | "pausa";
+
+export interface PostTimesSegment {
+  index: number;
+  start: string;
+  end: string;
+  posts: number;
+  intervals: number;
+  avg_min: number | null;
+  avg_text: string | null;
+  kind: PostTimesSegmentKind;
+  text: string;
+}
+
+export interface PostTimesItem {
+  n: number;
+  code: string;
+  url: string;
+  /** ISO no horário local do relatório; null sem data válida. */
+  taken_at: string | null;
+  interval_min: number | null;
+  interval_text: string | null;
+  segment: number | null;
+  burst: boolean | null;
+  /** "photo" | "video" | "reel" | "carousel" (ou outro texto do backend). */
+  kind: string | null;
+  pinned: boolean | null;
+  in_sequence: boolean;
+  source: "grid" | "reels_tab";
+}
+
+export interface PostTimesAccount {
+  username: string;
+  posts: number;
+  pinned_out: number;
+  estimated: number;
+  first_post: string | null;
+  last_post: string | null;
+  days: number | null;
+  posts_per_day: number | null;
+  interval_avg_min: number | null;
+  interval_median_min: number | null;
+  interval_min_min: number | null;
+  interval_max_min: number | null;
+  interval_avg_text: string | null;
+  interval_median_text: string | null;
+  interval_min_text: string | null;
+  interval_max_text: string | null;
+  regularity: "regular" | "variável" | "irregular" | null;
+  cv: number | null;
+  bursts: number;
+  largest_burst: number | null;
+  pauses: number;
+  largest_pause_text: string | null;
+  typical_band: string | null;
+  top_hours: number[];
+  top_hours_share: number | null;
+  most_active_days: string[];
+  quiet_window: string | null;
+  top_kind: string | null;
+  patterns: string[];
+  hours: { hour: number; count: number }[];
+  weekdays: { day: string; count: number }[];
+  segments: PostTimesSegment[];
+  items: PostTimesItem[];
+}
+
+export interface PostTimesComparisonRow {
+  username: string;
+  posts: number;
+  posts_per_day: number | null;
+  interval_avg_text: string | null;
+  interval_median_text: string | null;
+  bursts: number;
+  top_hour: number | null;
+  regularity: string | null;
+}
+
+export interface PostTimesReport {
+  title: string;
+  generated_at: string;
+  timezone: string;
+  zip_url: string;
+  accounts: PostTimesAccount[];
+  comparison: PostTimesComparisonRow[];
+  comparison_notes: string[];
 }

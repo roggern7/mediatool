@@ -394,7 +394,7 @@ def test_zip_of_ten_thousand_reads_back_whole(harness, no_temp_left):
         page = archive.read(names["html"]).decode("utf-8")
 
     assert len(sheet) == MAX_PROFILES + 1 and len(table) == MAX_PROFILES + 1
-    assert refs == {"dimension": f"A1:L{MAX_PROFILES + 1}", "autoFilter": f"A1:L{MAX_PROFILES + 1}"}
+    assert refs == {"dimension": f"A1:N{MAX_PROFILES + 1}", "autoFilter": f"A1:N{MAX_PROFILES + 1}"}
     body = page[page.index("<tbody>"):page.index("</tbody>")]
     html_rows = re.findall(r"<tr>.*?</tr>", body)
     assert len(html_rows) == MAX_PROFILES and "—" not in page
@@ -405,19 +405,19 @@ def test_zip_of_ten_thousand_reads_back_whole(harness, no_temp_left):
     for position in range(1, 9_001):
         row = expected_row(position)
         for found in (table[position], sheet[position]):
-            assert found[8:11] == [labels[row["status"]], row["date"], row["time"]], position
+            assert found[10:13] == [labels[row["status"]], row["date"], row["time"]], position
         cells = html_rows[position - 1]
         assert f">{row['date']}</td>" in cells and f">{row['time']}</td>" in cells
         if row["status"] in ("active", "private"):
             expected = [{"yes": "Sim", "no": "Não"}[row[key]] for key in ("stories", "highlights")]
-            assert table[position][6:8] == expected and sheet[position][6:8] == expected
+            assert table[position][8:10] == expected and sheet[position][8:10] == expected
         else:
-            assert table[position][2:8] == ["Não verificado"] * 6 and sheet[position][2:8] == ["Não verificado"] * 6
+            assert table[position][2:10] == sheet[position][2:10] == ["Não verificado"] * 8
             assert "Não verificado" in cells
     for position in range(9_001, MAX_PROFILES + 1):
-        assert table[position][2:8] == ["Não consultado"] * 6 and table[position][8] == "Cancelado"
-        assert sheet[position][8] == "Cancelado"
-        assert 'colspan="4"' in html_rows[position - 1] and 'colspan="2"' in html_rows[position - 1]
+        assert table[position][2:10] == ["Não consultado"] * 8 and table[position][10] == "Cancelado"
+        assert sheet[position][10] == "Cancelado"
+        assert 'colspan="5"' in html_rows[position - 1] and 'colspan="2"' in html_rows[position - 1]
 
 
 def test_iter_items_reads_in_blocks_without_repeating(harness):

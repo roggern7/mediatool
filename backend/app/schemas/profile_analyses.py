@@ -92,6 +92,10 @@ class AnalysisItemOut(BaseModel):
     views_state: str | None
     views_total: int | None
     views_reels: int | None
+    reels_count: int | None          # Reels na 1a página da aba Reels (até 12)
+    reels_more: bool | None          # a aba tem mais Reels além dessa página
+    latest_reel_at: str | None       # ISO UTC do Reel mais recente lido, estimado pelo id
+    latest_reel_date: str | None     # o mesmo em data local ("04/11/2026")
     stories: Tristate | None
     highlights: Tristate | None
     error_code: str | None

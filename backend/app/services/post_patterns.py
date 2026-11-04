@@ -26,7 +26,7 @@ import time as clock
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 from urllib.parse import quote
 
 from app.services import export_time
@@ -465,31 +465,42 @@ def _comparison(accounts: list[AccountAnalysis]) -> list[str]:
                      format_duration(account.mean) if account.mean is not None else "-",
                      format_duration(account.median) if account.median is not None else "-",
                      _decimal(account.posts_per_day) or "-", str(len(account.bursts)),
-                     _hour(max(range(24), key=lambda h: (account.hours[h], -h))) if account.sequence else "-",
+                     _hour(_top_hour(account)) if account.sequence else "-",
                      account.regularity))
     widths = [max(len(row[i]) for row in (header, *rows)) for i in range(len(header))]
     lines = ["=== Comparativo ===", ""]
     for row in (header, *rows):
         lines.append("  " + "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip())
     lines.append("")
+    lines += [f"  - {note}" for note in _comparison_notes(accounts)]
+    lines.append("")
+    return lines
+
+
+def _comparison_notes(accounts: list[AccountAnalysis]) -> list[str]:
+    """Frases do comparativo (2+ perfis)."""
+    notes: list[str] = []
     measured = [account for account in accounts if account.intervals]
     if len(measured) >= 2:
         busiest = max(measured, key=lambda a: a.posts_per_day)
-        lines.append(f"  - Quem posta mais: @{busiest.username} ({_decimal(busiest.posts_per_day)} posts/dia).")
+        notes.append(f"Quem posta mais: @{busiest.username} ({_decimal(busiest.posts_per_day)} posts/dia).")
         fastest = min(measured, key=lambda a: a.median)
-        lines.append(f"  - Menor intervalo mediano: @{fastest.username} ({format_duration(fastest.median)}).")
+        notes.append(f"Menor intervalo mediano: @{fastest.username} ({format_duration(fastest.median)}).")
         with_cv = [account for account in measured if account.cv is not None]
         if len(with_cv) >= 2:
             steady = min(with_cv, key=lambda a: a.cv)
-            lines.append(f"  - Mais regular: @{steady.username} ({steady.regularity}, coeficiente de variação "
+            notes.append(f"Mais regular: @{steady.username} ({steady.regularity}, coeficiente de variação "
                          f"{_decimal(steady.cv, 2)}).")
         bursty = max(measured, key=lambda a: len(a.bursts))
         if bursty.bursts:
-            lines.append(f"  - Mais rajadas: @{bursty.username} ({len(bursty.bursts)}).")
+            notes.append(f"Mais rajadas: @{bursty.username} ({len(bursty.bursts)}).")
     else:
-        lines.append("  - Menos de 2 contas com intervalos: sem frases comparativas.")
-    lines.append("")
-    return lines
+        notes.append("Menos de 2 contas com intervalos: sem frases comparativas.")
+    return notes
+
+
+def _top_hour(account: AccountAnalysis) -> int | None:
+    return max(range(24), key=lambda h: (account.hours[h], -h)) if account.sequence else None
 
 
 def _header(heading: str, generated_at: datetime, zone_text: str) -> list[str]:
@@ -737,6 +748,92 @@ def build_report_zip(posts: list[PostTime], *, title: str, zone: Zone | None = N
             archive.writestr(_entry(f"{folder}/posts.csv"), _csv_text(POST_COLUMNS, items))
             archive.writestr(_entry(f"{folder}/sequencia.csv"), _csv_text(SEGMENT_COLUMNS, segments))
     return buffer.getvalue()
+
+
+# ---------------------------------------------------------------- JSON (tela de padrões)
+
+SEGMENT_KINDS = {"steady": "ritmo", "burst": "rajada", "pause": "pausa"}
+
+
+def _iso_local(item: DatedPost) -> str:
+    """Horário local com o deslocamento do fuso, ex. "2026-10-01T10:00:00-03:00"."""
+    offset = item.local - item.moment.astimezone(UTC).replace(tzinfo=None)
+    return item.local.replace(tzinfo=timezone(offset)).isoformat()
+
+
+def _duration_text(value: float | None) -> str | None:
+    return None if value is None else format_duration(value)
+
+
+def _account_data(a: AccountAnalysis) -> dict:
+    count, sequence = len(a.sequence), a.sequence
+    active: list[str] = []
+    if count >= WEEKDAY_MIN_POSTS:
+        peak = max(a.weekdays)
+        days = [day for day in range(7) if a.weekdays[day] >= 0.8 * peak]
+        if len(days) <= 3:
+            active = [WEEKDAYS[day] for day in days]
+    quiet = _quiet_window(a.hours)
+    quiet_text = (f"{_hour(quiet[0])}–{_hour((quiet[0] + quiet[1]) % 24)}"
+                  if count >= QUIET_MIN_POSTS and quiet and quiet[1] >= QUIET_MIN_HOURS else None)
+    numbers, burst = _post_segments(a)
+    entries = [(item, numbers[i], burst[i]) for i, item in enumerate(sequence)]
+    entries += [(item, None, False) for item in a.pinned_outside]
+    items = [{"n": n, "code": item.post.code, "url": _link(item.post.code), "taken_at": _iso_local(item),
+              "interval_min": _minutes(item.interval), "interval_text": _duration_text(item.interval) or "",
+              "segment": segment, "burst": in_burst, "kind": item.post.kind, "pinned": item.post.pinned is True,
+              "in_sequence": item.in_sequence, "source": item.post.source or "grid"}
+             for n, (item, segment, in_burst) in enumerate(entries, start=1)]
+    items += [{"n": len(items) + n, "code": post.code, "url": _link(post.code), "taken_at": None,
+               "interval_min": None, "interval_text": "", "segment": None, "burst": False, "kind": post.kind,
+               "pinned": post.pinned is True, "in_sequence": False, "source": post.source or "grid"}
+              for n, post in enumerate(a.undated, start=1)]
+    segments = []
+    for number, segment in enumerate(a.segments, start=1):
+        mean = sum(segment.intervals) / len(segment.intervals)
+        segments.append({"index": number, "start": _iso_local(sequence[segment.start]),
+                         "end": _iso_local(sequence[segment.start + len(segment.intervals)]),
+                         "posts": segment.posts, "intervals": len(segment.intervals), "avg_min": round(mean, 1),
+                         "avg_text": format_duration(mean), "kind": SEGMENT_KINDS[segment.kind],
+                         "text": _segment_text(segment)})
+    return {
+        "username": a.username, "posts": count, "pinned_out": len(a.pinned_outside), "estimated": a.estimated,
+        "first_post": _iso_local(sequence[0]) if sequence else None,
+        "last_post": _iso_local(sequence[-1]) if sequence else None,
+        "days": a.days, "posts_per_day": _minutes(a.posts_per_day, 2),
+        "interval_avg_min": _minutes(a.mean), "interval_median_min": _minutes(a.median),
+        "interval_min_min": _minutes(a.minimum), "interval_max_min": _minutes(a.maximum),
+        "interval_avg_text": _duration_text(a.mean), "interval_median_text": _duration_text(a.median),
+        "interval_min_text": _duration_text(a.minimum), "interval_max_text": _duration_text(a.maximum),
+        "regularity": None if a.regularity == REGULARITY_UNKNOWN else a.regularity, "cv": _minutes(a.cv, 2),
+        "bursts": len(a.bursts), "largest_burst": max(a.bursts, default=None), "pauses": len(a.pauses),
+        "largest_pause_text": _duration_text(max(a.pauses, default=None)),
+        "typical_band": a.typical_bucket, "top_hours": list(a.top_hours),
+        "top_hours_share": int(round(a.top_hours_share)), "most_active_days": active, "quiet_window": quiet_text,
+        "top_kind": _top_kind(a) or None, "patterns": list(a.patterns),
+        "hours": [{"hour": h, "count": a.hours[h]} for h in range(24)],
+        "weekdays": [{"day": WEEKDAYS_SHORT[d], "count": a.weekdays[d]} for d in range(7)],
+        "segments": segments, "items": items,
+    }
+
+
+def report_data(posts: list[PostTime], *, title: str, zone: Zone | None = None) -> dict:
+    """Os dados do ZIP em JSON (mesma análise, mesma ordem de contas); horários locais em ISO com deslocamento."""
+    zone = zone or default_zone()
+    now = datetime.now(UTC)
+    accounts = analyze(posts, zone)
+    several = len(accounts) >= 2
+    return {
+        "title": title, "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "timezone": zone_label(zone, now),
+        "accounts": [_account_data(account) for account in accounts],
+        "comparison": [{"username": a.username, "posts": len(a.sequence),
+                        "posts_per_day": _minutes(a.posts_per_day, 2),
+                        "interval_avg_text": _duration_text(a.mean), "interval_median_text": _duration_text(a.median),
+                        "bursts": len(a.bursts), "top_hour": _top_hour(a),
+                        "regularity": None if a.regularity == REGULARITY_UNKNOWN else a.regularity}
+                       for a in accounts] if several else [],
+        "comparison_notes": _comparison_notes(accounts) if several else [],
+    }
 
 
 def report_filename(title: str, generated_at: datetime) -> str:

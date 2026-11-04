@@ -1,0 +1,131 @@
+/* Página "Padrões de publicação" */
+.pt-meta {
+  margin: -12px 0 18px;
+}
+.pt-meta span + span::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--text-dim);
+}
+.pt-section {
+  margin-top: 14px;
+}
+.pt-patterns {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.pt-patterns li {
+  padding: 9px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-2);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.pt-charts {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+@media (max-width: 980px) {
+  .pt-charts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.pt-chart figure {
+  margin: 0;
+}
+.pt-bars {
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  height: 150px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.pt-bars li {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.pt-bar-track {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.pt-bar-fill {
+  display: block;
+  width: 100%;
+  min-height: 2px;
+  background: var(--border-strong);
+  border-radius: 3px 3px 0 0;
+}
+.pt-bars li.top .pt-bar-fill {
+  background: var(--accent);
+}
+.pt-bars li.zero .pt-bar-fill {
+  background: var(--border);
+}
+.pt-bar-value {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  min-height: 13px;
+}
+.pt-bar-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.pt-bars li.top .pt-bar-label {
+  color: var(--text);
+  font-weight: 600;
+}
+.pt-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px 16px;
+  margin: 12px 0 0;
+}
+.pt-facts dt {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.pt-facts dd {
+  margin: 0;
+}
+.pt-badge {
+  display: inline-block;
+  padding: 0 8px;
+  height: 20px;
+  line-height: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.pt-badge.ritmo {
+  background: rgba(107, 138, 253, 0.16);
+  color: var(--accent);
+}
+.pt-badge.rajada {
+  background: rgba(214, 166, 72, 0.16);
+  color: var(--warn);
+}
+.pt-badge.pausa {
+  background: rgba(141, 148, 155, 0.16);
+  color: var(--text-muted);
+}
+.pt-more {
+  display: flex;
+  justify-content: center;
+  margin-top: 10px;
+}

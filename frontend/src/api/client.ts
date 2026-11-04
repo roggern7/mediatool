@@ -34,6 +34,7 @@ import type {
   ProfileHistoryCleared,
   ProfileInfo,
   ProfilesPreview,
+  PostTimesReport,
   SessionInput,
   Settings,
   SettingsUpdate,
@@ -357,6 +358,10 @@ export const api = {
     request<MediaDeleteResult>("POST", "/media/delete", { body, timeoutMs: 10 * 60_000 }),
   uploadLocalVideo: (file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal) =>
     uploadLocalVideo(file, onProgress, signal),
+
+  /** Relatório de padrões de publicação (JSON) do lote ou do grupo, para ver na tela. */
+  postTimesReport: (target: { batch_id: number } | { group_id: number }) =>
+    request<PostTimesReport>("GET", "/post-times/report", { query: target, timeoutMs: SLOW_TIMEOUT_MS }),
 };
 
 /** Rota isenta do limite de 1 MB do corpo (o teto é o tamanho máximo de download, 2 GB por padrão). */

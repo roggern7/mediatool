@@ -8,6 +8,7 @@ import { QueuePage } from "./pages/QueuePage";
 import { ProfileAnalysisPage } from "./pages/ProfileAnalysisPage";
 import { PresetsPage } from "./pages/PresetsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { PostTimesPage } from "./pages/PostTimesPage";
 import { Empty } from "./components/ui";
 
 function normalize(path: string): string {
@@ -30,6 +31,8 @@ function Page({ path }: { path: string }) {
       return <PresetsPage />;
     case ROUTES.settings:
       return <SettingsPage />;
+    case ROUTES.postTimes:
+      return <PostTimesPage />;
     default:
       return (
         <div className="page">

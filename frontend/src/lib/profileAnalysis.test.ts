@@ -28,6 +28,7 @@ import {
   pageOffset,
   parsePage,
   postsCell,
+  reelsCell,
   progressFraction,
   progressText,
   startErrorText,
@@ -49,6 +50,10 @@ function item(patch: Partial<ProfileAnalysisItem> = {}): ProfileAnalysisItem {
     views_state: "known",
     views_total: 1500,
     views_reels: 12,
+    reels_count: 12,
+    reels_more: true,
+    latest_reel_at: "2026-10-30T12:00:00Z",
+    latest_reel_date: "30/10/2026",
     stories: "yes",
     highlights: "no",
     error_code: null,
@@ -378,7 +383,7 @@ describe("Posts e Views", () => {
     expect(approx.title).toBeDefined();
     expect(postsCell(item({ posts_count: 33000, posts_exact: 0, posts_text: null })).text).toBe("≈ 33.000");
     expect(postsCell(item({ posts_state: "unverified" })).text).toBe("Não verificado");
-    expect(postsCell(item({ posts_count: 0 })).text).toBe("0");
+    expect(postsCell(item({ posts_count: 0, reels_count: null })).text).toBe("0");
   });
 
   it("Views mostra a soma com o tooltip dos Reels lidos", () => {
@@ -390,6 +395,31 @@ describe("Posts e Views", () => {
     expect(viewsCell(item({ views_state: "none", views_total: null }))).toEqual({ text: "Sem Reels", tone: "muted" });
     expect(viewsCell(item({ views_state: "unverified", views_total: null })).text).toBe("Não verificado");
     expect(viewsCell(item({ views_state: "known", views_total: null })).text).toBe("Não verificado");
+  });
+});
+
+describe("Reels da aba Reels", () => {
+  it("conta só com Reels não parece vazia", () => {
+    expect(postsCell(item({ posts_count: 0 }))).toMatchObject({
+      text: "0 na grade",
+      badge: { text: "Só Reels", tone: "accent" },
+    });
+    expect(postsCell(item({ posts_count: 0, reels_count: 0, reels_more: false }))).toEqual({ text: "0" });
+    expect(postsCell(item({ posts_count: 0, reels_count: null }))).toEqual({ text: "0" });
+  });
+
+  it("Reels mostra 12+ quando há mais, o número exato quando não, e o último Reel no tooltip", () => {
+    expect(reelsCell(item())).toEqual({
+      text: "12+",
+      title: "A aba Reels tem mais do que os lidos · Último Reel: 30/10/2026",
+    });
+    expect(reelsCell(item({ reels_count: 3, reels_more: false }))).toEqual({
+      text: "3",
+      title: "Último Reel: 30/10/2026",
+    });
+    expect(reelsCell(item({ reels_count: 0, reels_more: false, latest_reel_date: null }))).toEqual({ text: "0" });
+    expect(reelsCell(item({ reels_count: null })).text).toBe("Não verificado");
+    expect(itemCells(item({ state: "pending" })).reels).toBe(EMPTY_CELL);
   });
 });
 

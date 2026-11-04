@@ -226,3 +226,41 @@ def test_estimated_reels_tab_times_are_marked_in_xlsx_csv_and_text():
 
 def test_report_filename():
     assert report_filename("Meu: teste/1", datetime(2026, 11, 4, 9, 5)) == "padroes_Meu_teste_1_2026-11-04_0905.zip"
+
+
+def test_report_data_matches_zip_analysis():
+    from app.services.post_patterns import report_data
+
+    posts = series("a", [72, 72, 72, 72, 5, 19 * 60 + 30, 72])
+    data = report_data(posts, title="@a", zone=MINUS_3)
+    assert data["title"] == "@a" and data["timezone"] == "UTC-03:00" and data["comparison"] == []
+    assert data["comparison_notes"] == []
+    (account,) = data["accounts"]
+    analysis = analyze_account("a", posts, MINUS_3)
+    assert account["posts"] == 8 and account["first_post"] == "2026-11-03T08:00:00-03:00"
+    assert account["interval_avg_text"] == format_duration(analysis.mean)
+    assert account["interval_median_min"] == round(analysis.median, 1)
+    assert account["patterns"] == analysis.patterns and account["bursts"] == 1
+    assert [h["hour"] for h in account["hours"]] == list(range(24)) and len(account["weekdays"]) == 7
+    assert sum(h["count"] for h in account["hours"]) == 8 and account["weekdays"][1] == {"day": "ter", "count": 6}
+    rows = segment_rows(analysis)
+    assert [(s["index"], s["posts"], s["avg_min"], s["text"]) for s in account["segments"]] == [
+        (row[0], row[3], row[5], row[8]) for row in rows]
+    assert [s["kind"] for s in account["segments"]] == ["ritmo", "rajada", "pausa", "ritmo"]
+    assert account["segments"][1]["start"] == "2026-11-03T12:48:00-03:00"
+    items = account["items"]
+    assert len(items) == 8 and items[0]["interval_min"] is None and items[0]["interval_text"] == ""
+    assert items[1]["interval_min"] == 72.0 and items[1]["url"] == "https://www.instagram.com/p/C1/"
+    assert [item["segment"] for item in items] == [row[6] for row in post_rows(analysis)]
+    assert items[5]["burst"] is True and items[0]["source"] == "grid"
+
+
+def test_report_data_two_accounts_has_comparison():
+    from app.services.post_patterns import report_data
+
+    data = report_data(series("a", [60, 60, 60]) + series("b", [5, 300, 30], prefix="B"), title="grupo 1",
+                       zone=utc_zone)
+    assert [a["username"] for a in data["accounts"]] == ["a", "b"]
+    assert [row["username"] for row in data["comparison"]] == ["a", "b"]
+    assert data["comparison"][0]["top_hour"] == 11 and data["comparison"][1]["bursts"] == 1
+    assert data["comparison_notes"][0].startswith("Quem posta mais: @")

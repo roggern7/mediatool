@@ -91,9 +91,9 @@ def test_same_columns_same_order_in_all_three(full_report):
     assert tuple(sheet_rows(files[f"{STEM}.xlsx"])[0]) == COLUMNS
     page = files[f"{STEM}.html"].decode("utf-8")
     assert tuple(re.findall(r"<th>(.*?)</th>", page)) == HTML_COLUMNS
-    assert HTML_COLUMNS == ("Perfil", "Posts", "Views", "Stories", "Destaques", "Status", "Data", "Horário")
-    assert COLUMNS == ("Perfil", "Nome", "Posts", "Posts exato", "Views", "Reels somados", "Stories", "Destaques",
-                       "Status", "Data", "Horário", "Observação")
+    assert HTML_COLUMNS == ("Perfil", "Posts", "Views", "Reels", "Stories", "Destaques", "Status", "Data", "Horário")
+    assert COLUMNS == ("Perfil", "Nome", "Posts", "Posts exato", "Views", "Reels somados", "Reels", "Último Reel",
+                       "Stories", "Destaques", "Status", "Data", "Horário", "Observação")
 
 
 def test_reexport_of_old_analysis_never_calls_fetcher(harness_factory):
@@ -124,7 +124,7 @@ def test_xlsx_parts_and_sheet_features(full_report):
         workbook = ElementTree.fromstring(package.read("xl/workbook.xml"))
     pane = sheet.find("m:sheetViews/m:sheetView/m:pane", NS)
     assert pane.get("state") == "frozen" and pane.get("ySplit") == "1"
-    assert sheet.find("m:autoFilter", NS).get("ref") == "A1:L7"
+    assert sheet.find("m:autoFilter", NS).get("ref") == "A1:N7"
     assert len(sheet.find("m:cols", NS)) == len(COLUMNS)
     header = sheet.find("m:sheetData", NS)[0]
     assert {cell.get("s") for cell in header} == {"1"}
@@ -174,14 +174,14 @@ def test_csv_values_and_formula_neutralization(full_report):
     assert rows["ativa1"][2] == "33K" and rows["ativa1"][3] == "Não" and rows["ativa1"][4] == "150"
     assert rows["semposts6"][1] == "'@menção"
     assert rows["semposts6"][2:4] == ["Não verificado", "Não verificado"]
-    assert rows["duvida4"][11] == "'-erro de leitura"
-    assert rows["duvida4"][2:9] == ["Não verificado"] * 7
-    assert rows["sumiu3"][2:8] == ["Não verificado"] * 6 and rows["sumiu3"][8] == "Indisponível"
-    assert rows["sumiu3"][9] == "01/11/2026" and rows["sumiu3"][10]
-    assert rows["privada2"][8] == "Privada" and rows["privada2"][6:8] == ["Não verificado", "Não verificado"]
+    assert rows["duvida4"][13] == "'-erro de leitura"
+    assert rows["duvida4"][2:11] == ["Não verificado"] * 9
+    assert rows["sumiu3"][2:10] == ["Não verificado"] * 8 and rows["sumiu3"][10] == "Indisponível"
+    assert rows["sumiu3"][11] == "01/11/2026" and rows["sumiu3"][12]
+    assert rows["privada2"][10] == "Privada" and rows["privada2"][8:10] == ["Não verificado", "Não verificado"]
     assert rows["privada2"][4] == "Não verificado"
     assert rows["semreels5"][4:6] == ["Sem Reels", "0"]
-    assert rows["ativa1"][9] == "01/11/2026" and rows["ativa1"][10] == "12:00:01"
+    assert rows["ativa1"][11] == "01/11/2026" and rows["ativa1"][12] == "12:00:01"
 
 
 @pytest.mark.parametrize("prefix", ["=", "+", "-", "@", "\t", "\r"])
@@ -196,12 +196,12 @@ def test_neutralize_leaves_plain_text():
 def test_unverified_never_appears_as_no(full_report):
     _harness, _id, files = full_report
     rows = {row[0]: row for row in csv_rows(files[f"{STEM}.csv"])[1:]}
-    assert "Não" not in rows["duvida4"] and "Não" not in rows["privada2"][6:8]
+    assert "Não" not in rows["duvida4"] and "Não" not in rows["privada2"][6:10]
     sheet = {row[0]: row for row in sheet_rows(files[f"{STEM}.xlsx"])[1:]}
-    assert sheet["@duvida4"][2:9] == ["Não verificado"] * 7
-    assert sheet["@privada2"][4:8] == ["Não verificado", "Não verificado", "Não verificado", "Não verificado"]
+    assert sheet["@duvida4"][2:11] == ["Não verificado"] * 9
+    assert sheet["@privada2"][4:10] == ["Não verificado"] * 6
     page = files[f"{STEM}.html"].decode("utf-8")
-    for username, columns in (("duvida4", (1, 2, 3, 4, 5)), ("privada2", (2, 3, 4))):
+    for username, columns in (("duvida4", (1, 2, 3, 4, 5, 6)), ("privada2", (2, 3, 4, 5))):
         cells = html_cells(page, username)
         assert all("Não verificado" in cells[index] for index in columns)
         assert not any(re.search(r">Não<", cell) or cell == "Não" for cell in cells)
@@ -215,14 +215,14 @@ def test_cancelled_items_are_not_queried(harness):
     runner.run_next()
     files = report_files(harness, analysis["id"])
     rows = {row[0]: row for row in csv_rows(files[f"{STEM}.csv"])[1:]}
-    assert rows["a1"][8] == "Ativa"
-    assert rows["a2"] == ["a2", "", *["Não consultado"] * 6, "Cancelado", "", "", ""]
-    assert sheet_rows(files[f"{STEM}.xlsx"])[2][8] == "Cancelado"
+    assert rows["a1"][10] == "Ativa"
+    assert rows["a2"] == ["a2", "", *["Não consultado"] * 8, "Cancelado", "", "", ""]
+    assert sheet_rows(files[f"{STEM}.xlsx"])[2][10] == "Cancelado"
     cells = html_cells(files[f"{STEM}.html"].decode("utf-8"), "a2")
     assert cells[1:] == ['<span class="pill">Não consultado</span>', '<span class="pill">Cancelado</span>',
                          '<span class="pill">Não consultado</span>']
     page = files[f"{STEM}.html"].decode("utf-8")
-    assert '<td colspan="4"><span class="pill">Não consultado</span></td>' in page
+    assert '<td colspan="5"><span class="pill">Não consultado</span></td>' in page
     assert '<td colspan="2"><span class="pill">Não consultado</span></td>' in page
     assert "<td></td>" not in page and '<td class="nowrap"></td>' not in page
 
@@ -232,7 +232,7 @@ def test_report_uses_server_timezone(harness_factory):
     analysis_id = finished(harness, ("a1",), {})
     files = report_files(harness, analysis_id)
     rows = csv_rows(files[f"{STEM}.csv"])
-    assert rows[1][9] == "01/11/2026" and rows[1][10] == "09:00:01"
+    assert rows[1][11] == "01/11/2026" and rows[1][12] == "09:00:01"
 
 
 def test_file_date_is_local_start_date():
@@ -297,11 +297,11 @@ def test_html_cards_add_up_to_the_total(harness):
 def test_unavailable_profile_is_not_verified_in_all_three_with_real_date(full_report):
     _harness, _id, files = full_report
     sheet = {row[0]: row for row in sheet_rows(files[f"{STEM}.xlsx"])[1:]}
-    assert sheet["@sumiu3"][2:8] == ["Não verificado"] * 6 and sheet["@sumiu3"][8] == "Indisponível"
-    assert sheet["@sumiu3"][9] == "01/11/2026" and sheet["@sumiu3"][10]
+    assert sheet["@sumiu3"][2:10] == ["Não verificado"] * 8 and sheet["@sumiu3"][10] == "Indisponível"
+    assert sheet["@sumiu3"][11] == "01/11/2026" and sheet["@sumiu3"][12]
     cells = html_cells(files[f"{STEM}.html"].decode("utf-8"), "sumiu3")
-    assert all("Não verificado" in cell for cell in cells[1:5]) and "Indisponível" in cells[5]
-    assert cells[6] == "01/11/2026" and cells[7]
+    assert all("Não verificado" in cell for cell in cells[1:6]) and "Indisponível" in cells[6]
+    assert cells[7] == "01/11/2026" and cells[8]
 
 
 def test_state_text_uses_the_same_class_in_every_column(full_report):
@@ -309,7 +309,7 @@ def test_state_text_uses_the_same_class_in_every_column(full_report):
     page = files[f"{STEM}.html"].decode("utf-8")
     assert html_cells(page, "semreels5")[2] == '<span class="pill">Sem Reels</span>'
     assert html_cells(page, "semposts6")[1] == '<span class="pill warn">Não verificado</span>'
-    assert html_cells(page, "duvida4")[3] == '<span class="pill warn">Não verificado</span>'
+    assert html_cells(page, "duvida4")[4] == '<span class="pill warn">Não verificado</span>'
 
 
 def test_html_layout_is_fixed_with_colgroup(full_report):
@@ -386,14 +386,14 @@ def test_interrupted_analysis_shows_error_in_report(harness):
     for name in ("a1", "a2"):
         cells = html_cells(page, name)
         assert "seguiu limitando as consultas" in cells[0]              # o motivo está na linha do perfil
-        assert cells[1:] == ['<span class="pill">Não consultado</span>'] * 3   # colspan 4, Status, colspan 2
+        assert cells[1:] == ['<span class="pill">Não consultado</span>'] * 3   # colspan 5, Status, colspan 2
     rows = {row[0]: row for row in csv_rows(files[f"{STEM}.csv"])[1:]}
     for name in ("a1", "a2"):
         row = rows[name]
-        assert row[:8] == [name, "", *["Não consultado"] * 6] and row[8] == "Não consultado"
-        assert row[9:11] == ["", ""] and "Não consultado" in row[11]
+        assert row[:10] == [name, "", *["Não consultado"] * 8] and row[10] == "Não consultado"
+        assert row[11:13] == ["", ""] and "Não consultado" in row[13]
     assert "Cancelado" not in page and "—" not in page
-    assert sheet_rows(files[f"{STEM}.xlsx"])[1][8] == "Não consultado"
+    assert sheet_rows(files[f"{STEM}.xlsx"])[1][10] == "Não consultado"
 
 
 def test_breaker_interruption_is_not_consulted_in_report(harness):
@@ -401,6 +401,24 @@ def test_breaker_interruption_is_not_consulted_in_report(harness):
     names = tuple(f"p{i}" for i in range(10))
     analysis_id = finished(harness, names, {name: [refused] for name in names})
     rows = csv_rows(report_files(harness, analysis_id)[f"{STEM}.csv"])[1:]
-    assert rows[0][8] == "Não verificado" and rows[0][10]         # consultado: tem horário real
-    assert rows[-1][8] == "Não consultado" and rows[-1][9:11] == ["", ""]
+    assert rows[0][10] == "Não verificado" and rows[0][12]        # consultado: tem horário real
+    assert rows[-1][10] == "Não consultado" and rows[-1][11:13] == ["", ""]
     assert "Não" not in rows[-1]
+
+
+def test_reels_columns_in_all_three(harness):
+    results = {"soreels7": [snapshot("soreels7", posts_count=0, reels_count=12, reels_more=True,
+                                     latest_reel_at="2026-10-30T12:00:00Z")],
+               "poucos8": [snapshot("poucos8", reels_count=3, reels_more=False)],
+               "privada9": [snapshot("privada9", "private")]}
+    files = report_files(harness, finished(harness, tuple(results), results))
+    rows = {row[0]: row for row in csv_rows(files[f"{STEM}.csv"])[1:]}
+    assert rows["soreels7"][2] == "0" and rows["soreels7"][6:8] == ["12+", "30/10/2026"]
+    assert rows["poucos8"][6:8] == ["3", ""] and rows["privada9"][6:8] == ["Não verificado", "Não verificado"]
+    sheet = {row[0]: row for row in sheet_rows(files[f"{STEM}.xlsx"])[1:]}
+    assert sheet["@soreels7"][6:8] == ["12+", "30/10/2026"] and sheet["@poucos8"][6] == 3   # exato é número
+    page = files[f"{STEM}.html"].decode("utf-8")
+    cells = html_cells(page, "soreels7")
+    assert cells[1] == f"0{profile_report._small(profile_report.GRID_ONLY)}"
+    assert cells[3] == "12+<small>último 30/10/2026</small>"
+    assert html_cells(page, "poucos8")[3] == "3" and "<small>" not in html_cells(page, "poucos8")[1]

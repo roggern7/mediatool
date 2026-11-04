@@ -1,5 +1,5 @@
 """Relatório da Análise de Perfis: ZIP com XLSX + CSV + HTML. XLSX e CSV têm todas as colunas (`COLUMNS`); o HTML mostra
-as 8 colunas da tela (`HTML_COLUMNS`) e leva nome, Reels somados e observação em linhas menores dentro das células, para
+as 9 colunas da tela (`HTML_COLUMNS`) e leva nome, Reels somados e observação em linhas menores dentro das células, para
 Data e Horário nunca saírem da largura da página.
 
 Gerado sob demanda a partir do banco (nunca consulta o Instagram). Tudo que veio do Instagram é dado não confiável: no
@@ -24,15 +24,16 @@ from typing import IO, Any, TextIO
 from app.services import export_time
 from app.services.xlsx_writer import write_xlsx
 
-COLUMNS = ("Perfil", "Nome", "Posts", "Posts exato", "Views", "Reels somados", "Stories", "Destaques", "Status", "Data",
-           "Horário", "Observação")
-WIDTHS = (24, 28, 12, 12, 14, 14, 15, 15, 16, 12, 10, 56)
-NAME_COLUMN, NOTE_COLUMN = 1, 11
-HTML_COLUMNS = ("Perfil", "Posts", "Views", "Stories", "Destaques", "Status", "Data", "Horário")
-HTML_WIDTHS = (28, 10.5, 10.5, 10.5, 10.5, 11, 10, 9)   # % por coluna: `table-layout:fixed` não precisa ler as linhas
+COLUMNS = ("Perfil", "Nome", "Posts", "Posts exato", "Views", "Reels somados", "Reels", "Último Reel", "Stories",
+           "Destaques", "Status", "Data", "Horário", "Observação")
+WIDTHS = (24, 28, 12, 12, 14, 14, 10, 14, 15, 15, 16, 12, 10, 56)
+NAME_COLUMN, NOTE_COLUMN = 1, 13
+HTML_COLUMNS = ("Perfil", "Posts", "Views", "Reels", "Stories", "Destaques", "Status", "Data", "Horário")
+HTML_WIDTHS = (24, 10, 10, 10, 9, 9, 10, 10, 8)   # % por coluna: `table-layout:fixed` não precisa ler as linhas
 
 YES, NO, NOT_VERIFIED, NOT_QUERIED = "Sim", "Não", "Não verificado", "Não consultado"
 NO_REELS = "Sem Reels"
+GRID_ONLY = "na grade · só Reels"   # 0 posts na grade, mas publica Reels na aba Reels
 CANCELLED = "Cancelado"
 VIEWS_CARD = "Views totais"
 TRISTATE = {"yes": YES, "no": NO}
@@ -112,13 +113,13 @@ def _cells(item: dict[str, Any], *, numeric_posts: bool = False) -> list[str | i
     if item["state"] != "done":
         # `cancelled` sem `error_code` = cancelado pelo usuário; com ele = análise interrompida antes deste perfil.
         status = CANCELLED if item["state"] == "cancelled" and not item["error_code"] else NOT_QUERIED
-        return [username, "", *[NOT_QUERIED] * 6, status, "", "", item["error_message"] or ""]
+        return [username, "", *[NOT_QUERIED] * 8, status, "", "", item["error_message"] or ""]
     account = item["account_status"]
     date, time = item.get("checked_date") or "", item.get("checked_time") or ""
     note = item["error_message"] or ""
     label = ACCOUNT_LABELS.get(account, NOT_VERIFIED)
     if account not in ("active", "private", "restricted"):
-        return [username, item["display_name"] or "", *[NOT_VERIFIED] * 6, label, date, time, note]
+        return [username, item["display_name"] or "", *[NOT_VERIFIED] * 8, label, date, time, note]
     posts: str | int = NOT_VERIFIED
     posts_exact = NOT_VERIFIED
     if item["posts_state"] == "known":
@@ -131,9 +132,19 @@ def _cells(item: dict[str, Any], *, numeric_posts: bool = False) -> list[str | i
         views, reels = item["views_total"], item["views_reels"]
     elif item["views_state"] == "none":
         views, reels = NO_REELS, 0
-    return [username, item["display_name"] or "", posts, posts_exact, views, reels,
+    reels_tab = reels_cell(item)
+    latest = NOT_VERIFIED if reels_tab == NOT_VERIFIED else item.get("latest_reel_date") or ""
+    return [username, item["display_name"] or "", posts, posts_exact, views, reels, reels_tab, latest,
             TRISTATE.get(item["stories"], NOT_VERIFIED), TRISTATE.get(item["highlights"], NOT_VERIFIED), label,
             date, time, note]
+
+
+def reels_cell(item: dict[str, Any]) -> str | int:
+    """Reels da 1a página da aba Reels: "12+" quando a aba tem mais, senão o número exato."""
+    count = item.get("reels_count")
+    if count is None:
+        return NOT_VERIFIED
+    return f"{count}+" if item.get("reels_more") else count
 
 
 def _xlsx_row(item: dict[str, Any]) -> list[str | int]:
@@ -194,16 +205,21 @@ def _number_td(value: str | int, *, approximate: bool = False, detail: str = "")
 
 def _row(item: dict[str, Any]) -> str:
     """Linha do HTML, nas colunas de `HTML_COLUMNS`."""
-    username, name, posts, posts_exact, views, reels, stories, highlights, status, date, time, note = _cells(item)
+    (username, name, posts, posts_exact, views, reels, reels_tab, latest, stories, highlights, status, date, time,
+     note) = _cells(item)
     safe = html.escape(str(username), quote=True)
     profile = (f'<td><a href="https://www.instagram.com/{safe}/" rel="noopener noreferrer">@{safe}</a>'
                f"{_small(name)}{_small(note)}</td>")
     if item["state"] != "done":   # nunca consultado: o Status diz o motivo, e não há valor por coluna a mostrar
-        return f"<tr>{profile}{_pill_td(NOT_QUERIED, 4)}{_pill_td(status)}{_pill_td(NOT_QUERIED, 2)}</tr>"
+        return f"<tr>{profile}{_pill_td(NOT_QUERIED, 5)}{_pill_td(status)}{_pill_td(NOT_QUERIED, 2)}</tr>"
     summed = ""
     if isinstance(reels, int) and reels:
         summed = _small(_count(reels, "Reel", "Reels"))
-    cells = (profile, _number_td(posts, approximate=posts_exact == NO), _number_td(views, detail=summed),
+    grid_only = posts == 0 and reels_tab not in (0, NOT_VERIFIED)
+    posts_detail = _small(GRID_ONLY) if grid_only else ""
+    latest_detail = _small(f"último {latest}") if latest not in ("", NOT_VERIFIED) else ""
+    cells = (profile, _number_td(posts, approximate=posts_exact == NO, detail=posts_detail),
+             _number_td(views, detail=summed), _number_td(reels_tab, detail=latest_detail),
              _pill_td(stories), _pill_td(highlights), _pill_td(status),
              f'<td class="nowrap">{html.escape(date or NOT_QUERIED)}</td>',
              f'<td class="nowrap">{html.escape(time or NOT_QUERIED)}</td>')
@@ -260,8 +276,10 @@ def _html_head(analysis: dict[str, Any], zone: export_time.Zone) -> str:
         f"<h1>Análise de Perfis</h1><p class=\"meta\">{' · '.join(part for part in meta if part)}</p>"
         f'<section class="cards">{card_html}</section>{error}'
         '<p class="note"><b>Views</b> é a soma dos últimos Reels lidos (quantidade abaixo do número), não o total da'
-        " vida da conta. <b>≈</b> marca um valor de Posts arredondado pelo Instagram, que sem login informa, por"
-        " exemplo, 33K. <b>Contas ativas</b> reúne públicas e privadas. <b>Restritas</b> não dá para confirmar sem login."
+        " vida da conta. <b>Posts</b> conta só a grade; <b>Reels</b> são os da aba Reels na primeira página lida"
+        " (12+ quando há mais), com a data estimada do mais recente: conta com 0 posts na grade e Reels publica."
+        " <b>≈</b> marca um valor de Posts arredondado pelo Instagram, que sem login informa, por exemplo, 33K."
+        " <b>Contas ativas</b> reúne públicas e privadas. <b>Restritas</b> não dá para confirmar sem login."
         " <b>Status</b> mostra se o perfil estava acessível sem login: Ativa não significa que ele"
         " publica recentemente. <b>Não verificado</b> quer dizer que a informação não pôde ser confirmada; nunca"
         " significa Não. <b>Não consultado</b> quer dizer que a análise terminou antes de chegar a esse perfil.</p>"

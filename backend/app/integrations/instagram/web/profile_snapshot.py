@@ -5,6 +5,13 @@ HTML embute dois envelopes ``xig_user_by_username`` (web/reels_tab.py): o do usu
 ``is_unpublished``, ``latest_reel_media``, ``lox_highlights_connection``, ``has_any_clips``...) e o da conexão de Reels
 (``polaris_clips_connection``). Posts vêm da meta tag de descrição: ``all_media_count`` é sempre nulo sem login.
 
+"Conteúdo publicado" = posts da GRADE (``posts_count``, da meta tag, que só conta a grade) + Reels da aba Reels
+(``reels_count``/``reels_more``/``latest_reel_at``, da 1a página da ``polaris_clips_connection``). Os dois não se somam
+(um Reel pode estar também na grade): a conta publica se qualquer um for maior que zero. Conta que publica Reels só na
+aba Reels aparece com 0 posts na grade e Reels > 0. O nó anônimo do Reel não traz ``taken_at``: a data do Reel mais
+recente é estimada pelo ``pk`` (``reels_timeline.reel_taken_at_from_pk``, ~±30 s), o maior entre os da página (o
+fixado no topo pode ser antigo).
+
 Regra central: falha nunca vira negativa. Campo ausente ou com outra forma é ``unverified``, jamais ``no``; só a rota de
 erro exata (ou 404, ou ``is_unpublished``) vira ``unavailable``. Um envelope válido do usuário tem prioridade sobre as
 marcas de rota de erro.
@@ -75,6 +82,9 @@ class ProfileSnapshot:
     views_state: str = "unverified"      # known | none (sem Reels) | unverified
     views_total: int | None = None
     views_reels: int | None = None       # quantos Reels entraram na soma
+    reels_count: int | None = None       # Reels na 1a página da aba Reels (até 12); 0 = sem Reels
+    reels_more: bool | None = None       # a aba tem mais Reels além desta página (has_next_page)
+    latest_reel_at: str | None = None    # ISO UTC do Reel mais recente da página, estimado pelo pk
     stories: str = "unverified"          # yes | no | unverified
     highlights: str = "unverified"       # yes | no | unverified
     error_code: str | None = None
@@ -170,6 +180,26 @@ def _views(connection: object, has_any_clips: object, *, private: bool) -> tuple
     return "unverified", None, None
 
 
+def _reels(connection: object, has_any_clips: object, *, private: bool) -> dict[str, Any]:
+    """Quantos Reels a 1a página trouxe, se há mais e a data estimada do mais recente. Mesma regra de ``_views``:
+    zero só com a conexão ausente ou ``edges`` vazia e ``has_any_clips`` falso; forma estranha fica nula."""
+    from .reels_timeline import reel_taken_at_from_pk   # aqui: reels_timeline importa este módulo
+
+    if private:
+        return {}
+    edges = connection.get("edges") if isinstance(connection, Mapping) else None
+    edge_list = edges if isinstance(edges, list) else []
+    nodes = [edge["node"] for edge in edge_list if isinstance(edge, Mapping) and isinstance(edge.get("node"), Mapping)]
+    if not nodes:
+        none = has_any_clips is False and (connection is None or edges == [])
+        return {"reels_count": 0, "reels_more": False} if none else {}
+    info = connection.get("page_info")
+    more = info.get("has_next_page") if isinstance(info, Mapping) else None
+    dates = [moment for moment in (reel_taken_at_from_pk(node.get("pk")) for node in nodes) if moment]
+    return {"reels_count": len(nodes), "reels_more": more if isinstance(more, bool) else None,
+            "latest_reel_at": max(dates) if dates else None}
+
+
 def _clips_connection(envelopes: list[tuple[str | None, dict]], user: Mapping) -> object:
     """Conexão de Reels DESTE perfil como veio (a forma é conferida em ``_views``); None = ausente. Envelope com ``pk``
     diferente do usuário é ignorado."""
@@ -241,11 +271,12 @@ def parse_profile_document(html: str, username: str, now_epoch: float) -> Profil
     else:
         return _unverified(username, "profile_unreadable", MSG_UNREADABLE)
     is_private = status == "private"
-    views_state, views_total, views_reels = _views(
-        _clips_connection(envelopes, user), user.get("has_any_clips"), private=is_private)
+    connection = _clips_connection(envelopes, user)
+    views_state, views_total, views_reels = _views(connection, user.get("has_any_clips"), private=is_private)
     return ProfileSnapshot(
         username, status, display_name=_display_name(user.get("full_name")), **_posts(html, user),
         views_state=views_state, views_total=views_total, views_reels=views_reels,
+        **_reels(connection, user.get("has_any_clips"), private=is_private),
         stories=_stories(user.get("latest_reel_media"), private=is_private, now_epoch=now_epoch),
         highlights=_highlights(user.get(HIGHLIGHTS_FIELD), private=is_private),
     )
