@@ -44,6 +44,9 @@ class WebListingFakeDownload:
         self.fake = FakeInstagramDownloader()
 
     def __getattr__(self, name):
+        if name == "iter_reels_post_times":
+            # Estes testes cobrem a listagem da grade: sem a etapa "aba Reels" (migration 0027), que tem testes próprios.
+            raise AttributeError(name)
         return getattr(self.web, name)
 
     def download(self, item, dest_dir, **kwargs):

@@ -72,7 +72,8 @@ def test_indexes_come_and_go_with_the_tables(db):
     assert {"ix_profile_items_state", "ix_profile_items_position", "ix_profile_items_open"} <= names
     partial = db.scalar("SELECT sql FROM sqlite_master WHERE name = 'ix_profile_items_open'")
     assert "WHERE state IN ('pending', 'running')" in partial
-    revert_migration(db, 26)   # só a última aplicada pode ser revertida (0026: horário dos posts)
+    revert_migration(db, 27)   # só a última aplicada pode ser revertida (0027: origem do horário)
+    revert_migration(db, 26)   # 0026: horário dos posts
     revert_migration(db, 25)
     assert db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'ix_profile_items_%'") == 0
 
@@ -84,14 +85,15 @@ def test_up_down_up_keeps_old_data(db):
     db.execute("INSERT INTO profile_analysis_items (analysis_id, position, username) VALUES (1, 1, 'a1')")
     before = counts(db)
 
-    revert_migration(db, 26)   # só a última aplicada pode ser revertida (0026: horário dos posts)
+    revert_migration(db, 27)   # só a última aplicada pode ser revertida (0027: origem do horário)
+    revert_migration(db, 26)   # 0026: horário dos posts
     revert_migration(db, 25)
     assert schema_version(db) == 24 and counts(db) == before
     assert not {"profile_analyses", "profile_analysis_items"} & table_names(db)
     assert db.scalar("SELECT COUNT(*) FROM schema_migrations WHERE version = 25") == 0
 
-    assert apply_migrations(db) == [25, 26]
-    assert schema_version(db) == 26 and counts(db) == before
+    assert apply_migrations(db) == [25, 26, 27]
+    assert schema_version(db) == 27 and counts(db) == before
     assert db.scalar("SELECT COUNT(*) FROM profile_analyses") == 0
 
 
@@ -105,7 +107,7 @@ def test_only_latest_applied_migration_can_be_reverted(tmp_path, db):
     (folder / "down" / "0024_import_requests.down.sql").write_text("DROP TABLE settings;", encoding="utf-8")
     with pytest.raises(RuntimeError, match="última"):
         revert_migration(db, 24, folder)
-    assert schema_version(db) == 26 and "settings" in table_names(db)
+    assert schema_version(db) == 27 and "settings" in table_names(db)
 
 
 def test_revert_requires_down_file(tmp_path, db):
@@ -154,3 +156,15 @@ def test_constraints(db):
         db.execute("UPDATE profile_analyses SET status = 'outro'")
     db.execute("DELETE FROM profile_analyses")
     assert db.scalar("SELECT COUNT(*) FROM profile_analysis_items") == 0     # ON DELETE CASCADE
+
+
+def test_0027_adds_and_removes_post_times_source(db):
+    def columns() -> set[str]:
+        return {row["name"] for row in db.fetchall("PRAGMA table_info(post_times)")}
+
+    apply_migrations(db)
+    assert "source" in columns() and schema_version(db) == 27
+    assert (MIGRATIONS_DIR / "down" / "0027_post_times_source.down.sql").is_file()
+    revert_migration(db, 27)
+    assert "source" not in columns() and {"code", "taken_at", "pinned"} <= columns() and schema_version(db) == 26
+    assert apply_migrations(db) == [27] and "source" in columns()

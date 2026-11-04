@@ -773,8 +773,9 @@ class JobExecutor:
         page_index = ref.get("listing_page_index") or job.get("listing_page_index")
         page_size = ref.get("listing_page_size") or job.get("listing_page_size")
         cursor = ref.get("listing_cursor")
-        if batch_id is not None and page_index is None and self._links_batch(batch_id):
-            # Lote por link: não há página de listagem; a publicação é pedida de novo (resolve_post).
+        if batch_id is not None and page_index is None and (self._links_batch(batch_id) or job.get("source_post_id")):
+            # Lote por link, ou vídeo de perfil vindo da aba Reels (resolvido como link, sem página de listagem): a
+            # publicação é pedida de novo (resolve_post).
             return self._download_after_expired_post(downloader, used_url, temp_dir)
         if batch_id is None or page_index is None or page_size is None or (int(page_index) > 1 and not cursor):
             raise JobFailure("content_unavailable", NO_LISTING_REF_MESSAGE)

@@ -340,6 +340,21 @@ class InstagramWebDownloader(InstagramDownloader):
         return self._iter_media(username, content, limit, cancel, resume, on_checkpoint, min_views, cutoff,
                                 max_views, on_post)
 
+    def iter_reels_post_times(self, username: str, *, limit: int | None, posted_after: str | None = None,
+                              cancel: threading.Event | None = None) -> Iterator[dict]:
+        """Horários da aba Reels do perfil (relatório de padrões, migration 0027), do mais novo para o mais antigo:
+        dicts de ``reels_timeline.iter_reels_tab`` (``taken_at`` ESTIMADO pelo id). Mesma sessão, bootstrap, portão e
+        teto de páginas por hora da listagem da grade. Para ao juntar ``limit`` Reels NÃO fixados, no corte do período
+        (mesma regra da grade: fixado pulado sem encerrar; sem saber se é fixado, ``PERIOD_STOP_STREAK`` seguidos) ou
+        no fim da aba. Fora do período não é entregue."""
+        username = self._username(username)
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+            raise InstagramError("invalid_input", "Limite inválido.")
+        cutoff = None if posted_after is None else _cutoff_timestamp(posted_after)
+        if posted_after is not None and cutoff is None:
+            raise InstagramError("invalid_input", "Corte do período de postagem inválido.")
+        return self._iter_reels(username, limit, cutoff, cancel)
+
     def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
                      path_kind: str | None = None, use_session: bool = True) -> list[RemoteMedia]:
         """UM GET ANÔNIMO do documento público da publicação (``/p/<código>/`` ou ``/reel/<código>/``, conforme
@@ -1115,6 +1130,60 @@ class InstagramWebDownloader(InstagramDownloader):
                         _counts(anomalies["dropped_unexpected"]), _counts(anomalies["skipped_expected"]),
                     )
 
+    def _iter_reels(self, username: str, limit: int | None, cutoff: int | None,
+                    cancel: threading.Event | None) -> Iterator[dict]:
+        """Gerador de ``iter_reels_post_times`` (nada acumulado; só totais no log)."""
+        from app.integrations.instagram.web.reels_timeline import iter_reels_tab
+
+        if cancel is not None and cancel.is_set():
+            return
+        extra: dict[str, Any] = {}
+        wait_page = getattr(self._gate, "wait_listing_page", None)
+        if wait_page is not None:
+            per_hour = page_rate_limit(self._env)
+            if per_hour > 0:   # 0 = teto desabilitado (teste); o aviso já sai na listagem da grade
+                extra["before_page"] = lambda page_cancel: wait_page(page_cancel, max_per_hour=per_hour)
+        delivered = unpinned = 0
+        old_streak = 0
+        stop_reason = "error"
+        with self._ops(cancel, shared=True) as ops:
+            ops.bootstrap.get()
+            reels = iter_reels_tab(ops.graphql, ops.http, username, cancel=cancel, page_size=self._page_size,
+                                   **extra)
+            try:
+                for record in reels:
+                    if cancel is not None and cancel.is_set():
+                        stop_reason = "cancelled"
+                        return
+                    pinned = record.get("pinned")
+                    if cutoff is not None:
+                        taken = _iso_timestamp(record.get("taken_at"))
+                        if taken is None or taken < cutoff:
+                            if taken is not None and pinned is not True:
+                                old_streak = PERIOD_STOP_STREAK if pinned is False else old_streak + 1
+                            if old_streak >= PERIOD_STOP_STREAK:
+                                stop_reason = "period_end"
+                                return
+                            continue
+                        old_streak = 0
+                    delivered += 1
+                    yield record
+                    if pinned is not True:
+                        unpinned += 1
+                        if limit is not None and unpinned >= limit:
+                            stop_reason = "limit_reached"
+                            return
+                stop_reason = "cancelled" if cancel is not None and cancel.is_set() else "end_of_tab"
+            except GeneratorExit:
+                stop_reason = "consumer_closed"
+                raise
+            finally:
+                close = getattr(reels, "close", None)
+                if close is not None:
+                    close()
+                log.info("Aba Reels (horários) de %s: %s entregues, %s não fixados, stop_reason=%s", username,
+                         delivered, unpinned, stop_reason)
+
 
 # Período de postagem sem sinal de "fixada" no nó: publicações seguidas mais antigas que o corte para encerrar (o
 # Instagram fixa no máximo 3 no perfil; a 4a antiga seguida não pode ser fixada).
@@ -1142,6 +1211,21 @@ def _cutoff_timestamp(value: object) -> int | None:
         return int(datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
     except ValueError:
         return None
+
+
+def _iso_timestamp(value: object) -> int | None:
+    """``taken_at`` ISO 8601 UTC (com ``Z`` ou deslocamento) -> epoch; None se ausente ou inválido."""
+    from datetime import datetime, timezone
+
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp())
 
 
 def _node_timestamp(node: Mapping) -> int | None:

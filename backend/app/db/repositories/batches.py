@@ -407,16 +407,17 @@ class BatchRepository:
     # ---- horário dos posts (migration 0026) ---------------------------------------------------------------------
     def add_post_times(self, batch_id: int, username: str, records: list[dict[str, Any]]) -> int:
         """Grava um registro por publicação (INSERT OR IGNORE: a mesma publicação no mesmo lote fica uma vez só).
-        Retorna quantos registros são novos."""
+        Retorna quantos registros são novos. `source` (migration 0027): None = grade do perfil; "reels_tab" = horário
+        estimado pela aba Reels (o registro da grade, se já existir, é mantido)."""
         now = utc_now()
         added = 0
         for record in records:
             pinned = record.get("pinned")
             cursor = self.db.execute(
-                "INSERT OR IGNORE INTO post_times (batch_id, username, code, taken_at, kind, pinned, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO post_times (batch_id, username, code, taken_at, kind, pinned, created_at,"
+                " source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (batch_id, username, record["code"], record.get("taken_at"), record.get("kind"),
-                 None if pinned is None else int(bool(pinned)), now),
+                 None if pinned is None else int(bool(pinned)), now, record.get("source")),
             )
             added += cursor.rowcount
         return added
@@ -424,6 +425,16 @@ class BatchRepository:
     def post_time_codes(self, batch_id: int) -> set[str]:
         return {row["code"] for row in self.db.fetchall("SELECT code FROM post_times WHERE batch_id = ?",
                                                         (batch_id,))}
+
+    def job_post_codes(self, batch_id: int) -> set[str]:
+        """Códigos das publicações que já viraram job no lote (etapa "aba Reels": o que veio da grade não repete)."""
+        return {row["source_post_id"] for row in self.db.fetchall(
+            "SELECT DISTINCT source_post_id FROM jobs WHERE batch_id = ? AND source_post_id IS NOT NULL", (batch_id,))}
+
+    def oldest_job_taken_at(self, batch_id: int) -> str | None:
+        """`taken_at` mais antigo entre os jobs do lote (UTC ISO; None se nenhum tem data)."""
+        return self.db.scalar("SELECT MIN(taken_at) FROM jobs WHERE batch_id = ? AND taken_at IS NOT NULL",
+                              (batch_id,))
 
     def post_times_counts(self, batch_ids: list[int]) -> dict[int, int]:
         if not batch_ids:
@@ -446,7 +457,7 @@ class BatchRepository:
         if not batch_ids:
             return []
         rows = self.db.fetchall(
-            "SELECT username, code, taken_at, kind, pinned FROM post_times"
+            "SELECT batch_id, username, code, taken_at, kind, pinned, source FROM post_times"
             f" WHERE batch_id IN ({placeholders(len(batch_ids))}) ORDER BY username, taken_at, code",
             tuple(batch_ids))
         return [dict(row) for row in rows]

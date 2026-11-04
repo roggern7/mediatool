@@ -39,6 +39,8 @@ FALLBACK_CODES: frozenset[str] = frozenset({"contract_changed", "unsupported_med
 # regra de `needs_attention`; o gallery-dl nunca "conclui" no lugar dele.
 # A publicação por link não passa por aqui: `resolve_post` nunca faz fallback (ver o método).
 NO_FALLBACK_DETAILS: frozenset[str] = frozenset({"cursor_missing_with_errors"}) | LISTING_ANOMALY_DETAILS
+# Etapa "aba Reels" (migration 0027): só o provider web a lê.
+REELS_TAB_WEB_ONLY_MESSAGE = "a aba Reels só é lida pelo método de importação web (o gallery-dl não a consulta)"
 
 
 # "Todos" (limit None), `photos_carousels` e os filtros de visualizações mínimas e de período de postagem só existem
@@ -146,6 +148,14 @@ class CompositeInstagramDownloader(InstagramDownloader):
         self, profile: str, ref: ListingRef, *, cancel: threading.Event | None = None
     ) -> list[RemoteMedia]:
         return self._call("refresh_page", lambda d: d.refresh_page(profile, ref, cancel=cancel))
+
+    def iter_reels_post_times(self, username: str, *, limit: int | None, posted_after: str | None = None,
+                              cancel: threading.Event | None = None) -> Iterator[dict]:
+        """Horários dos Reels da aba Reels (relatório de padrões): só o provider web lê; sem fallback em `auto`. Com a
+        estratégia `gallery_dl` levanta `invalid_input` (o runner registra como aviso do lote)."""
+        if self.strategy == "gallery_dl":
+            raise InstagramError("invalid_input", REELS_TAB_WEB_ONLY_MESSAGE)
+        return self.primary.iter_reels_post_times(username, limit=limit, posted_after=posted_after, cancel=cancel)
 
     def iter_profile_media(
         self,

@@ -439,11 +439,11 @@ AUTO_EXPORT_NEEDS_PROCESSING_MESSAGE = (
 )
 
 PATTERNS_NEED_PROFILES_MESSAGE = (
-    "\"Nada — só consultar padrões\" analisa o horário dos posts de perfis: informe ao menos um perfil (links de "
+    "\"Consultar padrões\" analisa o horário dos posts de perfis: informe ao menos um perfil (links de "
     "publicações não têm padrão de postagem)."
 )
 PATTERNS_WEB_ONLY_MESSAGE = (
-    "\"Nada — só consultar padrões\" exige o método de importação web (o gallery-dl não entrega o horário das "
+    "\"Consultar padrões\" exige o método de importação web (o gallery-dl não entrega o horário das "
     "publicações). Troque o método em Configurações."
 )
 PATTERNS_LINKS_IGNORED_NOTE = (

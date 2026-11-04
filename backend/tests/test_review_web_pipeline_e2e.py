@@ -198,6 +198,13 @@ class SessionWithCookie(InstagramSessionProvider):
     def clear(self) -> None: ...
 
 
+@pytest.fixture(autouse=True)
+def _grid_only(monkeypatch):
+    """Estes cenários cobrem só a grade: o site falso não serve a aba Reels (etapa testada em
+    test_post_times_flow.py e test_reels_timeline.py). Sem o método, o runner pula a etapa."""
+    monkeypatch.delattr(InstagramWebDownloader, "iter_reels_post_times")
+
+
 @pytest.fixture
 def env(tmp_path, real_media):
     server = FakeInstagram()
@@ -346,7 +353,7 @@ def test_limit_1_creates_one_job_and_does_not_request_page_2(env):
     jobs = jobs_of(h, batch_id)
     assert [(j["source_post_id"], j["source_media_index"], j["status"]) for j in jobs] == [("IMGPOST001", 0, "completed")]
     assert n_graphql(server) == 1 and server.gets == ["/"]
-    assert server.posts[0]["data"]["count"] == 1      # count reduzido na 1a página
+    assert server.posts[0]["data"]["count"] == 12     # 1a página sempre cheia (count pequeno volta vazio no real)
     assert h.batch(batch_id)["status"] == "completed"
     assert len(media_rows(h)) == 1
 

@@ -167,14 +167,14 @@ class UnifiedImportRequest(ClassifyRequest):
     def _consistent(self) -> UnifiedImportRequest:
         if self.media == "none":
             if not self.post_times:
-                raise ValueError("\"Nada — só consultar padrões\" exige `post_times: true` (puxar horário dos posts).")
+                raise ValueError("\"Consultar padrões\" exige `post_times: true` (puxar horário dos posts).")
             if self.post_processing != "none" or self.preset_id is not None or self.edit is not None:
-                raise ValueError("Com \"Nada — só consultar padrões\" nada é baixado: o pós-processamento tem de ser "
+                raise ValueError("Com \"Consultar padrões\" nada é baixado: o pós-processamento tem de ser "
                                  "\"none\".")
             if self.auto_export is not None:
-                raise ValueError("Com \"Nada — só consultar padrões\" nada é baixado: não há exportação automática.")
+                raise ValueError("Com \"Consultar padrões\" nada é baixado: não há exportação automática.")
             if self.min_views is not None or self.max_views is not None:
-                raise ValueError("Com \"Nada — só consultar padrões\" os filtros de visualizações não valem.")
+                raise ValueError("Com \"Consultar padrões\" os filtros de visualizações não valem.")
         if self.min_views is not None and self.max_views is not None and self.max_views < self.min_views:
             raise ValueError("O máximo de visualizações precisa ser maior ou igual ao mínimo.")
         if (self.post_processing == "edit") != (self.edit is not None):
