@@ -1,8 +1,9 @@
 """Planilha XLSX mínima em stdlib (`zipfile` + XML escapado): o `openpyxl` não faz parte do projeto.
 
-Uma planilha: cabeçalho em negrito com preenchimento, painel congelado, autofiltro, larguras, números como número e
-strings inline escapadas. Texto de fora (ex.: nome de exibição do Instagram) passa pelo filtro de caracteres inválidos
-do XML 1.0, e nunca vira fórmula: toda string é inline. A planilha é escrita linha a linha, direto na entrada do ZIP.
+Uma planilha (`write_xlsx`) ou várias abas (`write_xlsx_sheets`): cabeçalho em negrito com preenchimento, painel
+congelado, autofiltro, larguras, números como número e strings inline escapadas. Texto de fora (ex.: nome de exibição
+do Instagram) passa pelo filtro de caracteres inválidos do XML 1.0, e nunca vira fórmula: toda string é inline. A
+planilha é escrita linha a linha, direto na entrada do ZIP.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import re
 import zipfile
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 from xml.sax.saxutils import escape
@@ -89,12 +91,13 @@ def _row(number: int, letters: Sequence[str], values: Sequence[Cell], style: int
     return f'<row r="{number}">{cells}</row>'.encode()
 
 
-def _sheet_head(last: str, widths: Sequence[float]) -> bytes:
+def _sheet_head(last: str, widths: Sequence[float], selected: bool = True) -> bytes:
     cols = "".join(f'<col min="{i}" max="{i}" width="{width}" customWidth="1"/>'
                    for i, width in enumerate(widths, start=1))
+    tab = ' tabSelected="1"' if selected else ""
     return (
         f'{_XML}<worksheet xmlns="{_MAIN_NS}"><dimension ref="A1:{last}"/>'
-        '<sheetViews><sheetView tabSelected="1" workbookViewId="0">'
+        f'<sheetViews><sheetView{tab} workbookViewId="0">'
         '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
         '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>'
         f'<sheetFormatPr defaultRowHeight="15"/><cols>{cols}</cols><sheetData>'
@@ -136,3 +139,54 @@ def write_xlsx(target: str | Path | IO[bytes], headers: Sequence[str], rows: Ite
             for number, row in enumerate(rows, start=2):
                 sheet.write(_row(number, letters, row))
             sheet.write(f'</sheetData><autoFilter ref="A1:{last}"/></worksheet>'.encode())
+
+
+@dataclass(frozen=True)
+class Sheet:
+    name: str                          # até 31 caracteres, sem []:*?/\
+    headers: Sequence[str]
+    rows: Sequence[Sequence[Cell]]
+    widths: Sequence[float]
+
+
+_INVALID_SHEET_CHARS = frozenset("[]:*?/\\")
+_SHEET_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+
+
+def write_xlsx_sheets(target: str | Path | IO[bytes], sheets: Sequence[Sheet]) -> None:
+    """Pacote XLSX com várias planilhas (abas), na ordem dada; a primeira fica selecionada. Cada aba tem o mesmo
+    formato da de `write_xlsx` (cabeçalho em negrito, painel congelado, autofiltro, larguras)."""
+    names = [sheet.name for sheet in sheets]
+    if not sheets or len({name.lower() for name in names}) != len(names) or any(
+            not name or len(name) > 31 or _INVALID_SHEET_CHARS & set(name) for name in names):
+        raise ValueError(f"nomes de aba inválidos: {names!r}")
+    lasts = [f"{column_name(len(sheet.headers) - 1)}{len(sheet.rows) + 1}" for sheet in sheets]
+    entries = "".join(f'<sheet name="{escape(sheet.name)}" sheetId="{i}" r:id="rId{i}"/>'
+                      for i, sheet in enumerate(sheets, start=1))
+    filters = "".join(f'<definedName name="_xlnm._FilterDatabase" localSheetId="{i}" hidden="1">'
+                      f"'{escape(sheet.name)}'!$A$1:{_absolute(last)}</definedName>"
+                      for i, (sheet, last) in enumerate(zip(sheets, lasts, strict=True)))
+    workbook = (f'{_XML}<workbook xmlns="{_MAIN_NS}" xmlns:r="{_REL_NS}"><sheets>{entries}</sheets>'
+                f"<definedNames>{filters}</definedNames></workbook>")
+    overrides = "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="{_SHEET_TYPE}"/>'
+                        for i in range(1, len(sheets) + 1))
+    content_types = _CONTENT_TYPES.replace(
+        f'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{_SHEET_TYPE}"/>', overrides)
+    styles_id = len(sheets) + 1
+    rels = "".join(f'<Relationship Id="rId{i}" Type="{_REL_NS}/worksheet" Target="worksheets/sheet{i}.xml"/>'
+                   for i in range(1, len(sheets) + 1))
+    workbook_rels = (f'{_XML}<Relationships xmlns="{_PKG_REL_NS}">{rels}'
+                     f'<Relationship Id="rId{styles_id}" Type="{_REL_NS}/styles" Target="styles.xml"/></Relationships>')
+    parts = {"[Content_Types].xml": content_types, "_rels/.rels": _ROOT_RELS, "xl/workbook.xml": workbook,
+             "xl/_rels/workbook.xml.rels": workbook_rels, "xl/styles.xml": _STYLES}
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for part, content in parts.items():
+            archive.writestr(_part(part), content.encode("utf-8"))
+        for number, (sheet, last) in enumerate(zip(sheets, lasts, strict=True), start=1):
+            letters = [column_name(index) for index in range(len(sheet.headers))]
+            with archive.open(_part(f"xl/worksheets/sheet{number}.xml"), "w") as part:
+                part.write(_sheet_head(last, sheet.widths, selected=number == 1))
+                part.write(_row(1, letters, sheet.headers, 1))
+                for row_number, row in enumerate(sheet.rows, start=2):
+                    part.write(_row(row_number, letters, row))
+                part.write(f'</sheetData><autoFilter ref="A1:{last}"/></worksheet>'.encode())

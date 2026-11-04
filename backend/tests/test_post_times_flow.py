@@ -189,17 +189,22 @@ def test_report_zip_for_batch_and_group(harness_factory):
         disposition = response.headers["content-disposition"]
         assert disposition.startswith("attachment;") and ".zip" in disposition
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            assert {"relatorio.txt", "resumo.csv", "posts.csv"} <= set(archive.namelist())
-            posts = archive.read("posts.csv")
-            summary = archive.read("resumo.csv")
-            report = archive.read("relatorio.txt").decode("utf-8-sig")
-        assert posts.startswith(b"\xef\xbb\xbf") and summary.startswith(b"\xef\xbb\xbf")   # BOM (Excel pt-BR)
-        posts_text = posts.decode("utf-8-sig")
-        assert ";" in posts_text.splitlines()[0]
-        assert len(posts_text.strip().splitlines()) == 1 + 9 * len(profiles)   # cabeçalho + 9 publicações/perfil
-        assert all(code in posts_text for code in ("P0", "P7", "CARR"))
-        assert len(summary.decode("utf-8-sig").strip().splitlines()) == 1 + len(profiles)
-        assert all(profile in report for profile in profiles)
+            files = {name: archive.read(name) for name in archive.namelist()}
+        expected = {f"{p}/{name}" for p in profiles for name in (f"{p}.xlsx", "padroes.txt", "posts.csv",
+                                                                   "sequencia.csv")}
+        if len(profiles) >= 2:
+            expected |= {"comparativo.xlsx", "comparativo.txt"}
+            assert all(f"@{p}" in files["comparativo.txt"].decode("utf-8") for p in profiles)
+        assert set(files) == expected
+        for profile in profiles:
+            posts = files[f"{profile}/posts.csv"]
+            assert posts.startswith(b"\xef\xbb\xbf")   # BOM (Excel pt-BR)
+            posts_text = posts.decode("utf-8-sig")
+            assert ";" in posts_text.splitlines()[0]
+            assert len(posts_text.strip().splitlines()) == 1 + 9   # cabeçalho + 9 publicações do perfil
+            assert all(f"/p/{code}/" in posts_text for code in ("P0", "P7", "CARR"))
+            report = files[f"{profile}/padroes.txt"].decode("utf-8")
+            assert f"=== @{profile} ===" in report and report.count("=== @") == 1
 
 
 def test_web_provider_calls_on_post_once_per_publication_before_type_filter():
