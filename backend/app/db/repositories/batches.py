@@ -141,6 +141,8 @@ class BatchRepository:
         media_role: str | None = None,
         media_set: str | None = None,
         auto_export_content: str | None = None,
+        post_times: bool = False,
+        patterns_only: bool = False,
     ) -> int:
         now = utc_now()
         cursor = self.db.execute(
@@ -170,6 +172,9 @@ class BatchRepository:
         if auto_export_content is not None:   # exportação automática ao concluir (migration 0023)
             self.db.execute("UPDATE batches SET auto_export_content = ?, auto_export_state = 'waiting' WHERE id = ?",
                             (auto_export_content, cursor.lastrowid))
+        if post_times or patterns_only:   # horário dos posts / só padrões (migration 0026)
+            self.db.execute("UPDATE batches SET post_times = ?, patterns_only = ? WHERE id = ?",
+                            (int(post_times or patterns_only), int(patterns_only), cursor.lastrowid))
         return cursor.lastrowid
 
     def get(self, batch_id: int) -> dict[str, Any] | None:
@@ -372,7 +377,8 @@ class BatchRepository:
                      min_views: int | None = None, posted_within_days: int | None = None,
                      posted_after: str | None = None, max_views: int | None = None,
                      media_role: str | None = None, media_set: str | None = None,
-                     auto_export_content: str | None = None) -> int:
+                     auto_export_content: str | None = None, post_times: bool = False,
+                     patterns_only: bool = False) -> int:
         cursor = self.db.execute(
             "INSERT INTO import_groups (content_type, requested_limit, preset_id, preset_name, params, process,"
             " created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -393,7 +399,57 @@ class BatchRepository:
         if auto_export_content is not None:   # migration 0023
             self.db.execute("UPDATE import_groups SET auto_export_content = ?, auto_export_state = 'waiting'"
                             " WHERE id = ?", (auto_export_content, cursor.lastrowid))
+        if post_times or patterns_only:   # migration 0026
+            self.db.execute("UPDATE import_groups SET post_times = ?, patterns_only = ? WHERE id = ?",
+                            (int(post_times or patterns_only), int(patterns_only), cursor.lastrowid))
         return cursor.lastrowid
+
+    # ---- horário dos posts (migration 0026) ---------------------------------------------------------------------
+    def add_post_times(self, batch_id: int, username: str, records: list[dict[str, Any]]) -> int:
+        """Grava um registro por publicação (INSERT OR IGNORE: a mesma publicação no mesmo lote fica uma vez só).
+        Retorna quantos registros são novos."""
+        now = utc_now()
+        added = 0
+        for record in records:
+            pinned = record.get("pinned")
+            cursor = self.db.execute(
+                "INSERT OR IGNORE INTO post_times (batch_id, username, code, taken_at, kind, pinned, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (batch_id, username, record["code"], record.get("taken_at"), record.get("kind"),
+                 None if pinned is None else int(bool(pinned)), now),
+            )
+            added += cursor.rowcount
+        return added
+
+    def post_time_codes(self, batch_id: int) -> set[str]:
+        return {row["code"] for row in self.db.fetchall("SELECT code FROM post_times WHERE batch_id = ?",
+                                                        (batch_id,))}
+
+    def post_times_counts(self, batch_ids: list[int]) -> dict[int, int]:
+        if not batch_ids:
+            return {}
+        rows = self.db.fetchall(
+            f"SELECT batch_id, COUNT(*) AS n FROM post_times WHERE batch_id IN ({placeholders(len(batch_ids))})"
+            " GROUP BY batch_id", tuple(batch_ids))
+        return {row["batch_id"]: int(row["n"]) for row in rows}
+
+    def group_post_times_counts(self, group_ids: list[int]) -> dict[int, int]:
+        if not group_ids:
+            return {}
+        rows = self.db.fetchall(
+            "SELECT b.group_id AS group_id, COUNT(*) AS n FROM post_times p JOIN batches b ON b.id = p.batch_id"
+            f" WHERE b.group_id IN ({placeholders(len(group_ids))}) GROUP BY b.group_id", tuple(group_ids))
+        return {row["group_id"]: int(row["n"]) for row in rows}
+
+    def post_times_rows(self, batch_ids: list[int]) -> list[dict[str, Any]]:
+        """Registros dos lotes, por perfil e data (para o relatório de padrões)."""
+        if not batch_ids:
+            return []
+        rows = self.db.fetchall(
+            "SELECT username, code, taken_at, kind, pinned FROM post_times"
+            f" WHERE batch_id IN ({placeholders(len(batch_ids))}) ORDER BY username, taken_at, code",
+            tuple(batch_ids))
+        return [dict(row) for row in rows]
 
     # ---- exportação automática ao concluir (migration 0023) ----------------------------------------------------
     def auto_export_due(self) -> tuple[list[int], list[int]]:

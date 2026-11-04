@@ -121,10 +121,21 @@ def test_import_links_schema_and_constraints(db):
 _COLUMNS_0023 = {"media_set": None, "auto_export_content": None, "auto_export_state": None, "auto_export_id": None,
                  "auto_export_error": None}
 _COLUMNS_0024 = {"request_id": None}   # pedido com várias partes (import_requests)
+# Migration 0026 (horário dos posts): colunas NOT NULL com padrão 0 em batches e import_groups.
+_COLUMNS_0026 = {"post_times": 0, "patterns_only": 0}
 _COLUMNS_0021 = {"media": {"role": "original"}, "jobs": {"media_role": "original"},
                  "batches": {"media_role": "original", "max_views": None, "final_duplicates": None,
-                             "listing_empty_first_page": None, **_COLUMNS_0023, **_COLUMNS_0024},
-                 "import_groups": {"media_role": "original", "max_views": None, **_COLUMNS_0023, **_COLUMNS_0024}}
+                             "listing_empty_first_page": None, **_COLUMNS_0023, **_COLUMNS_0024, **_COLUMNS_0026},
+                 "import_groups": {"media_role": "original", "max_views": None, **_COLUMNS_0023, **_COLUMNS_0024,
+                                   **_COLUMNS_0026}}
+
+
+def _pop_0026(table, rows):
+    """Tira das linhas as colunas da 0026 (padrão 0: lotes/grupos antigos sem horário dos posts)."""
+    if table in ("batches", "import_groups"):
+        for row in rows:
+            for name, value in _COLUMNS_0026.items():
+                assert row.pop(name) == value, (table, name)
 
 
 def _pop_0021(table, rows):
@@ -376,8 +387,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
 
-    assert apply_migrations(db) == [v for v in (17, 18, 19, 20, 21, 22, 23, 24, 25) if v > applied_until]
-    assert schema_version(db) == 25
+    assert apply_migrations(db) == [v for v in (17, 18, 19, 20, 21, 22, 23, 24, 25, 26) if v > applied_until]
+    assert schema_version(db) == 26
     added = {"import_groups": ("posted_within_days", "posted_after", "history_hidden_at"),
              "batches": ("posted_within_days", "posted_after", "listing_period_end", "history_hidden_at")}
     if applied_until < 17:
@@ -405,8 +416,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
 
 
 def test_new_database_gets_17_18_and_19(db):
-    assert apply_migrations(db)[-9:] == [17, 18, 19, 20, 21, 22, 23, 24, 25]
-    assert schema_version(db) == 25
+    assert apply_migrations(db)[-10:] == [17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+    assert schema_version(db) == 26
     columns = {row["name"] for row in db.fetchall("PRAGMA table_info(batches)")}
     assert {"min_views", "history_hidden_at", "posted_after", "posted_within_days", "listing_period_end"} <= columns
 
@@ -421,7 +432,7 @@ def test_batch_media_params_migration_is_additive(tmp_path, db):
     db.execute("INSERT INTO batch_media (batch_id, media_id) VALUES (1, 7)")
     before = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert before
-    assert apply_migrations(db) == [20, 21, 22, 23, 24, 25]
+    assert apply_migrations(db) == [20, 21, 22, 23, 24, 25, 26]
     rows = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert all(row.pop("params") is None for row in rows) and rows == before
     db.execute("UPDATE batch_media SET params = '{\"speed\": 1.0}'")
@@ -438,8 +449,8 @@ def test_media_set_auto_export_migration_is_additive_over_a_bank_at_0022(tmp_pat
     _bank_with_rows(db)
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
-    assert apply_migrations(db) == [23, 24, 25]
-    assert schema_version(db) == 25
+    assert apply_migrations(db) == [23, 24, 25, 26]
+    assert schema_version(db) == 26
     for table in tables:
         rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
         info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
@@ -447,6 +458,7 @@ def test_media_set_auto_export_migration_is_additive_over_a_bank_at_0022(tmp_pat
             for column in {**_COLUMNS_0023, **_COLUMNS_0024}:
                 assert not info[column]["notnull"] and info[column]["dflt_value"] is None
                 assert all(row.pop(column) is None for row in rows), "linhas antigas ficam com NULL"
+        _pop_0026(table, rows)
         assert rows == before[table], table
     assert db.fetchall("PRAGMA foreign_key_check") == [] and db.scalar("PRAGMA integrity_check") == "ok"
     now = "2026-01-01T00:00:00.000Z"
@@ -471,14 +483,15 @@ def test_import_requests_migration_is_additive_over_a_bank_at_0023(tmp_path, db)
     _bank_with_rows(db)
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
-    assert apply_migrations(db) == [24, 25]
-    assert schema_version(db) == 25
+    assert apply_migrations(db) == [24, 25, 26]
+    assert schema_version(db) == 26
     for table in tables:
         rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
         if table in ("batches", "import_groups"):
             info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
             assert not info["request_id"]["notnull"] and info["request_id"]["dflt_value"] is None
             assert all(row.pop("request_id") is None for row in rows), "linhas antigas ficam com NULL"
+        _pop_0026(table, rows)
         assert rows == before[table], table
     assert db.scalar("SELECT COUNT(*) FROM import_requests") == 0
     now = "2026-01-01T00:00:00.000Z"

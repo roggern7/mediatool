@@ -1,0 +1,231 @@
+"""Horário dos posts (migration 0026): gravação na listagem por perfil (um registro por publicação, sem duplicar na
+retomada), modo "só padrões" (`media: "none"`: nada baixado, nenhum job), validação do pedido e o ZIP do relatório
+(GET /api/post-times/report.zip). 100% offline, valores FAKE."""
+
+from __future__ import annotations
+
+import io
+import zipfile
+from dataclasses import replace
+
+import pytest
+
+from app.integrations.instagram.downloader import InstagramError
+from media_fakes import FakeInstagramDownloader, remote
+
+
+class PostTimesDownloader(FakeInstagramDownloader):
+    """Listagem FAKE que chama `on_post` UMA vez por publicação (antes dos itens dela), como o provider web."""
+
+    def iter_profile_media(self, username, content, limit, *, cancel=None, resume=None, on_checkpoint=None,
+                           on_post=None, **extra):
+        inner = super().iter_profile_media(username, content, limit, cancel=cancel, resume=resume,
+                                           on_checkpoint=on_checkpoint)
+        seen: set[str] = set()
+        for item in inner:
+            if on_post is not None and item.source_post_id not in seen:
+                seen.add(item.source_post_id)
+                on_post({"code": item.source_post_id, "taken_at": item.taken_at,
+                         "kind": "carousel" if item.source_post_id == "CARR" else "photo", "pinned": False})
+            yield item
+
+
+def items(count: int = 8) -> list:
+    """`count` publicações de uma foto (P0 mais nova) e um carrossel de 2 itens no meio (conta UMA publicação)."""
+    result = [replace(remote(f"P{i}"), taken_at=f"2026-10-0{1 + i % 9}T1{i % 10}:00:00Z") for i in range(count)]
+    result[3:3] = [replace(remote("CARR", index), taken_at="2026-10-03T08:00:00Z") for index in (0, 1)]
+    return result
+
+
+def start(h, expect: int = 202, **body) -> dict:
+    response = h.client.post("/api/imports/start", json=body)
+    assert response.status_code == expect, response.text
+    return response.json()
+
+
+def rows(h, batch_id: int) -> list[dict]:
+    return [dict(row) for row in h.ctx.db.fetchall(
+        "SELECT username, code, taken_at, kind, pinned FROM post_times WHERE batch_id = ? ORDER BY id", (batch_id,))]
+
+
+def jobs(h, batch_id: int) -> int:
+    return h.ctx.db.scalar("SELECT COUNT(*) FROM jobs WHERE batch_id = ?", (batch_id,))
+
+
+def test_patterns_only_records_times_creates_no_job_and_completes(harness_factory):
+    dl = PostTimesDownloader(items=items(), page_size=3)
+    h = harness_factory(downloader=dl)
+    created = start(h, inputs=["@perfil_teste"], media="none", post_times=True, limit=5)
+    batch_id = created["batch_ids"][0]
+    h.run_all()
+
+    assert jobs(h, batch_id) == 0 and dl.downloads == []
+    stored = rows(h, batch_id)
+    # 5 PUBLICAÇÕES (o carrossel de 2 itens conta uma vez), na ordem da listagem.
+    assert [row["code"] for row in stored] == ["P0", "P1", "P2", "CARR", "P3"]
+    assert all(row["username"] == "perfil_teste" and row["pinned"] == 0 for row in stored)
+    assert stored[3]["kind"] == "carousel" and stored[3]["taken_at"] == "2026-10-03T08:00:00Z"
+    batch = h.batch(batch_id)
+    assert batch["status"] == "completed" and batch["listing_end"] == "limit"
+    assert batch["post_times"] is True and batch["post_times_count"] == 5
+    assert batch["media"] == "none" and batch["media_set"] == "none"
+    assert batch["found"] == 0 and batch["error_message"].startswith("5 publicações analisadas")
+
+
+def test_patterns_only_until_profile_end(harness_factory):
+    dl = PostTimesDownloader(items=items(4), page_size=2)
+    h = harness_factory(downloader=dl)
+    batch_id = start(h, inputs=["perfil_teste"], media="none", post_times=True, limit=None,
+                     confirm_all=True)["batch_ids"][0]
+    h.run_all()
+    batch = h.batch(batch_id)
+    assert batch["status"] == "completed" and batch["listing_end"] == "profile_end"
+    assert batch["post_times_count"] == 5 and jobs(h, batch_id) == 0
+
+
+def test_normal_import_with_post_times_downloads_and_records_every_post(harness_factory):
+    dl = PostTimesDownloader(items=items(), page_size=4)
+    h = harness_factory(downloader=dl)
+    batch_id = start(h, inputs=["@perfil_teste"], media="all", post_times=True, limit=100)["batch_ids"][0]
+    for _ in range(3):
+        h.run_all()
+    batch = h.batch(batch_id)
+    assert batch["status"] == "completed"
+    assert jobs(h, batch_id) == 10 and len(dl.downloads) == 10   # 8 fotos + 2 itens do carrossel
+    assert len(rows(h, batch_id)) == 9 and batch["post_times_count"] == 9   # 9 publicações
+    assert batch["post_times"] is True and batch["media"] == "all" and batch["media_set"] == "all"
+
+
+def test_import_without_post_times_records_nothing(harness_factory):
+    dl = PostTimesDownloader(items=items(3))
+    h = harness_factory(downloader=dl)
+    batch_id = start(h, inputs=["@perfil_teste"], media="all", limit=100)["batch_ids"][0]
+    h.run_all()
+    batch = h.batch(batch_id)
+    assert rows(h, batch_id) == [] and batch["post_times"] is False and batch["post_times_count"] == 0
+    response = h.client.get("/api/post-times/report.zip", params={"batch_id": batch_id})
+    assert response.status_code == 404 and response.json()["code"] == "post_times_not_found"
+
+
+def test_resume_after_error_mid_page_does_not_duplicate(harness_factory):
+    # Erro no meio da página 2 (depois de 4 itens): a página 2 já teve publicações gravadas sem checkpoint; a retomada
+    # refaz a página e nada é duplicado.
+    dl = PostTimesDownloader(items=items(), page_size=3, listing_error=InstagramError("contract_changed", "FAKE"),
+                             listing_error_after=4)
+    h = harness_factory(downloader=dl)
+    batch_id = start(h, inputs=["@perfil_teste"], media="none", post_times=True, limit=None,
+                     confirm_all=True)["batch_ids"][0]
+    h.run_imports()
+    first = h.batch(batch_id)
+    assert first["status"] == "listing" and first["listing_state"] == "needs_attention"
+    assert [row["code"] for row in rows(h, batch_id)] == ["P0", "P1", "P2", "CARR"]
+
+    dl.listing_error = None
+    response = h.client.post(f"/api/batches/{batch_id}/resume-listing")
+    assert response.status_code in (200, 202, 204), response.text
+    h.run_all()
+    codes = [row["code"] for row in rows(h, batch_id)]
+    assert codes == ["P0", "P1", "P2", "CARR", "P3", "P4", "P5", "P6", "P7"]
+    assert len(codes) == len(set(codes)) and dl.page_requests.count(2) == 2   # página 2 refeita
+    batch = h.batch(batch_id)
+    assert batch["status"] == "completed" and batch["post_times_count"] == 9 and jobs(h, batch_id) == 0
+
+
+def test_group_patterns_only_sums_children(harness_factory):
+    dl = PostTimesDownloader(items=items(3))
+    h = harness_factory(downloader=dl)
+    group_id = start(h, inputs=["@perfil_um", "@perfil_dois"], media="none", post_times=True, limit=10)["group_id"]
+    h.run_all()
+    h.run_all()
+    detail = h.client.get(f"/api/import-groups/{group_id}").json()
+    assert detail["group"]["post_times"] is True and detail["group"]["post_times_count"] == 8
+    assert detail["group"]["media"] == "none" and detail["group"]["media_set"] == "none"
+    assert {child["source_profile"] for child in detail["children"]} == {"perfil_um", "perfil_dois"}
+    assert all(child["post_times_count"] == 4 and child["status"] == "completed" for child in detail["children"])
+    assert dl.downloads == []
+
+
+@pytest.mark.parametrize("body, code", [
+    ({"inputs": ["@perfil"], "media": "none"}, "validation_error"),
+    ({"inputs": ["@perfil"], "media": "none", "post_times": True, "post_processing": "preset"}, "validation_error"),
+    ({"inputs": ["@perfil"], "media": "none", "post_times": True, "auto_export": {"content": "originals"}},
+     "validation_error"),
+    ({"inputs": ["@perfil"], "media": "none", "post_times": True, "min_views": 1000}, "validation_error"),
+    ({"inputs": ["https://www.instagram.com/p/ABCDE12345/"], "media": "none", "post_times": True},
+     "patterns_need_profiles"),
+    ({"inputs": ["@perfil"], "media": "videos", "post_times": "sim"}, "validation_error"),
+])
+def test_invalid_requests_are_422(harness, body, code):
+    body.setdefault("limit", 10)
+    response = harness.client.post("/api/imports/start", json=body)
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == code
+    assert harness.ctx.db.scalar("SELECT COUNT(*) FROM batches") == 0
+
+
+def test_report_endpoint_validation(harness):
+    for params in ({}, {"batch_id": 1, "group_id": 1}):
+        response = harness.client.get("/api/post-times/report.zip", params=params)
+        assert response.status_code == 422, response.text
+    assert harness.client.get("/api/post-times/report.zip", params={"batch_id": 999}).status_code == 404
+    assert harness.client.get("/api/post-times/report.zip", params={"group_id": 999}).status_code == 404
+
+
+def test_report_zip_for_batch_and_group(harness_factory):
+    pytest.importorskip("app.services.post_patterns")
+    dl = PostTimesDownloader(items=items())
+    h = harness_factory(downloader=dl)
+    batch_id = start(h, inputs=["@perfil_teste"], media="none", post_times=True, limit=100)["batch_ids"][0]
+    h.run_all()
+    group_id = start(h, inputs=["@perfil_um", "@perfil_dois"], media="none", post_times=True,
+                     limit=100)["group_id"]
+    h.run_all()
+    h.run_all()
+    for params, profiles in (({"batch_id": batch_id}, ["perfil_teste"]),
+                             ({"group_id": group_id}, ["perfil_um", "perfil_dois"])):
+        response = h.client.get("/api/post-times/report.zip", params=params)
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/zip"
+        disposition = response.headers["content-disposition"]
+        assert disposition.startswith("attachment;") and ".zip" in disposition
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            assert {"relatorio.txt", "resumo.csv", "posts.csv"} <= set(archive.namelist())
+            posts = archive.read("posts.csv")
+            summary = archive.read("resumo.csv")
+            report = archive.read("relatorio.txt").decode("utf-8-sig")
+        assert posts.startswith(b"\xef\xbb\xbf") and summary.startswith(b"\xef\xbb\xbf")   # BOM (Excel pt-BR)
+        posts_text = posts.decode("utf-8-sig")
+        assert ";" in posts_text.splitlines()[0]
+        assert len(posts_text.strip().splitlines()) == 1 + 9 * len(profiles)   # cabeçalho + 9 publicações/perfil
+        assert all(code in posts_text for code in ("P0", "P7", "CARR"))
+        assert len(summary.decode("utf-8-sig").strip().splitlines()) == 1 + len(profiles)
+        assert all(profile in report for profile in profiles)
+
+
+def test_web_provider_calls_on_post_once_per_publication_before_type_filter():
+    """Pilha real do provider web (transporte FAKE): um registro por publicação, antes do filtro de tipo (conteúdo
+    "videos" entrega só o Reel, mas foto e carrossel também têm horário); carrossel conta uma vez; fora do período
+    não entra; fixada é marcada."""
+    import test_graphql_partial_errors as gp
+    from app.integrations.instagram.web.provider import LISTING_PINNED_FIELD
+
+    base = 1_800_000_000
+    photo = {**gp.image(1, 0), "taken_at": base}
+    reel = {**gp.image(1, 1), "taken_at": base - 60, "media_type": 2, "product_type": "clips",
+            "video_versions": [{"url": f"{gp.SIGNED_URL}&v=11", "width": 720, "height": 1280}]}
+    carousel = {**gp.carousel(1, 2, [gp.image(1, 90), gp.image(1, 91)]), "taken_at": base - 120}
+    pinned_old = {**gp.image(1, 3), "taken_at": base - 86_400 * 30, LISTING_PINNED_FIELD: ["1"]}
+    site = gp.Site(gp.body(1, [photo, reel, carousel, pinned_old], has_next=False))
+    records: list[dict] = []
+    items = list(gp.downloader(site).iter_profile_media("perfil_teste", "videos", None, on_post=records.append))
+    assert gp.codes(items) == ["SYNP01N01"]
+    assert [(r["code"], r["kind"], r["pinned"]) for r in records] == [
+        ("SYNP01N00", "photo", None), ("SYNP01N01", "reel", None), ("SYNP01N02", "carousel", None),
+        ("SYNP01N03", "photo", True)]
+    assert records[0]["taken_at"] == "2027-01-15T08:00:00Z"
+
+    records.clear()
+    cutoff = "2027-01-01T00:00:00Z"   # a fixada antiga fica fora do período
+    list(gp.downloader(gp.Site(gp.body(1, [photo, reel, carousel, pinned_old], has_next=False))).iter_profile_media(
+        "perfil_teste", "all", None, posted_after=cutoff, on_post=records.append))
+    assert [r["code"] for r in records] == ["SYNP01N00", "SYNP01N01", "SYNP01N02"]

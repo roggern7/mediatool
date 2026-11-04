@@ -9,8 +9,12 @@ import {
   classificationText,
   createdText,
   entriesOf,
+  hasPostTimesReport,
+  isPatternsOnly,
+  mediaLabel,
   needsConfirmAll,
   postProcessingApplies,
+  postTimesReportUrl,
   progressExtrasText,
   resolveQuantity,
   unifiedBody,
@@ -156,8 +160,8 @@ describe("contadores Duplicados e Filtrados", () => {
 });
 
 describe("tipos de mídia e exportação automática", () => {
-  it("cinco tipos, na ordem da tela", () => {
-    expect(MEDIA_CHOICES.map((c) => c.value)).toEqual(["videos", "photos", "covers", "videos_covers", "all"]);
+  it("seis tipos, na ordem da tela (o último só consulta padrões)", () => {
+    expect(MEDIA_CHOICES.map((c) => c.value)).toEqual(["videos", "photos", "covers", "videos_covers", "all", "none"]);
   });
   it("visualizações só com vídeos, capas ou vídeos e capas", () => {
     expect(["videos", "covers", "videos_covers"].every((m) => viewsAllowed(m as never))).toBe(true);
@@ -170,6 +174,45 @@ describe("tipos de mídia e exportação automática", () => {
     expect(postProcessingApplies("photos")).toBe(false);
     expect(postProcessingApplies("covers")).toBe(false);
     expect(postProcessingApplies("all")).toBe(true);
+  });
+  it("horário dos posts só vai quando marcado", () => {
+    expect(unifiedBody(form())).not.toHaveProperty("post_times");
+    expect(unifiedBody(form({ postTimes: true }))).toMatchObject({ media: "videos", post_times: true });
+  });
+  it("só padrões: horário ligado, sem pós-processamento, ZIP automático nem visualizações", () => {
+    const body = unifiedBody(
+      form({
+        media: "none",
+        post: "preset",
+        presetId: 3,
+        autoExport: "originals",
+        minViews: 10,
+        maxViews: 20,
+        periodDays: 30,
+      }),
+    );
+    expect(body).toEqual({
+      inputs: ["@perfil", "https://www.instagram.com/p/ABC/"],
+      media: "none",
+      limit: 50,
+      confirm_all: false,
+      post_processing: "none",
+      post_times: true,
+      posted_within_days: 30,
+    });
+    expect(postProcessingApplies("none")).toBe(false);
+    expect(viewsAllowed("none")).toBe(false);
+    expect(mediaLabel("none")).toBe("Só padrões");
+  });
+  it("lote/grupo só de padrões e relatório", () => {
+    expect(isPatternsOnly({ media_set: "none" })).toBe(true);
+    expect(isPatternsOnly({ media: "none" })).toBe(true);
+    expect(isPatternsOnly({ media: "videos", media_set: "videos" })).toBe(false);
+    expect(hasPostTimesReport({ post_times: true, post_times_count: 3 })).toBe(true);
+    expect(hasPostTimesReport({ post_times: true, post_times_count: 0 })).toBe(false);
+    expect(hasPostTimesReport({})).toBe(false);
+    expect(postTimesReportUrl({ kind: "batch", id: 7 })).toBe("/api/post-times/report.zip?batch_id=7");
+    expect(postTimesReportUrl({ kind: "group", id: 2 })).toBe("/api/post-times/report.zip?group_id=2");
   });
   it("auto_export só vai quando ligado", () => {
     expect(unifiedBody(form())).not.toHaveProperty("auto_export");

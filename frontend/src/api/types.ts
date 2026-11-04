@@ -5,8 +5,8 @@ export type ContentType = "reels" | "posts" | "videos" | "images" | "all" | "pho
 export type MediaType = "video" | "image";
 /** Papel da mídia na Biblioteca: "cover" = capa de um vídeo/Reel baixada sozinha. */
 export type MediaRole = "original" | "cover";
-/** Tipo de mídia da importação unificada. */
-export type MediaChoice = "videos" | "photos" | "covers" | "videos_covers" | "all";
+/** Tipo de mídia da importação unificada. "none" = só padrões (grava o horário dos posts, não baixa nada). */
+export type MediaChoice = "videos" | "photos" | "covers" | "videos_covers" | "all" | "none";
 
 /** O que a exportação ZIP automática leva ao concluir a importação. */
 export type AutoExportContent = "originals" | "edited" | "both";
@@ -253,6 +253,11 @@ export interface Batch {
   media?: MediaChoice | null;
   /** Exportação ZIP automática ao concluir; filho de grupo: null (a do grupo fica no grupo). */
   auto_export?: AutoExport | null;
+  /** "Puxar horário dos posts" marcado e quantas publicações já têm horário gravado (ausentes em backends antigos). */
+  post_times?: boolean;
+  post_times_count?: number;
+  /** Conjunto de mídia gravado; "none" = lote só de padrões (nada baixado). */
+  media_set?: MediaChoice | null;
 }
 
 export interface BatchLinksSummary {
@@ -349,6 +354,11 @@ export interface ImportGroup {
   last_export?: LastExport | null;
   media?: MediaChoice | null;
   auto_export?: AutoExport | null;
+  /** Horário dos posts: pedido no grupo e soma das publicações com horário gravado nos perfis. */
+  post_times?: boolean;
+  post_times_count?: number;
+  /** "none" = grupo só de padrões (nada baixado). */
+  media_set?: MediaChoice | null;
 }
 
 export interface SkippedProfile {
@@ -609,6 +619,8 @@ export interface UnifiedImportRequest {
   edit?: EditSettings;
   /** Exportação ZIP automática ao concluir; ausente = sem ela. */
   auto_export?: { content: AutoExportContent };
+  /** Puxar horário dos posts (relatório de padrões); obrigatório com `media: "none"`. Ausente = false. */
+  post_times?: boolean;
 }
 
 export interface UnifiedImportResult {

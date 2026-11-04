@@ -95,7 +95,8 @@ import { BatchLinksPanel } from "../components/BatchLinksPanel";
 import { ImportGroupPanel } from "../components/ImportGroupPanel";
 import { ImportLinksForm } from "../components/ImportLinksForm";
 import { ImportUnifiedForm } from "../components/ImportUnifiedForm";
-import { createdText } from "../lib/importUnified";
+import { analyzedPostsText, createdText, isPatternsOnly } from "../lib/importUnified";
+import { PostTimesReportButton } from "../components/PostTimesReportButton";
 import { EditSettingsForm } from "../components/edit/EditSettingsForm";
 import { DEFAULT_EDIT_FORM, type EditForm } from "../lib/editSettings";
 import { ImportExportBar } from "../components/ExportPanel";
@@ -1068,6 +1069,11 @@ function BatchPanel({
         <button type="button" className="btn btn-sm btn-ghost" onClick={() => navigate(queueForBatch(batch.id))}>
           Ver na Fila
         </button>
+        <PostTimesReportButton
+          target={{ kind: "batch", id: batch.id }}
+          postTimes={batch.post_times}
+          postTimesCount={batch.post_times_count}
+        />
         <span className="grow" />
         {onClose ? (
           <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
@@ -1075,18 +1081,20 @@ function BatchPanel({
           </button>
         ) : null}
       </div>
-      <ImportExportBar
-        source={{ kind: "batch", id: batch.id }}
-        finished={exportOffer.offer}
-        note={exportOffer.note}
-        lastExport={batch.last_export}
-        libraryPath={libraryPathForProfile(batch.source_profile)}
-        contentChoice={batch.process}
-        onChanged={() => {
-          query.reload();
-          onChanged();
-        }}
-      />
+      {isPatternsOnly(batch) ? null : (
+        <ImportExportBar
+          source={{ kind: "batch", id: batch.id }}
+          finished={exportOffer.offer}
+          note={exportOffer.note}
+          lastExport={batch.last_export}
+          libraryPath={libraryPathForProfile(batch.source_profile)}
+          contentChoice={batch.process}
+          onChanged={() => {
+            query.reload();
+            onChanged();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1098,22 +1106,26 @@ function BatchSummary({ batch }: { batch: Batch }) {
   const errors = Math.min(p.failed, done);
   const cancelled = Math.min(batch.counts.cancelled ?? 0, done - errors);
   const succeeded = done - errors - cancelled;
-  const showBar = p.found > 0 && listingDone;
+  // Lote só de padrões: nada é baixado; o que conta são as publicações com horário gravado.
+  const patternsOnly = isPatternsOnly(batch);
+  const showBar = p.found > 0 && listingDone && !patternsOnly;
   const downloadOnly = isDownloadOnly(batch);
   const byLinks = isLinksBatch(batch);
   const profileEnd = batch.error_code ? null : profileEndText(batch);
-  const counters: [string, number][] = [
-    ["Encontrados", p.found],
-    ["Baixados", p.downloaded],
-    // Lote só de download não tem etapa de processamento para contar.
-    ...(downloadOnly ? [] : ([["Processados", p.processed]] as [string, number][])),
-    ["Ignorados", p.skipped],
-    // Importação unificada: já existentes e filtrados por tipo/período/visualizações (ausentes em backends antigos).
-    ...(typeof p.duplicates === "number" ? ([["Duplicados", p.duplicates]] as [string, number][]) : []),
-    ...(typeof p.filtered === "number" ? ([["Filtrados", p.filtered]] as [string, number][]) : []),
-    ["Erros", p.failed],
-    ["Pendentes", p.pending],
-  ];
+  const counters: [string, number][] = patternsOnly
+    ? [["Publicações analisadas", batch.post_times_count ?? 0]]
+    : [
+        ["Encontrados", p.found],
+        ["Baixados", p.downloaded],
+        // Lote só de download não tem etapa de processamento para contar.
+        ...(downloadOnly ? [] : ([["Processados", p.processed]] as [string, number][])),
+        ["Ignorados", p.skipped],
+        // Importação unificada: já existentes e filtrados por tipo/período/visualizações (ausentes em backends antigos).
+        ...(typeof p.duplicates === "number" ? ([["Duplicados", p.duplicates]] as [string, number][]) : []),
+        ...(typeof p.filtered === "number" ? ([["Filtrados", p.filtered]] as [string, number][]) : []),
+        ["Erros", p.failed],
+        ["Pendentes", p.pending],
+      ];
   return (
     <>
       <div className="row between">
@@ -1131,7 +1143,7 @@ function BatchSummary({ batch }: { batch: Batch }) {
                   batch.content_type ? CONTENT_LABEL[batch.content_type] : null,
                   batch.requested_limit ? `Últimos ${formatCount(batch.requested_limit)}` : "Todos",
                 ]),
-            batch.process && batch.preset_name ? batch.preset_name : "Somente originais",
+            patternsOnly ? "Só padrões" : batch.process && batch.preset_name ? batch.preset_name : "Somente originais",
           ]
             .filter(Boolean)
             .join(" · ")}
@@ -1162,7 +1174,11 @@ function BatchSummary({ batch }: { batch: Batch }) {
         </div>
       ) : batch.status === "listing" ? (
         <div className="muted small">
-          {byLinks ? "Resolvendo os links, um de cada vez." : "Coletando a lista de mídias do perfil."}
+          {byLinks
+            ? "Resolvendo os links, um de cada vez."
+            : patternsOnly
+              ? "Lendo o horário das publicações do perfil."
+              : "Coletando a lista de mídias do perfil."}
         </div>
       ) : null}
       {viewsFilterText(visibleFilter(batch.views_filter), p.downloaded) ? (
@@ -1225,9 +1241,14 @@ function RecentTable({
             const selection: Selection = { kind: entry.kind, id: item.id };
             const tone = isGroup ? groupStatusLabel(entry.group) : null;
             const downloadOnly = isGroup ? !entry.group.process : isDownloadOnly(entry.batch);
+            // Só padrões: nada baixado; a linha mostra as publicações analisadas no lugar das mídias.
+            const patternsOnly = isPatternsOnly(item);
+            const analyzed = patternsOnly ? analyzedPostsText(item.post_times_count ?? 0) : null;
             const note = isGroup
-              ? [...groupProfileCounts(entry.group.profiles), groupDroppedText(entry.group)].filter(Boolean).join(" • ")
-              : (listingDropped(entry.batch)?.summary ?? "");
+              ? [...groupProfileCounts(entry.group.profiles), analyzed, groupDroppedText(entry.group)]
+                  .filter(Boolean)
+                  .join(" • ")
+              : [analyzed, listingDropped(entry.batch)?.summary].filter(Boolean).join(" • ");
             const p = item.progress;
             return (
               <tr
@@ -1250,7 +1271,9 @@ function RecentTable({
                 <td className="muted">
                   {!isGroup && isLinksBatch(entry.batch)
                     ? "-"
-                    : item.content_type
+                    : patternsOnly
+                      ? "Só padrões"
+                      : item.content_type
                       ? CONTENT_LABEL[item.content_type]
                       : "-"}
                 </td>
@@ -1262,10 +1285,10 @@ function RecentTable({
                   ) : null}
                   {note ? <div className="muted small">{note}</div> : null}
                 </td>
-                <td className="num">{formatCount(p.found)}</td>
-                <td className="num muted">{formatCount(p.downloaded)}</td>
+                <td className="num">{formatCount(patternsOnly ? (item.post_times_count ?? 0) : p.found)}</td>
+                <td className="num muted">{patternsOnly ? "-" : formatCount(p.downloaded)}</td>
                 <td className="num muted" title={downloadOnly ? "Somente originais" : undefined}>
-                  {downloadOnly ? "-" : formatCount(p.processed)}
+                  {downloadOnly || patternsOnly ? "-" : formatCount(p.processed)}
                 </td>
                 <td className="num muted">{formatCount(p.skipped)}</td>
                 <td className={`num ${p.failed > 0 ? "tone-err" : "muted"}`}>{formatCount(p.failed)}</td>

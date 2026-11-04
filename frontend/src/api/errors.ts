@@ -82,6 +82,7 @@ const MESSAGES: Record<string, string> = {
     "A pasta desta exportação não existe mais (foi movida, renomeada ou apagada). Exporte de novo.",
   export_disk_full: "O disco de destino ficou sem espaço. Libere espaço e exporte de novo para a mesma pasta.",
   export_write_failed: "Muitas falhas seguidas ao gravar na pasta de destino. Verifique a pasta e exporte de novo.",
+  post_times_not_found: "Ainda não há horários de publicações para gerar o relatório.",
 };
 
 /** Códigos do Instagram: a mensagem do backend é mais precisa e tem prioridade; o texto fixo é fallback. */
@@ -105,6 +106,7 @@ const BACKEND_FIRST = new Set([
   "export_dest_forbidden",
   "export_no_space",
   "export_folder_missing",
+  "not_supported_by_provider",
 ]);
 
 const BY_STATUS: Record<number, string> = {

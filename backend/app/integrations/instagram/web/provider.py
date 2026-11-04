@@ -319,6 +319,7 @@ class InstagramWebDownloader(InstagramDownloader):
         min_views: int | None = None,
         posted_after: str | None = None,
         max_views: int | None = None,
+        on_post: Callable[[dict], None] | None = None,
     ) -> Iterator[RemoteMedia]:
         username = self._username(username)
         if content not in CONTENT_TYPES:
@@ -337,7 +338,7 @@ class InstagramWebDownloader(InstagramDownloader):
             raise InstagramError("invalid_input", "Corte do período de postagem inválido.")
         # ``limit=None`` ("Todos"): até o fim real do perfil, sem teto de quantidade nem de páginas.
         return self._iter_media(username, content, limit, cancel, resume, on_checkpoint, min_views, cutoff,
-                                max_views)
+                                max_views, on_post)
 
     def resolve_post(self, shortcode: str, *, cancel: threading.Event | None = None,
                      path_kind: str | None = None, use_session: bool = True) -> list[RemoteMedia]:
@@ -795,6 +796,7 @@ class InstagramWebDownloader(InstagramDownloader):
         self, username: str, content: str, limit: int | None, cancel: threading.Event | None,
         resume: ListingCheckpoint | None, on_checkpoint: Callable[[ListingCheckpoint], None] | None,
         min_views: int | None = None, cutoff: int | None = None, max_views: int | None = None,
+        on_post: Callable[[dict], None] | None = None,
     ) -> Iterator[RemoteMedia]:
         """Lista página a página (gerador; nada de respostas/nós/itens acumulados).
 
@@ -818,7 +820,10 @@ class InstagramWebDownloader(InstagramDownloader):
         aba Reels ou sem contagem ("no_count") não viram item, e item que não é vídeo também não ("no_count"). Erro da
         aba Reels sobe como erro da listagem (nunca entrega sem o filtro). ``limit`` conta só os aprovados.
         ``max_views`` (máximo, migration 0021; sozinho ou com o mínimo): ``play_count`` > ``max_views`` não vira item
-        ("above"); as demais regras são as do mínimo (sem contagem nunca é aprovado)."""
+        ("above"); as demais regras são as do mínimo (sem contagem nunca é aprovado).
+
+        ``on_post`` (horário dos posts, migration 0026): chamado UMA vez por publicação vista dentro do período (antes
+        do filtro de tipo de mídia e do de visualizações; carrossel conta uma vez) com ``_post_record(node)``."""
         from app.integrations.instagram.web.errors import InstagramWebError
         from app.integrations.instagram.web.normalize import (
             DEGRADED_REASONS,
@@ -989,6 +994,10 @@ class InstagramWebDownloader(InstagramDownloader):
                                 return
                             continue
                         old_streak = 0
+                    if on_post is not None:
+                        record = _post_record(node)
+                        if record is not None:
+                            on_post(record)
                     for item in items:
                         if page_views is not None:
                             if not views_on:
@@ -1144,6 +1153,26 @@ def _node_timestamp(node: Mapping) -> int | None:
     if _taken_at(value) is None:
         return None
     return int(value)
+
+
+def _post_record(node: Mapping) -> dict | None:
+    """Registro de horário de UMA publicação (nível de post): código, `taken_at` UTC ISO (None sem data), tipo
+    ("photo", "video", "reel", "carousel" ou None) e fixado (True/False/None). None se o nó não tem código."""
+    from app.integrations.instagram.web.normalize import MEDIA_CAROUSEL, MEDIA_IMAGE, MEDIA_VIDEO, _taken_at
+
+    code = node.get("code")
+    if not isinstance(code, str) or not code:
+        return None
+    media_type = node.get("media_type")
+    if media_type == MEDIA_CAROUSEL:
+        kind: str | None = "carousel"
+    elif media_type == MEDIA_VIDEO:
+        kind = "reel" if node.get("product_type") == "clips" else "video"
+    elif media_type == MEDIA_IMAGE:
+        kind = "photo"
+    else:
+        kind = None
+    return {"code": code, "taken_at": _taken_at(node.get("taken_at")), "kind": kind, "pinned": _node_pinned(node)}
 
 
 def _node_pinned(node: Mapping) -> bool | None:

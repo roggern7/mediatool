@@ -23,8 +23,15 @@ import {
 } from "../lib/labels";
 import { batchIdFromSearch } from "../lib/batchRoute";
 import { linksSummaryText } from "../lib/importLinks";
-import { mediaLabel, progressExtrasText } from "../lib/importUnified";
+import {
+  analyzedPostsText,
+  hasPostTimesReport,
+  isPatternsOnly,
+  mediaLabel,
+  progressExtrasText,
+} from "../lib/importUnified";
 import { AutoExportLine } from "../components/AutoExportLine";
+import { PostTimesReportButton } from "../components/PostTimesReportButton";
 import {
   FIRST_PAGE,
   type PageCursor,
@@ -471,7 +478,13 @@ function BatchHeader({
           Ver toda a fila
         </button>
       </div>
-      {batch ? (
+      {batch && isPatternsOnly(batch) ? (
+        // Lote só de padrões: nada é baixado; no lugar das contagens de mídia, as publicações analisadas.
+        <div className="muted small" style={{ marginTop: 6 }}>
+          {`${mediaLabel("none")} · ${analyzedPostsText(batch.post_times_count ?? 0)}`}
+          {listingDroppedSuffix(batch)}
+        </div>
+      ) : batch ? (
         <div className="muted small" style={{ marginTop: 6 }}>
           {isLinksBatch(batch) && batch.links ? `${linksSummaryText(batch.links)} · ` : ""}
           {isDownloadOnly(batch)
@@ -499,6 +512,15 @@ function BatchHeader({
         </div>
       ) : null}
       {batch ? <AutoExportLine auto={batch.auto_export} /> : null}
+      {batch && hasPostTimesReport(batch) ? (
+        <div className="row" style={{ marginTop: 6 }}>
+          <PostTimesReportButton
+            target={{ kind: "batch", id: batch.id }}
+            postTimes={batch.post_times}
+            postTimesCount={batch.post_times_count}
+          />
+        </div>
+      ) : null}
       {batch ? <BatchNotice batch={batch} onResumed={onRetry} /> : null}
     </div>
   );

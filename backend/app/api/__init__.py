@@ -7,6 +7,7 @@ from app.api import (
     imports,
     jobs,
     media,
+    post_times,
     presets,
     profile_analyses,
     settings,
@@ -16,7 +17,7 @@ from app.api import (
 
 api_router = APIRouter(prefix="/api")
 for module in (system, presets, imports, media, exports, jobs, settings, uploads, edits, extension,
-               profile_analyses):
+               profile_analyses, post_times):
     api_router.include_router(module.router)
 
 __all__ = ["api_router"]

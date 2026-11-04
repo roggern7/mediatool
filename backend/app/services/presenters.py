@@ -21,7 +21,9 @@ _FILTERED_VERDICTS = ("below", "no_count", "out_of_period", "above")
 def media_choice(row: dict[str, Any]) -> str | None:
     """Tipo de mídia do pedido (importação unificada): o `media_set` gravado (migration 0023); nos lotes anteriores a
     ela, "covers" (migration 0021), "videos" (Reels/vídeos) ou "all"; None nos lotes antigos com outro conteúdo
-    (fotos, publicações do feed) e nos da Biblioteca."""
+    (fotos, publicações do feed) e nos da Biblioteca. "none": só padrões (migration 0026)."""
+    if row.get("patterns_only"):
+        return "none"
     if row.get("media_set"):
         return row["media_set"]
     if row.get("media_role") == "cover":
@@ -180,6 +182,7 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
     # Grupo parte de um pedido com links (migration 0024): mostra a exportação automática do pedido.
     auto_rows = {row["id"]: row for row in with_requests(ctx, groups)}
     autos = exports_for(ctx, list(auto_rows.values()))
+    post_counts = ctx.batches.group_post_times_counts([g["id"] for g in groups if g.get("post_times")])
     result = []
     for group in groups:
         row = stats.get(group["id"], {})
@@ -209,6 +212,10 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
             "period_end_count": int(row.get("period_end") or 0),
             "media": media_choice(group),
             "auto_export": auto_export_out(auto_rows[group["id"]], autos),
+            # Horário dos posts (migration 0026): soma das publicações gravadas pelos filhos.
+            "post_times": bool(group.get("post_times")),
+            "post_times_count": post_counts.get(group["id"], 0),
+            "media_set": "none" if group.get("patterns_only") else group.get("media_set"),
             "progress": {"found": found, **{key: int(row.get(key, 0)) for key in _PROGRESS_KEYS},
                          "filtered": int(row.get("type_filtered") or 0) + sum(
                              int(row.get(f"views_{key}") or 0) for key in _FILTERED_VERDICTS)},
@@ -235,6 +242,7 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
     link_counts = ctx.batches.link_counts([b["id"] for b in batches if b.get("import_mode") == "links"])
     auto_rows = {row["id"]: row for row in with_requests(ctx, batches)}
     autos = exports_for(ctx, list(auto_rows.values()))
+    post_counts = ctx.batches.post_times_counts([b["id"] for b in batches if b.get("post_times")])
     result = []
     for batch in batches:
         row = stats.get(batch["id"], {})
@@ -272,6 +280,10 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
         data["views_filter"] = _views_filter(batch)
         data["media"] = media_choice(batch) if batch["source"] == "instagram_import" else None
         data["auto_export"] = auto_export_out(auto_rows[batch["id"]], autos)
+        # Horário dos posts (migration 0026): publicações gravadas (relatório de padrões); "none" = só padrões.
+        data["post_times"] = bool(batch.get("post_times"))
+        data["post_times_count"] = post_counts.get(batch["id"], 0)
+        data["media_set"] = "none" if batch.get("patterns_only") else batch.get("media_set")
         if batch.get("import_mode") == "links":
             data["import_mode"] = "links"
             data["links"] = link_counts.get(batch["id"], {"total": 0, "pending": 0, "resolved": 0, "failed": 0})

@@ -8,11 +8,13 @@ import {
   autoExportNeedsProcessing,
   CONFIRM_ALL_TEXT,
   MEDIA_CHOICES,
+  PATTERNS_NEED_PROFILES_TEXT,
   QUANTITY_PRESETS,
   classificationText,
   entriesOf,
   needsConfirmAll,
   postProcessingApplies,
+  postTimesPlanText,
   resolveQuantity,
   unifiedBody,
   viewsAllowed,
@@ -122,6 +124,10 @@ export function ImportUnifiedForm({
 }) {
   const [text, setText] = useState("");
   const [media, setMedia] = useState<MediaChoice>("videos");
+  const [postTimes, setPostTimes] = useState(false);
+  // "Nada — só consultar padrões": horário ligado e travado; sem pós-processamento, ZIP automático nem visualizações.
+  const patternsOnly = media === "none";
+  const effectivePost: PostProcessing = patternsOnly ? "none" : post;
   // Capas e fotos nunca são processadas: sem versão editada para exportar.
   const noEdited = (post: string) => post === "none" || media === "covers" || media === "photos";
   const [quantityMode, setQuantityMode] = useState<QuantityMode>("50");
@@ -149,6 +155,8 @@ export function ImportUnifiedForm({
   const allowViews = viewsAllowed(media);
   const views = resolveViewsRange(allowViews, { mode: minMode, text: minText }, { mode: maxMode, text: maxText });
   const singleProfile = settled && settled.profiles.length === 1 && settled.links.length === 0 ? settled.profiles[0] : null;
+  const onlyLinks = patternsOnly && !!settled && settled.profiles.length === 0 && settled.links.length > 0;
+  const planText = postTimesPlanText(media, patternsOnly || postTimes, !!settled && settled.links.length > 0);
 
   const problem =
     blocker ??
@@ -158,9 +166,10 @@ export function ImportUnifiedForm({
     (hasProfiles && !quantity.ok ? quantity.error : null) ??
     (hasProfiles && !period.ok ? period.error : null) ??
     (hasProfiles && !views.ok ? views.error : null) ??
-    editProblem ??
-    (post === "preset" && presetId === null ? "Escolha um preset." : null) ??
-    (noEdited(post) && autoExportNeedsProcessing(autoExport) ? AUTO_EXPORT_NEEDS_PROCESSING_TEXT : null);
+    (onlyLinks ? PATTERNS_NEED_PROFILES_TEXT : null) ??
+    (patternsOnly ? null : editProblem) ??
+    (effectivePost === "preset" && presetId === null ? "Escolha um preset." : null) ??
+    (!patternsOnly && noEdited(post) && autoExportNeedsProcessing(autoExport) ? AUTO_EXPORT_NEEDS_PROCESSING_TEXT : null);
 
   async function send(confirmAll: boolean) {
     const body = unifiedBody({
@@ -171,10 +180,11 @@ export function ImportUnifiedForm({
       periodDays: hasProfiles && period.ok ? period.days : null,
       minViews: hasProfiles && views.ok ? views.minViews : null,
       maxViews: hasProfiles && views.ok ? views.maxViews : null,
-      post,
+      post: effectivePost,
       presetId,
       edit,
-      autoExport,
+      autoExport: patternsOnly ? "off" : autoExport,
+      postTimes: patternsOnly || postTimes,
     });
     if (!body) return;
     setSubmitting(true);
@@ -258,6 +268,25 @@ export function ImportUnifiedForm({
           ))}
         </div>
         <div className="muted small">{MEDIA_CHOICES.find((c) => c.value === media)?.hint}</div>
+        <label className="row" style={{ gap: 8, marginTop: 8 }}>
+          <input
+            type="checkbox"
+            checked={patternsOnly || postTimes}
+            disabled={patternsOnly}
+            onChange={(e) => setPostTimes(e.target.checked)}
+          />
+          <span>Puxar horário dos posts (relatório de padrões)</span>
+        </label>
+        <div className="muted small">
+          {patternsOnly
+            ? "Sempre ligado em “Nada — só consultar padrões”."
+            : "Guarda o horário de cada publicação dos perfis para baixar à parte um relatório .zip de padrões (tempo médio entre posts e sequências)."}
+        </div>
+        {onlyLinks ? (
+          <div className="alert warn" role="status" style={{ marginTop: 8 }}>
+            <span className="grow">{PATTERNS_NEED_PROFILES_TEXT}</span>
+          </div>
+        ) : null}
       </div>
 
       <fieldset disabled={!hasProfiles} style={{ marginTop: 14, border: "none", padding: 0, minWidth: 0 }}>
@@ -346,17 +375,19 @@ export function ImportUnifiedForm({
         </div>
         {VIEWS_FILTER_ENABLED ? (
           <div className={`small${hasProfiles && !views.ok ? " tone-err" : " muted"}`}>
-            {!allowViews
-              ? "O filtro de visualizações só vale para vídeos: escolha “Somente vídeos”, “Somente capas” ou “Vídeos e capas”."
-              : hasProfiles && !views.ok
-                ? views.error
-                : "Vídeos fora do intervalo ou sem contagem de visualizações não são baixados. A capa usa as visualizações do vídeo."}
+            {patternsOnly
+              ? "Só padrões não usa filtro de visualizações. Quantidade e período continuam valendo (a quantidade conta publicações)."
+              : !allowViews
+                ? "O filtro de visualizações só vale para vídeos: escolha “Somente vídeos”, “Somente capas” ou “Vídeos e capas”."
+                : hasProfiles && !views.ok
+                  ? views.error
+                  : "Vídeos fora do intervalo ou sem contagem de visualizações não são baixados. A capa usa as visualizações do vídeo."}
           </div>
         ) : null}
       </fieldset>
 
-      {processing}
-      {!postProcessingApplies(media) && post !== "none" ? (
+      {patternsOnly ? null : processing}
+      {!patternsOnly && !postProcessingApplies(media) && post !== "none" ? (
         <div className="muted small">
           Com “{MEDIA_CHOICES.find((c) => c.value === media)?.label}” as mídias são só baixadas (sem processamento ou
           edição).
@@ -368,40 +399,48 @@ export function ImportUnifiedForm({
         ) : null
       ) : null}
 
-      <div style={{ marginTop: 12 }}>
-        <Field label="Exportar ZIP automaticamente ao concluir" htmlFor="imp-auto-export">
-          <select
-            id="imp-auto-export"
-            value={autoExport}
-            onChange={(e) => setAutoExport(e.target.value as AutoExportChoice)}
-          >
-            {AUTO_EXPORT_CHOICES.map((choice) => (
-              <option
-                key={choice.value}
-                value={choice.value}
-                disabled={noEdited(post) && autoExportNeedsProcessing(choice.value)}
-              >
-                {choice.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        {post === "none" ? (
-          <div className={`small${autoExportNeedsProcessing(autoExport) ? " tone-err" : " muted"}`}>
-            {AUTO_EXPORT_NEEDS_PROCESSING_TEXT}
-          </div>
-        ) : null}
-        {autoExport !== "off" ? (
-          <div className="muted small">
-            Quando a importação terminar (e o processamento dela também), um único ZIP é preparado; o botão de
-            baixar aparece no painel da importação.
-          </div>
-        ) : null}
-      </div>
+      {patternsOnly ? null : (
+        <div style={{ marginTop: 12 }}>
+          <Field label="Exportar ZIP automaticamente ao concluir" htmlFor="imp-auto-export">
+            <select
+              id="imp-auto-export"
+              value={autoExport}
+              onChange={(e) => setAutoExport(e.target.value as AutoExportChoice)}
+            >
+              {AUTO_EXPORT_CHOICES.map((choice) => (
+                <option
+                  key={choice.value}
+                  value={choice.value}
+                  disabled={noEdited(post) && autoExportNeedsProcessing(choice.value)}
+                >
+                  {choice.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {post === "none" ? (
+            <div className={`small${autoExportNeedsProcessing(autoExport) ? " tone-err" : " muted"}`}>
+              {AUTO_EXPORT_NEEDS_PROCESSING_TEXT}
+            </div>
+          ) : null}
+          {autoExport !== "off" ? (
+            <div className="muted small">
+              Quando a importação terminar (e o processamento dela também), um único ZIP é preparado; o botão de
+              baixar aparece no painel da importação.
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {planText ? (
+        <div className="small" role="status" style={{ marginTop: 12 }}>
+          {planText}
+        </div>
+      ) : null}
 
       <div className="row" style={{ marginTop: 16 }}>
         <button type="submit" className="btn btn-primary" disabled={problem !== null || submitting}>
-          {submitting ? <Spinner /> : null} Iniciar importação
+          {submitting ? <Spinner /> : null} {patternsOnly ? "Consultar padrões" : "Iniciar importação"}
         </button>
         {problem && key !== "" ? <span className="muted small">{problem}</span> : null}
       </div>

@@ -120,7 +120,9 @@ class SkippedProfile(BaseModel):
 # "videos": Reels e qualquer vídeo (inclusive de carrossel); "photos": fotos (inclusive de carrossel); "covers": só a
 # capa de cada vídeo/Reel; "videos_covers": vídeos + a capa de cada um; "all": todos os itens originais (carrossel
 # inteiro, na ordem) + a capa de cada vídeo. Itens de outro tipo são ignorados e contados em `filtered`.
-MediaChoice = Literal["videos", "photos", "covers", "videos_covers", "all"]
+# "none" (migration 0026): só padrões. A listagem dos perfis roda e grava o horário de cada publicação, mas nada é
+# baixado; exige `post_times: true` e ao menos um perfil.
+MediaChoice = Literal["videos", "photos", "covers", "videos_covers", "all", "none"]
 
 
 class AutoExportRequest(StrictModel):
@@ -157,9 +159,22 @@ class UnifiedImportRequest(ClassifyRequest):
     edit: EditSettings | None = None
     # Exportação ZIP automática ao concluir (migration 0023); null = sem exportação automática.
     auto_export: AutoExportRequest | None = None
+    # "Puxar horário dos posts" (migration 0026): grava o horário de cada publicação listada nos perfis, para o
+    # relatório de padrões (GET /api/post-times/report.zip). Obrigatório com `media: "none"`.
+    post_times: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def _consistent(self) -> UnifiedImportRequest:
+        if self.media == "none":
+            if not self.post_times:
+                raise ValueError("\"Nada — só consultar padrões\" exige `post_times: true` (puxar horário dos posts).")
+            if self.post_processing != "none" or self.preset_id is not None or self.edit is not None:
+                raise ValueError("Com \"Nada — só consultar padrões\" nada é baixado: o pós-processamento tem de ser "
+                                 "\"none\".")
+            if self.auto_export is not None:
+                raise ValueError("Com \"Nada — só consultar padrões\" nada é baixado: não há exportação automática.")
+            if self.min_views is not None or self.max_views is not None:
+                raise ValueError("Com \"Nada — só consultar padrões\" os filtros de visualizações não valem.")
         if self.min_views is not None and self.max_views is not None and self.max_views < self.min_views:
             raise ValueError("O máximo de visualizações precisa ser maior ou igual ao mínimo.")
         if (self.post_processing == "edit") != (self.edit is not None):
@@ -339,6 +354,11 @@ class BatchOut(BaseModel):
     media: MediaChoice | None = None
     # Exportação ZIP automática ao concluir (migration 0023); None sem ela. Filho de grupo: a do grupo.
     auto_export: AutoExportOut | None = None
+    # Horário dos posts (migration 0026): o pedido marcou "Puxar horário dos posts" e quantas publicações já foram
+    # gravadas (relatório: GET /api/post-times/report.zip?batch_id=). `media_set` "none" = lote só de padrões.
+    post_times: bool = False
+    post_times_count: int = 0
+    media_set: MediaChoice | None = None
     # Como o lote foi criado: "profile" (importação por perfil), "links" (importação por link) ou None (Biblioteca).
     import_mode: Literal["profile", "links"] | None = None
     # Só em lote por link: quantos links há e em que estado (lista: GET /api/batches/{id}/links).
@@ -403,6 +423,10 @@ class ImportGroupOut(BaseModel):
     views_filter: ViewsFilterOut | None = None
     media: MediaChoice | None = None
     auto_export: AutoExportOut | None = None
+    # Horário dos posts (migration 0026): soma dos filhos (relatório: GET /api/post-times/report.zip?group_id=).
+    post_times: bool = False
+    post_times_count: int = 0
+    media_set: MediaChoice | None = None
     # Última exportação para pasta CONCLUÍDA do grupo inteiro (None se nunca foi exportado).
     last_export: LastExport | None = None
 

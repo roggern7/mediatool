@@ -160,6 +160,7 @@ class CompositeInstagramDownloader(InstagramDownloader):
         posted_after: str | None = None,
         max_views: int | None = None,
         covers: bool = False,
+        on_post: Callable[[dict], None] | None = None,
     ) -> Iterator[RemoteMedia]:
         # resume/on_checkpoint/min_views/max_views/posted_after só são repassados quando informados (providers antigos
         # não os conhecem). `covers` não é repassado: só decide que a listagem é do provider web.
@@ -182,7 +183,9 @@ class CompositeInstagramDownloader(InstagramDownloader):
             self._listing_source = self.fallback
             return self.fallback.iter_profile_media(username, content, limit, cancel=cancel, **extra)
         self._listing_source = self.primary
-        primary = self.primary.iter_profile_media(username, content, limit, cancel=cancel, **extra)
+        # `on_post` (horário dos posts, migration 0026): só o provider web fornece; o gallery-dl não recebe.
+        primary_extra = extra if on_post is None else {**extra, "on_post": on_post}
+        primary = self.primary.iter_profile_media(username, content, limit, cancel=cancel, **primary_extra)
         if self.strategy == "web" or resume is not None or web_only(content, limit, views, posted_after,
                                                                        covers=covers):
             # Seção 9 (M5): com resume não há fallback (o gallery-dl recomeçaria do início, fora do checkpoint).
