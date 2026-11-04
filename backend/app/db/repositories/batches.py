@@ -436,6 +436,20 @@ class BatchRepository:
         return self.db.scalar("SELECT MIN(taken_at) FROM jobs WHERE batch_id = ? AND taken_at IS NOT NULL",
                               (batch_id,))
 
+    def grid_window_start(self, batch_id: int) -> str | None:
+        """Início da janela que a grade cobriu quando parou por LIMITE: `taken_at` do ÚLTIMO item listado da grade
+        (job com página de listagem, maior id). Os fixados vêm primeiro na grade, então o último listado é o mais antigo
+        NÃO fixado; o MIN(taken_at) pegaria um fixado antigo (visto no real: @natgeo, fixados de 15/10 e 20/10)."""
+        return self.db.scalar(
+            "SELECT taken_at FROM jobs WHERE batch_id = ? AND listing_page_index IS NOT NULL AND taken_at IS NOT NULL"
+            " ORDER BY id DESC LIMIT 1", (batch_id,))
+
+    def grid_times_window_start(self, batch_id: int) -> str | None:
+        """Mesma janela pelos horários gravados da grade (`post_times` com source NULL), sem os fixados."""
+        return self.db.scalar(
+            "SELECT MIN(taken_at) FROM post_times WHERE batch_id = ? AND source IS NULL AND taken_at IS NOT NULL"
+            " AND (pinned IS NULL OR pinned = 0)", (batch_id,))
+
     def post_times_counts(self, batch_ids: list[int]) -> dict[int, int]:
         if not batch_ids:
             return {}

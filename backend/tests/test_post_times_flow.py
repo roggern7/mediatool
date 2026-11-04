@@ -334,7 +334,8 @@ def test_report_keeps_only_the_latest_n_unpinned(harness_factory):
     h = harness_factory(downloader=dl)
     batch_id = start(h, inputs=["@perfil_teste"], media="none", post_times=True, limit=3)["batch_ids"][0]
     h.run_all()
-    assert h.batch(batch_id)["post_times_count"] == 5
+    # ROLD é mais antigo que a janela da grade (parada por limite): fica fora (pode estar na grade além do limite).
+    assert h.batch(batch_id)["post_times_count"] == 4 and "ROLD" not in sources(h, batch_id)
     response = h.client.get("/api/post-times/report.zip", params={"batch_id": batch_id})
     assert response.status_code == 200, response.text
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
@@ -417,3 +418,25 @@ def test_rate_limited_in_reels_step_keeps_grid(harness_factory):
     assert job_codes(h, batch_id) == {"V0", "V1", "R0"}
     assert batch["status"] != "failed" and batch["error_code"] is None
     assert batch["listing_state"] == "done" and "A aba Reels não pôde ser lida" in batch["error_message"]
+
+
+def test_reels_in_grid_and_tab_never_duplicate_even_with_old_pinned_and_wrong_in_grid_flag(harness_factory):
+    """Caso comum (visto no real em @natgeo): os Reels estão na grade E na aba, a aba diz `in_grid` False para todos,
+    e a grade começa com um fixado antigo. Grade parada por limite (3): PIN (fixado antigo), V0, V1. A aba traz V0 e V1
+    (já na grade), V2 (na grade, além do limite: mais antigo que o último listado) e dois só da aba dentro da janela."""
+    grid = [video("PIN", "2026-09-01T10:00:00Z"), video("V0", "2026-10-25T10:00:00Z"),
+            video("V1", "2026-10-24T10:00:00Z"), video("V2", "2026-10-23T10:00:00Z")]
+    tab = [reel("RNEW", "2026-10-26T10:00:00Z", in_grid=False), reel("V0", "2026-10-25T10:00:00Z", in_grid=False),
+           reel("RMID", "2026-10-24T12:00:00Z", in_grid=False), reel("V1", "2026-10-24T10:00:00Z", in_grid=False),
+           reel("V2", "2026-10-23T10:00:00Z", in_grid=False), reel("ROLD", "2026-10-20T10:00:00Z", in_grid=False)]
+    dl = reels_dl(grid, tab)
+    h = harness_factory(downloader=dl)
+    batch_id = start(h, inputs=["@perfil_teste"], media="videos", limit=3, post_times=True)["batch_ids"][0]
+    h.run_all()
+    codes = [row["source_post_id"] for row in h.ctx.db.fetchall(
+        "SELECT source_post_id FROM jobs WHERE batch_id = ?", (batch_id,))]
+    assert sorted(codes) == sorted({"PIN", "V0", "V1", "RNEW", "RMID"}), codes   # sem repetição, sem V2/ROLD
+    assert sorted(code for code, _ in dl.resolved) == ["RMID", "RNEW"]
+    times = sources(h, batch_id)
+    assert times["V0"][1] is None and times["V1"][1] is None   # horário exato da grade preservado
+    assert "V2" not in {c for c, (_, src) in times.items() if src} and "ROLD" not in times

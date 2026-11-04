@@ -1317,9 +1317,16 @@ class ImportRunner:
         grid_codes = set(timing_codes)
         if download:
             grid_codes |= self.ctx.batches.job_post_codes(batch_id)
-        oldest = None
-        if download and grid_end == "limit":
-            oldest = export_time.publication_moment(self.ctx.batches.oldest_job_taken_at(batch_id) or "")
+        # Grade parada por LIMITE: ela só está completa a partir do último item listado; Reel da aba mais antigo que
+        # isso pode estar na grade além do limite (o `is_in_profile_grid` da aba NÃO é confiável: False em todos os
+        # Reels de @natgeo, que estão na grade). Fora da janela: não entra (nem no download nem nos horários).
+        oldest = timing_oldest = None
+        if grid_end == "limit":
+            if download:
+                oldest = export_time.publication_moment(self.ctx.batches.grid_window_start(batch_id) or "")
+            if timing:
+                timing_oldest = export_time.publication_moment(
+                    self.ctx.batches.grid_times_window_start(batch_id) or "")
         min_views = max_views = None
         if download and (batch.get("min_views") is not None or batch.get("max_views") is not None):
             from app.services.import_service import MIN_VIEWS_ENABLED
@@ -1351,6 +1358,10 @@ class ImportRunner:
                 if not isinstance(code, str) or not code:
                     continue
                 pinned = record.get("pinned") if isinstance(record.get("pinned"), bool) else None
+                if not timing_done and timing_oldest is not None and pinned is not True:
+                    moment = export_time.publication_moment(record.get("taken_at") or "")
+                    if moment is None or moment < timing_oldest:
+                        timing_done = True   # mais antigo que a janela da grade: fora das N mais recentes
                 if not timing_done:
                     if code not in timing_codes:
                         timing_codes.add(code)
