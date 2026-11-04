@@ -113,7 +113,7 @@ class FakeGraphQL:
             if number > len(self.pages):
                 return
             has_next = number < len(self.pages)
-            count = max(1, min(page_size, max_media)) if number == 1 and after is None and max_media else page_size
+            count = page_size   # a 1a página também é cheia (graphql.iter_profile_posts)
             end = f"FAKE_CURSOR_{number}" if has_next else None
             self.current_page = PageState(number, after, count, end, has_next, 0)
             if on_page is not None:

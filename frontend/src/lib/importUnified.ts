@@ -24,16 +24,62 @@ export const MEDIA_CHOICES: { value: MediaChoice; label: string; hint: string }[
     label: "Todas — fotos, vídeos e capas",
     hint: "Todos os itens de cada publicação (carrossel inteiro, na ordem) e a capa de cada vídeo.",
   },
+  {
+    value: "none",
+    label: "Nada — só consultar padrões",
+    hint: "Não baixa nenhuma mídia: só lê o horário das publicações de cada perfil para o relatório de padrões (.zip).",
+  },
 ];
 
 /** Rótulo curto do tipo de mídia de um lote/grupo ("Somente fotos", "Vídeos e capas"...). */
 export function mediaLabel(media: MediaChoice): string {
+  if (media === "none") return "Só padrões";
   return media === "all" ? "Todas as mídias" : (MEDIA_CHOICES.find((c) => c.value === media)?.label ?? media);
 }
 
 /** Tipos com fotos ou capas: o pós-processamento (preset/edição) vale só para os vídeos originais. */
 export function postProcessingApplies(media: MediaChoice): boolean {
-  return media !== "covers" && media !== "photos";
+  return media !== "covers" && media !== "photos" && media !== "none";
+}
+
+/** Lote/grupo só de padrões ("Nada — só consultar padrões"): nada foi baixado. */
+export function isPatternsOnly(x: { media?: MediaChoice | null; media_set?: MediaChoice | null }): boolean {
+  return x.media === "none" || x.media_set === "none";
+}
+
+/** Há horários gravados para o relatório de padrões deste lote/grupo. */
+export function hasPostTimesReport(x: { post_times?: boolean; post_times_count?: number }): boolean {
+  return !!x.post_times && (x.post_times_count ?? 0) > 0;
+}
+
+/** "37 publicações analisadas". */
+export function analyzedPostsText(n: number): string {
+  return `${formatCount(n)} ${n === 1 ? "publicação analisada" : "publicações analisadas"}`;
+}
+
+/** GET /api/post-times/report.zip do lote ou do grupo. */
+export function postTimesReportUrl(target: { kind: "batch" | "group"; id: number }): string {
+  return `/api/post-times/report.zip?${target.kind === "group" ? "group_id" : "batch_id"}=${target.id}`;
+}
+
+export const PATTERNS_NEED_PROFILES_TEXT =
+  "“Nada — só consultar padrões” vale só para perfis: links de publicações não têm padrão de postagem. " +
+  "Inclua ao menos um perfil na lista.";
+
+/** O que o pedido vai fazer com o horário dos posts; null sem horário pedido. */
+export function postTimesPlanText(media: MediaChoice, postTimes: boolean, hasLinks: boolean): string | null {
+  const links = hasLinks ? " Links de publicações não têm padrão de postagem" : "";
+  if (media === "none") {
+    return (
+      "Nenhuma mídia será baixada: só o horário das publicações de cada perfil é lido, para o relatório de padrões " +
+      `(.zip).${links ? `${links} e ficam de fora.` : ""}`
+    );
+  }
+  if (!postTimes) return null;
+  return (
+    "As mídias são baixadas e o horário das publicações de cada perfil é guardado para o relatório de padrões " +
+    `(.zip), baixado à parte.${links ? `${links}: eles só baixam as mídias.` : ""}`
+  );
 }
 
 /** Exportação ZIP automática ao concluir: desligada ou o conteúdo escolhido. */
@@ -146,26 +192,34 @@ export interface UnifiedForm {
   edit: EditSettings | null;
   /** Exportação ZIP automática ao concluir ("off" ou ausente = não exportar). */
   autoExport?: AutoExportChoice;
+  /** Puxar horário dos posts (sempre ligado com "none"). */
+  postTimes?: boolean;
 }
 
-/** Corpo de POST /api/imports/start. Filtros só entram quando ligados (e visualizações só com vídeos/capas). */
+/**
+ * Corpo de POST /api/imports/start. Filtros só entram quando ligados (e visualizações só com vídeos/capas). Com
+ * "none" (só padrões): `post_times` ligado e sem pós-processamento nem exportação automática (o backend recusa).
+ */
 export function unifiedBody(form: UnifiedForm): UnifiedImportRequest | null {
   if (!form.quantity.ok) return null;
+  const patternsOnly = form.media === "none";
+  const post = patternsOnly ? "none" : form.post;
   const body: UnifiedImportRequest = {
     inputs: entriesOf(form.text),
     media: form.media,
     limit: form.quantity.limit,
     confirm_all: form.quantity.limit === null && form.confirmAll,
-    post_processing: form.post,
+    post_processing: post,
   };
+  if (patternsOnly || form.postTimes) body.post_times = true;
   if (form.periodDays !== null) body.posted_within_days = form.periodDays;
   if (viewsAllowed(form.media)) {
     if (form.minViews !== null) body.min_views = form.minViews;
     if (form.maxViews !== null) body.max_views = form.maxViews;
   }
-  if (form.post === "preset" && form.presetId !== null) body.preset_id = form.presetId;
-  if (form.post === "edit" && form.edit) body.edit = form.edit;
-  if (form.autoExport && form.autoExport !== "off") body.auto_export = { content: form.autoExport };
+  if (post === "preset" && form.presetId !== null) body.preset_id = form.presetId;
+  if (post === "edit" && form.edit) body.edit = form.edit;
+  if (!patternsOnly && form.autoExport && form.autoExport !== "off") body.auto_export = { content: form.autoExport };
   return body;
 }
 

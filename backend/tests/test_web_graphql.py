@@ -167,10 +167,11 @@ def test_doc_id_override_from_constructor(boot, monkeypatch):
     assert http.requests[0][1]["doc_id"] == "1234567890"
 
 
-def test_max_media_reduces_first_page_count(boot):
+def test_first_page_is_always_full_even_with_small_max_media(boot):
+    """count pequeno na 1a página volta vazio no real quando o perfil tem posts fixados (2026-11-04)."""
     http = FakeHttp(ok("page1_has_next.json"), ok("page2_last.json"))
     list(gql(http, boot).iter_profile_posts("perfil_fake", max_media=1, page_size=12))
-    assert http.variables(0)["data"]["count"] == 1
+    assert http.variables(0)["data"]["count"] == 12
     assert http.variables(1)["data"]["count"] == 12
 
 

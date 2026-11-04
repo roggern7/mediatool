@@ -19,11 +19,11 @@ def db(tmp_path):
     database.close_all()
 
 
-def old_migrations(tmp_path):
-    folder = tmp_path / "migrations_0024"
+def old_migrations(tmp_path, before: str = "0025"):
+    folder = tmp_path / f"migrations_before_{before}"
     folder.mkdir()
     for path in MIGRATIONS_DIR.glob("*.sql"):
-        if path.name < "0025":
+        if path.name < before:
             shutil.copy(path, folder)
     return folder
 
@@ -59,7 +59,8 @@ def test_database_at_version_24_with_data_migrates_without_changing_counts(tmp_p
     before = counts(db)
     schema_before = {row["sql"] for row in db.fetchall("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL")}
 
-    assert apply_migrations(db) == [25]
+    # Só até a 0025 (a 0026 acrescenta colunas a batches/import_groups e muda o SQL delas).
+    assert apply_migrations(db, old_migrations(tmp_path, "0026")) == [25]
     assert counts(db) == before
     assert schema_before <= {row["sql"] for row in db.fetchall("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL")}
     assert {"profile_analyses", "profile_analysis_items"} <= table_names(db)
@@ -71,6 +72,7 @@ def test_indexes_come_and_go_with_the_tables(db):
     assert {"ix_profile_items_state", "ix_profile_items_position", "ix_profile_items_open"} <= names
     partial = db.scalar("SELECT sql FROM sqlite_master WHERE name = 'ix_profile_items_open'")
     assert "WHERE state IN ('pending', 'running')" in partial
+    revert_migration(db, 26)   # só a última aplicada pode ser revertida (0026: horário dos posts)
     revert_migration(db, 25)
     assert db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'ix_profile_items_%'") == 0
 
@@ -82,13 +84,14 @@ def test_up_down_up_keeps_old_data(db):
     db.execute("INSERT INTO profile_analysis_items (analysis_id, position, username) VALUES (1, 1, 'a1')")
     before = counts(db)
 
+    revert_migration(db, 26)   # só a última aplicada pode ser revertida (0026: horário dos posts)
     revert_migration(db, 25)
     assert schema_version(db) == 24 and counts(db) == before
     assert not {"profile_analyses", "profile_analysis_items"} & table_names(db)
     assert db.scalar("SELECT COUNT(*) FROM schema_migrations WHERE version = 25") == 0
 
-    assert apply_migrations(db) == [25]
-    assert schema_version(db) == 25 and counts(db) == before
+    assert apply_migrations(db) == [25, 26]
+    assert schema_version(db) == 26 and counts(db) == before
     assert db.scalar("SELECT COUNT(*) FROM profile_analyses") == 0
 
 
@@ -102,7 +105,7 @@ def test_only_latest_applied_migration_can_be_reverted(tmp_path, db):
     (folder / "down" / "0024_import_requests.down.sql").write_text("DROP TABLE settings;", encoding="utf-8")
     with pytest.raises(RuntimeError, match="última"):
         revert_migration(db, 24, folder)
-    assert schema_version(db) == 25 and "settings" in table_names(db)
+    assert schema_version(db) == 26 and "settings" in table_names(db)
 
 
 def test_revert_requires_down_file(tmp_path, db):

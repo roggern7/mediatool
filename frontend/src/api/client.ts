@@ -424,6 +424,37 @@ export function uploadLocalVideo(
   });
 }
 
+/**
+ * Baixa um arquivo pequeno gerado na hora (ex.: relatório de padrões .zip). Busca primeiro para mostrar o erro do
+ * backend (404 etc.) em vez de navegar para uma página de erro; com sucesso, salva pelo download do navegador.
+ */
+export async function downloadGeneratedFile(url: string, fallbackName: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(url, { credentials: "same-origin", cache: "no-store" });
+  } catch {
+    throw new ApiError(0, "backend_offline", "Não foi possível falar com o backend local.");
+  }
+  if (!response.ok) {
+    const payload: unknown = await response.json().catch(() => null);
+    const { detail, code } = extractDetail(payload);
+    const finalCode = code ?? `http_${response.status}`;
+    throw new ApiError(response.status, finalCode, errorMessageFor(finalCode, response.status, detail), detail);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const name = /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? fallbackName;
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = name;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+}
+
 export function messageOf(err: unknown): string {
   if (err instanceof ApiError) return err.message;
   return "Erro inesperado.";

@@ -44,8 +44,11 @@ describe("errorMessageFor", () => {
       "A lista é grande demais para enviar de uma vez. Divida em partes menores ou cole só os nomes de usuário, sem a URL completa.",
     );
   });
-  it("not_supported_by_provider orienta a trocar o método de importação", () => {
-    expect(errorMessageFor("not_supported_by_provider", 422, "x")).toBe(
+  it("not_supported_by_provider prioriza a mensagem do backend e tem fallback fixo", () => {
+    expect(errorMessageFor("not_supported_by_provider", 422, "Só padrões exige o método web.")).toBe(
+      "Só padrões exige o método web.",
+    );
+    expect(errorMessageFor("not_supported_by_provider", 422, null)).toBe(
       "“Todos” e “Publicações do feed” exigem o método de importação web. Troque o método em Configurações > Instagram.",
     );
   });

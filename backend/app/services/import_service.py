@@ -152,7 +152,7 @@ def create_import(
     ctx: AppContext, *, profile: str, content_type: str, limit: int | None, preset_id: int | None, process: bool,
     edit: EditSettings | None = None, min_views: int | None = None, posted_within_days: int | None = None,
     max_views: int | None = None, media_role: str = "original", media_set: str | None = None,
-    auto_export_content: str | None = None,
+    auto_export_content: str | None = None, post_times: bool = False, patterns_only: bool = False,
 ) -> int:
     # `limit=None` = "Todos": a listagem vai até o fim real do perfil (docs/BATCH_ROBUSTNESS.md, seção 0.1).
     # `min_views`: filtro de visualizações mínimas (só vídeos; None = desligado). `posted_within_days`: período de
@@ -184,6 +184,8 @@ def create_import(
             media_role=media_role,
             media_set=media_set,
             auto_export_content=auto_export_content,
+            post_times=post_times,
+            patterns_only=patterns_only,
             **fields,
             **filter_fields(min_views, posted_within_days, max_views),
         )
@@ -261,7 +263,8 @@ def create_import_group(
     ctx: AppContext, *, profiles: list[str], content_type: str, limit: int | None, preset_id: int | None,
     process: bool, edit: EditSettings | None = None, min_views: int | None = None,
     posted_within_days: int | None = None, max_views: int | None = None, media_role: str = "original",
-    media_set: str | None = None, auto_export_content: str | None = None,
+    media_set: str | None = None, auto_export_content: str | None = None, post_times: bool = False,
+    patterns_only: bool = False,
 ) -> tuple[int, list[dict[str, str]], int]:
     """Uma importação pai e um lote filho por perfil (na ordem da lista; `limit`, `min_views` e o período valem POR
     PERFIL). Retorna (id do grupo, perfis pulados por já terem importação ativa, repetições removidas). Com `edit`, o
@@ -285,6 +288,8 @@ def create_import_group(
         "requested_limit": limit,
         "media_role": media_role,
         "media_set": media_set,
+        "post_times": post_times,
+        "patterns_only": patterns_only,
         **post_processing(ctx, preset_id=preset_id, process=process, edit=edit),
     }
     # Um único corte para o grupo e todos os filhos (calculado uma vez, aqui).
@@ -412,6 +417,8 @@ MEDIA_CHOICES: dict[str, tuple[str, str]] = {
     "covers": ("videos", "cover"),
     "videos_covers": ("videos", "original"),
     "all": ("all", "original"),
+    # Só padrões (migration 0026): lista tudo (nível de publicação) e não baixa nada.
+    "none": ("all", "original"),
 }
 # Conjuntos com capa: só o método web entrega a capa do vídeo sozinha (como "Somente capas" na 0021).
 COVER_SETS = frozenset({"covers", "videos_covers", "all"})
@@ -429,6 +436,21 @@ VIEWS_FILTER_MEDIA_MESSAGE = (
 AUTO_EXPORT_NEEDS_PROCESSING_MESSAGE = (
     "Exportar \"editados\" ou \"originais e editados\" exige processar ou editar depois de baixar. Escolha um "
     "pós-processamento ou exporte só os originais."
+)
+
+PATTERNS_NEED_PROFILES_MESSAGE = (
+    "\"Nada — só consultar padrões\" analisa o horário dos posts de perfis: informe ao menos um perfil (links de "
+    "publicações não têm padrão de postagem)."
+)
+PATTERNS_WEB_ONLY_MESSAGE = (
+    "\"Nada — só consultar padrões\" exige o método de importação web (o gallery-dl não entrega o horário das "
+    "publicações). Troque o método em Configurações."
+)
+PATTERNS_LINKS_IGNORED_NOTE = (
+    "Só padrões: as publicações por link foram ignoradas (nada é baixado e link não tem padrão de postagem)."
+)
+LINK_POST_TIMES_IGNORED_NOTE = (
+    "O horário dos posts vale só para perfis; as publicações por link foram importadas sem ele."
 )
 
 LINK_FILTERS_IGNORED_NOTE = (
@@ -531,7 +553,19 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
         raise AppError(422, "no_valid_inputs", "Nenhuma entrada é um link de publicação ou um perfil válido.",
                        extra={"invalid": classified["invalid"], "duplicates": classified["duplicates"]})
     content_type, media_role = MEDIA_CHOICES[req.media]
-    media_set = req.media
+    # Só padrões (migration 0026): `media_set` fica NULL no banco (a coluna da 0023 não conhece "none") e o modo vai
+    # em `patterns_only`. Validações do pedido em UnifiedImportRequest; aqui só o que depende das entradas/método.
+    patterns_only = req.media == "none"
+    post_times = bool(getattr(req, "post_times", False)) or patterns_only
+    if patterns_only and not profiles:
+        raise AppError(422, "patterns_need_profiles", PATTERNS_NEED_PROFILES_MESSAGE)
+    if patterns_only and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl":
+        raise AppError(422, "not_supported_by_provider", PATTERNS_WEB_ONLY_MESSAGE)
+    media_set = None if patterns_only else req.media
+    ignored_links = 0
+    if patterns_only:
+        # Nada é baixado: publicações por link (sem padrão de postagem) ficam de fora, com aviso em `notes`.
+        ignored_links, links = len(links), []
     views = req.min_views is not None or req.max_views is not None
     # Visualizações com fotos ("Somente fotos", "Todas") só são recusadas quando há perfis: para links os filtros de
     # perfil são ignorados (avisado em `notes`).
@@ -569,6 +603,7 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
     multipart = bool(profiles) and bool(links) and auto_export is not None
     common = {"preset_id": preset_id, "process": process, "edit": edit, "media_set": media_set,
               "auto_export_content": None if multipart else auto_export}
+    profile_extra = {"post_times": post_times, "patterns_only": patterns_only}
     batch_ids: list[int] = []
     group_id: int | None = None
     links_batch_id: int | None = None
@@ -578,10 +613,11 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
     with ctx.db.transaction():
         if len(profiles) == 1:
             batch_ids.append(create_import(ctx, profile=profiles[0], content_type=content_type, limit=req.limit,
-                                           media_role=media_role, **common, **filters))
+                                           media_role=media_role, **common, **filters, **profile_extra))
         elif profiles:
             group_id, skipped, _ = create_import_group(ctx, profiles=profiles, content_type=content_type,
-                                                       limit=req.limit, media_role=media_role, **common, **filters)
+                                                       limit=req.limit, media_role=media_role, **common, **filters,
+                                                       **profile_extra)
         if links:
             links_batch_id, _ = create_import_links(ctx, links=[link["url"] for link in links],
                                                     content_type=content_type, media_role=media_role, **common)
@@ -593,6 +629,10 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
     notes: list[str] = []
     if links and (views or req.posted_within_days is not None):
         notes.append(LINK_FILTERS_IGNORED_NOTE)
+    if links and post_times:
+        notes.append(LINK_POST_TIMES_IGNORED_NOTE)
+    if patterns_only and ignored_links:
+        notes.append(PATTERNS_LINKS_IGNORED_NOTE)
     logger.info("Importação unificada: %s perfis, %s publicações, %s inválidas, mídia %s", len(profiles), len(links),
                 len(classified["invalid"]), req.media)
     return {"batch_ids": batch_ids, "group_id": group_id, "links_batch_id": links_batch_id,

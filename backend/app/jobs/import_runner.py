@@ -99,6 +99,9 @@ EMPTY_FIRST_PAGE_MESSAGE = (
     "O Instagram não devolveu nenhuma publicação deste perfil agora (perfil sem posts, privado ou limite temporário). "
     "Tente de novo mais tarde."
 )
+# Lote só de padrões (migration 0026): fim da listagem sem nenhum download.
+PATTERNS_DONE_MESSAGE = "{count} publicações analisadas (só padrões: nada foi baixado)."
+PATTERNS_DONE_ONE_MESSAGE = "1 publicação analisada (só padrões: nada foi baixado)."
 # O provider encerrou o trecho sem erro, sem fim real do perfil e sem avançar nenhuma página: não é fim do perfil.
 LISTING_STALLED_MESSAGE = (
     "A listagem parou antes do fim do perfil sem avançar. A importação não foi dada como concluída e o ponto de "
@@ -186,6 +189,17 @@ def _roles(batch: dict[str, Any], item: RemoteMedia) -> list[str]:
     return roles
 
 
+def _post_times(batch: dict[str, Any]) -> bool:
+    """Lote que grava o horário de cada publicação listada (migration 0026)."""
+    return bool(batch.get("post_times")) or bool(batch.get("patterns_only"))
+
+
+def _patterns_only(batch: dict[str, Any]) -> bool:
+    """Lote só de padrões (`media: "none"`, migration 0026): lista e grava horários; nenhum job, nada baixado. O
+    limite pedido conta PUBLICAÇÕES gravadas."""
+    return bool(batch.get("patterns_only"))
+
+
 def _primary_role(batch: dict[str, Any]) -> str:
     """Papel que conta na quantidade pedida ("Últimas N"): a capa em "Somente capas"; o original nos demais (o vídeo
     e a capa dele contam como UM item)."""
@@ -230,6 +244,8 @@ class _Chunk:
         self.anomaly = False  # o erro do trecho é um fim anômalo da paginação (não é fim do perfil)
         self.link_position: int | None = None  # lote por link: link que estava sendo pedido quando o trecho parou
         self.diagnostic = ""  # diagnóstico seguro do erro do trecho (safe_diagnostic), só para o log/mensagem
+        self.posts: list[dict[str, Any]] = []  # horários de publicações ainda não gravados (migration 0026)
+        self.post_codes: set[str] | None = None  # códigos já gravados ou no buffer (sem duplicar no trecho)
 
     @property
     def progressed(self) -> bool:
@@ -339,7 +355,8 @@ class ImportRunner:
             waiting = batch["listing_state"] == "waiting_backpressure"
             pending = self.ctx.jobs.pending_ingest_count(batch_id)
             full = (pending >= RESUME_PENDING_INGEST) if waiting else (pending + PAGE_ESTIMATE > MAX_PENDING_INGEST)
-            if full or global_full or self._process_backlog_full(batch):
+            # Lote só de padrões não cria jobs: nenhum backpressure de downloads o segura.
+            if not _patterns_only(batch) and (full or global_full or self._process_backlog_full(batch)):
                 if not waiting:
                     self._set_listing(batch_id, listing_state="waiting_backpressure")
                 if group_id is not None:
@@ -475,7 +492,10 @@ class ImportRunner:
             self._current_thread = threading.get_ident()
         resume = self._checkpoint_from(batch)
         limit = batch["requested_limit"]
-        created_before = self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch))
+        patterns = _patterns_only(batch)
+        # Só padrões: o "criado" do lote é a publicação gravada (o limite conta publicações, não mídias).
+        created_before = (self._post_times_count(batch_id) if patterns
+                          else self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch)))
         remaining = None if limit is None else max(0, limit - created_before)
         logger.info(
             "Lote %s: listando perfil %s (conteúdo=%s, limite=%s, %s%s)",
@@ -503,7 +523,7 @@ class ImportRunner:
         buffer: list[RemoteMedia] = []
         yielded = 0
         chunk_limit: int | None = None
-        if remaining is not None:
+        if remaining is not None and not patterns:   # só padrões: o provider não para por mídias (o runner para)
             # Itens da página retomada que já viraram jobs voltam repetidos e contam no limite do provider.
             # Recomeço da página 1 com jobs no lote (restart-listing): todos podem voltar repetidos.
             repeats = (
@@ -522,7 +542,7 @@ class ImportRunner:
                     chunk.page_estimate = max(chunk.page_estimate, item.listing_ref.page_size)
             chunk.page_estimate = max(chunk.page_estimate, chunk.page_items)
             chunk.page_items = 0
-            chunk.created += self._flush(batch, buffer, checkpoint)
+            chunk.created += self._flush(batch, buffer, checkpoint, chunk.posts)
             if self._is_cancelled(batch_id):
                 cancel.set()
                 return
@@ -538,9 +558,9 @@ class ImportRunner:
             chunk.global_pending = self.ctx.batches.pending_ingest_global()
             if limit is not None and created_before + chunk.created >= limit:
                 chunk.stop = "limit"
-            elif (chunk.pending + chunk.page_estimate > MAX_PENDING_INGEST
-                  or chunk.global_pending + chunk.page_estimate > MAX_PENDING_INGEST_GLOBAL
-                  or self._process_backlog_full(batch)):
+            elif not patterns and (chunk.pending + chunk.page_estimate > MAX_PENDING_INGEST
+                                   or chunk.global_pending + chunk.page_estimate > MAX_PENDING_INGEST_GLOBAL
+                                   or self._process_backlog_full(batch)):
                 # A próxima página passaria do teto de ingests pendentes: para na fronteira da página.
                 chunk.stop = "backpressure"
             elif instagram_paused(self.ctx.worker):
@@ -582,9 +602,9 @@ class ImportRunner:
             with self._lock:
                 self._current = None
                 self._current_thread = None
-        if not self._is_cancelled(batch_id) and buffer:
+        if not self._is_cancelled(batch_id) and (buffer or chunk.posts):
             # Itens entregues depois do último checkpoint (página parcial): o índice único deduplica na retomada.
-            chunk.created += self._flush(batch, buffer, None)
+            chunk.created += self._flush(batch, buffer, None, chunk.posts)
         # Erro numa página sem checkpoint: o provider manda junto os descartes dela até o último nó consumido
         # (inclusive depois do último item entregue, ou sem item nenhum). Ficam como estado da página aberta:
         # página refeita sobrescreve/apaga; listagem encerrada ou cancelada soma uma vez.
@@ -633,6 +653,26 @@ class ImportRunner:
             extra["posted_after"] = batch["posted_after"]
         if _covers(batch):
             extra["covers"] = True   # só decide o provider (capas só pelo método web)
+        patterns = _patterns_only(batch)
+        if _post_times(batch):
+            # Horário dos posts (migration 0026): um registro por publicação, gravado com o checkpoint da página (ou
+            # no fim do trecho). Página refeita na retomada não duplica (códigos já gravados + UNIQUE no banco).
+            if chunk.post_codes is None:
+                chunk.post_codes = self.ctx.batches.post_time_codes(batch_id)
+            seen = chunk.post_codes
+
+            def on_post(record: dict[str, Any]) -> None:
+                code = record.get("code")
+                if not code or code in seen:
+                    return
+                seen.add(code)
+                chunk.posts.append(record)
+                if patterns and limit is not None and len(seen) >= limit:
+                    # Só padrões: N publicações gravadas = quantidade atingida; o provider para no próximo nó.
+                    chunk.stop = "limit"
+                    cancel.set()
+
+            extra["on_post"] = on_post
         items = self.ctx.downloader_factory().iter_profile_media(
             batch["source_profile"], batch["content_type"], chunk_limit, cancel=cancel, resume=resume,
             on_checkpoint=on_checkpoint, **extra,
@@ -643,11 +683,13 @@ class ImportRunner:
                     break
                 yielded += 1
                 chunk.page_items += 1
+                if patterns:
+                    continue   # só padrões: o item não vira job (o horário já veio por `on_post`)
                 if (chunk.pending + len(buffer) + 1 > MAX_PENDING_INGEST
                         or chunk.global_pending + len(buffer) + 1 > MAX_PENDING_INGEST_GLOBAL):
                     # Backpressure rígido: grava o que já veio e reconta; se o próximo item passaria do teto, para
                     # no meio da página (a retomada refaz a página do último checkpoint; o índice único deduplica).
-                    chunk.created += self._flush(batch, buffer, None)
+                    chunk.created += self._flush(batch, buffer, None, chunk.posts)
                     chunk.pending = self.ctx.jobs.pending_ingest_count(batch_id)
                     chunk.global_pending = self.ctx.batches.pending_ingest_global()
                     if chunk.pending + 1 > MAX_PENDING_INGEST or chunk.global_pending + 1 > MAX_PENDING_INGEST_GLOBAL:
@@ -657,7 +699,7 @@ class ImportRunner:
                 buffer.append(item)
                 if limit is not None and created_before + chunk.created + len(buffer) >= limit:
                     # Pode ter atingido o limite: grava já (dedupe no índice único) e confere.
-                    created = self._flush(batch, buffer, None)
+                    created = self._flush(batch, buffer, None, chunk.posts)
                     chunk.created += created
                     chunk.pending += created
                     chunk.global_pending += created
@@ -723,7 +765,7 @@ class ImportRunner:
         limit = batch["requested_limit"]
         found = self.ctx.jobs.count_for_batch(batch_id)
         if chunk.stop == "limit" or self._limit_reached(batch_id, limit):
-            self._finish_listing(batch_id, None, None, listing_end="limit")
+            self._finish_listing(batch_id, None, self._patterns_message(current), listing_end="limit")
             return
         has_next = current["listing_has_next"]
         if has_next is None or not has_next:
@@ -739,6 +781,8 @@ class ImportRunner:
                 message = EMPTY_FIRST_PAGE_MESSAGE
                 self.ctx.batches.update_listing(batch_id, listing_empty_first_page=1)
                 logger.warning("Lote %s: a 1a página do perfil veio vazia e sem próxima página", batch_id)
+            if _patterns_only(current) and message != EMPTY_FIRST_PAGE_MESSAGE:
+                message = self._patterns_message(current)
             self._finish_listing(batch_id, None, message, listing_end="profile_end")
             return
         if chunk.pages_ok > 0 or (chunk_limit is not None and yielded >= chunk_limit and chunk.progressed):
@@ -1166,19 +1210,39 @@ class ImportRunner:
         if limit is None:
             return False
         batch = self.ctx.batches.get(batch_id) or {}
+        if _patterns_only(batch):
+            return self._post_times_count(batch_id) >= limit
         return self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch)) >= limit
 
-    def _flush(self, batch: dict[str, Any], buffer: list[RemoteMedia], checkpoint: ListingCheckpoint | None) -> int:
-        """Grava os jobs dos itens acumulados (e o checkpoint) numa transação. Retorna quantos jobs criou."""
+    def _post_times_count(self, batch_id: int) -> int:
+        return self.ctx.batches.post_times_counts([batch_id]).get(batch_id, 0)
+
+    def _patterns_message(self, batch: dict[str, Any]) -> str | None:
+        """Mensagem do fim da listagem de um lote só de padrões; None nos demais lotes."""
+        if not _patterns_only(batch):
+            return None
+        count = self._post_times_count(batch["id"])
+        return PATTERNS_DONE_ONE_MESSAGE if count == 1 else PATTERNS_DONE_MESSAGE.format(count=count)
+
+    def _flush(self, batch: dict[str, Any], buffer: list[RemoteMedia], checkpoint: ListingCheckpoint | None,
+               posts: list[dict[str, Any]] | None = None) -> int:
+        """Grava os jobs dos itens acumulados, os horários das publicações (migration 0026) e o checkpoint numa
+        transação. Retorna quantos jobs criou (lote só de padrões: quantas publicações novas gravou)."""
         batch_id = batch["id"]
         limit = batch["requested_limit"]
         created = 0
+        added_posts = 0
         last: RemoteMedia | None = None
         with self.ctx.db.transaction():
             if self._is_cancelled(batch_id):
                 # Cancelado (mesma transação que gravaria os jobs e o checkpoint): nada é criado nem avançado.
                 buffer.clear()
+                if posts:
+                    posts.clear()
                 return 0
+            if posts:
+                added_posts = self.ctx.batches.add_post_times(batch_id, batch["source_profile"], posts)
+                posts.clear()
             count = self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch))
             for item in buffer:
                 if limit is not None and count >= limit:
@@ -1234,7 +1298,7 @@ class ImportRunner:
         buffer.clear()
         if created:
             self.ctx.wake_worker()
-        return created
+        return added_posts if _patterns_only(batch) else created
 
     def _add_item(self, batch: dict[str, Any], item: RemoteMedia) -> bool:
         """Cria os jobs do item (sem duplicar dentro do lote): um por papel pedido (`_roles`; ex.: o vídeo e a capa

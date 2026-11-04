@@ -7,6 +7,7 @@ import {
   childState,
   groupAttentionText,
   groupOptionsText,
+  groupProfileCounts,
   groupStatusLabel,
   groupSummary,
   groupTitle,
@@ -15,7 +16,7 @@ import {
   profileStateDetail,
   profileStateLabel,
 } from "../lib/importGroup";
-import { progressExtrasText } from "../lib/importUnified";
+import { analyzedPostsText, isPatternsOnly, progressExtrasText } from "../lib/importUnified";
 import { useNow } from "../lib/pause";
 import { visibleFilter } from "../lib/viewsFilter";
 import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
@@ -25,6 +26,7 @@ import { useQuery } from "../lib/useQuery";
 import { useToast } from "../lib/toast";
 import { AutoExportLine } from "./AutoExportLine";
 import { ImportExportBar } from "./ExportPanel";
+import { PostTimesReportButton } from "./PostTimesReportButton";
 import { ConfirmDialog, ErrorLine, Pill, SkeletonRows, Spinner } from "./ui";
 
 /** Perfis por página (keyset `after_position`); o custo no backend não depende do total de perfis. */
@@ -121,6 +123,8 @@ export function ImportGroupPanel({
   const open = group.profiles.waiting + group.profiles.active + group.profiles.attention;
   const first = children[0]?.group_position ?? null;
   const last = children[children.length - 1]?.group_position ?? null;
+  // Grupo só de padrões: nada é baixado; as linhas mostram as publicações analisadas no lugar das mídias.
+  const patternsOnly = isPatternsOnly(group);
   const goTo = (next: number[]) => {
     setCursors(next);
     setPollMs(POLL_STEPS_MS[0]);
@@ -134,10 +138,21 @@ export function ImportGroupPanel({
           <Pill tone={status.tone}>{status.label}</Pill>
           {group.status === "active" ? <Spinner /> : null}
         </div>
-        <span className="muted small">{groupOptionsText(group)}</span>
+        <span className="muted small">
+          {patternsOnly
+            ? [
+                "Só padrões",
+                group.requested_limit === null
+                  ? "Todas as publicações"
+                  : `Últimas ${formatCount(group.requested_limit)} publicações por perfil`,
+              ].join(" · ")
+            : groupOptionsText(group)}
+        </span>
       </div>
       <div className="muted small" style={{ marginTop: 6 }} aria-live="polite">
-        {groupSummary(group)}
+        {patternsOnly
+          ? [...groupProfileCounts(group.profiles), analyzedPostsText(group.post_times_count ?? 0)].join(" • ")
+          : groupSummary(group)}
       </div>
       {progressExtrasText(group.progress) ? (
         <div className="muted small" style={{ marginTop: 4 }}>
@@ -199,7 +214,13 @@ export function ImportGroupPanel({
                     <Pill tone={state.tone}>{state.label}</Pill>
                     {stateDetail ? <div className="muted small group-detail">{stateDetail}</div> : null}
                   </td>
-                  <td className="muted">{profileProgressText(child)}</td>
+                  <td className="muted">
+                    {!patternsOnly
+                      ? profileProgressText(child)
+                      : childState(child) === "waiting"
+                        ? ""
+                        : analyzedPostsText(child.post_times_count ?? 0)}
+                  </td>
                   <td className="actions">
                     {childState(child) === "attention" ? (
                       <button
@@ -237,6 +258,11 @@ export function ImportGroupPanel({
             Cancelar importação
           </button>
         ) : null}
+        <PostTimesReportButton
+          target={{ kind: "group", id: group.id }}
+          postTimes={group.post_times}
+          postTimesCount={group.post_times_count}
+        />
         {onClose ? (
           <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
             Fechar
@@ -279,15 +305,17 @@ export function ImportGroupPanel({
 
       <AutoExportLine auto={group.auto_export} />
 
-      <ImportExportBar
-        source={{ kind: "group", id: group.id }}
-        finished={exportOffer.offer}
-        note={exportOffer.note}
-        lastExport={group.last_export}
-        libraryPath={ROUTES.library}
-        contentChoice={group.process}
-        onChanged={refresh}
-      />
+      {patternsOnly ? null : (
+        <ImportExportBar
+          source={{ kind: "group", id: group.id }}
+          finished={exportOffer.offer}
+          note={exportOffer.note}
+          lastExport={group.last_export}
+          libraryPath={ROUTES.library}
+          contentChoice={group.process}
+          onChanged={refresh}
+        />
+      )}
 
       {confirmCancel ? (
         <ConfirmDialog

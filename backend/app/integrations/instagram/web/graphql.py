@@ -848,8 +848,9 @@ class InstagramWebGraphQL:
                            before_page: Callable[[threading.Event | None], None] | None = None) -> Iterator[dict]:
         """Gera os nós dos posts, página a página, só quando o consumidor pede o próximo.
 
-        `max_media` só reduz o `count` da 1a página (ex.: teste com count=1); quem conta mídias e para é o
-        chamador, porque um nó pode render 0..N mídias depois de normalizar e filtrar.
+        `max_media` não muda mais o `count` (toda página pede `page_size`: count pequeno na 1a página volta vazio no
+        real quando o perfil tem posts fixados); quem conta mídias e para é o chamador, porque um nó pode render 0..N
+        mídias depois de normalizar e filtrar. Mantido na assinatura por compatibilidade.
 
         `on_page(meta)`: chamado após cada resposta válida, antes dos nós da página serem entregues, com metadados
         seguros (sem cursor, ids nem valores de variáveis): page_index, http_status, edges_count, has_next_page,
@@ -894,9 +895,9 @@ class InstagramWebGraphQL:
                 return
             if before_page is not None:
                 before_page(cancel)
+            # Sempre a página cheia: visto no real em 2026-11-04, a 1a página com count menor que os posts fixados do
+            # perfil (ex.: count=2 em @nasa, 3 fixados) volta VAZIA e sem próxima página. O limite é do chamador.
             count = page_size
-            if page == 1 and after is None and max_media is not None:
-                count = max(1, min(page_size, max_media))
             variables = profile_posts_variables(self._spec(spec), username, count, after)
             conn = self._query(spec, variables, referer_path, op)
             errors = self._last_errors
