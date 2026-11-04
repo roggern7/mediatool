@@ -117,13 +117,14 @@ const RECENT_ROWS = 8;
 
 type Recent = RecentEntry<ImportGroup, Batch>;
 type Selection = { kind: "batch" | "group"; id: number };
-type ImportMode = "unified" | "profile" | "links";
+type ImportMode = "unified" | "profile" | "links" | "patterns";
 
 // "Links e perfis" (importação unificada) é a tela padrão; "Por perfil" e "Por link" continuam como antes.
 const IMPORT_MODES: { id: ImportMode; label: string }[] = [
   { id: "unified", label: "Links e perfis" },
   { id: "profile", label: "Por perfil" },
   { id: "links", label: "Por link" },
+  { id: "patterns", label: "Consultar padrões" },
 ];
 
 function defaultPresetId(presets: Preset[] | undefined, configured: number | null | undefined): number | null {
@@ -532,8 +533,10 @@ export function ImportPage() {
       </div>
 
       <div id="imp-mode-panel" role="tabpanel" aria-labelledby={`imp-mode-${mode}`}>
-        {mode === "unified" ? (
+        {mode === "unified" || mode === "patterns" ? (
           <ImportUnifiedForm
+            key={mode}
+            patternsMode={mode === "patterns"}
             blocker={!sessionOk ? "Configure a sessão do Instagram em Configurações." : paused ? "Instagram em pausa." : null}
             processing={processingBlock}
             post={post}
