@@ -528,7 +528,8 @@ def test_library_zip_of_many_covers_by_ids_and_by_cover_filter(harness_factory, 
 def test_empty_first_page_ends_with_its_own_reason_and_message(harness_factory):
     from app.jobs.import_runner import EMPTY_FIRST_PAGE_MESSAGE
     site = MirroredSite(gp.body(1, [], has_next=False))
-    h = harness_factory(downloader=gp.downloader(site))
+    # Sem a etapa "aba Reels" (migration 0027; testes próprios em test_post_times_flow.py): só a grade.
+    h = harness_factory(downloader=WebListingFakeDownload(gp.downloader(site)))
     batch_id = start(h, inputs=["perfil_teste"], limit=50)["batch_ids"][0]
     finish(h)
     batch = h.batch(batch_id)

@@ -173,9 +173,13 @@ def test_job_without_listing_ref_fails_with_clear_message(harness_factory):
     h.ctx.db.execute("UPDATE jobs SET listing_page_index = NULL, listing_page_size = NULL WHERE batch_id = ?",
                      (batch_id,))
     h.ctx.db.execute("UPDATE job_remote_refs SET listing_page_index = NULL, listing_page_size = NULL")
+    # Sem página E sem código da publicação: nada a renovar. (Com código, ex. vídeo vindo da aba Reels, a renovação
+    # pede a publicação de novo, como no lote por link.)
+    job_id = _job(h, batch_id, "P0")["id"]
+    h.ctx.db.execute("UPDATE jobs SET source_post_id = NULL WHERE batch_id = ?", (batch_id,))
     dl.expired.add(remote("P0").media_url)
     h.run_jobs()
-    job = _job(h, batch_id, "P0")
+    job = h.ctx.jobs.get(job_id)
     assert job["status"] == "failed" and job["error_code"] == "content_unavailable"
     assert "referência de listagem" in job["error_message"] and dl.refresh_calls == []
 

@@ -55,6 +55,11 @@ WEEKDAYS = ("segunda", "terça", "quarta", "quinta", "sexta", "sábado", "doming
 WEEKDAYS_SHORT = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
 WEEKDAYS_PLURAL = ("às segundas", "às terças", "às quartas", "às quintas", "às sextas", "aos sábados", "aos domingos")
 KIND_LABELS = {"photo": "fotos", "video": "vídeos", "reel": "reels", "carousel": "carrosséis"}
+# Origem do horário (migration 0027): o da aba Reels é estimado pelo id da publicação.
+SOURCE_REELS_TAB = "reels_tab"
+SOURCE_LABELS = {None: "Publicação", SOURCE_REELS_TAB: "Estimado (aba Reels)"}
+ESTIMATED_LABEL = "Horários estimados pela aba Reels"
+ESTIMATED_PRECISION = "precisão de ~±30 s"
 REGULARITY_UNKNOWN = "indeterminada"
 
 
@@ -65,6 +70,7 @@ class PostTime:
     taken_at: str        # ISO 8601 UTC (ex. "2026-11-03T13:05:00Z" ou com +00:00)
     kind: str | None     # "photo" | "video" | "reel" | "carousel" | None
     pinned: bool | None
+    source: str | None = None   # None = grade do perfil (horário exato); "reels_tab" = estimado pela aba Reels
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,7 @@ class AccountAnalysis:
     pinned_outside: list[DatedPost] = field(default_factory=list)
     undated: list[PostTime] = field(default_factory=list)
     duplicates: int = 0
+    estimated: int = 0                                         # horários estimados pela aba Reels (com data)
     intervals: list[float] = field(default_factory=list)
     mean: float | None = None
     median: float | None = None
@@ -301,6 +308,8 @@ def analyze_account(username: str, posts: list[PostTime], zone: Zone) -> Account
             account.undated.append(post)
         else:
             dated.append((moment, post))
+            if post.source == SOURCE_REELS_TAB:
+                account.estimated += 1
     dated.sort(key=lambda item: (item[0], item[1].code))
     unpinned = [moment for moment, post in dated if post.pinned is not True]
     oldest_unpinned = unpinned[0] if unpinned else None
@@ -408,6 +417,8 @@ def _account_section(account: AccountAnalysis) -> list[str]:
         lines.append(f"  Ignorados sem data válida: {len(account.undated)}")
     if account.duplicates:
         lines.append(f"  Duplicados ignorados (mesmo código): {account.duplicates}")
+    if account.estimated:
+        lines.append(f"  {ESTIMATED_LABEL}: {account.estimated} ({ESTIMATED_PRECISION})")
     if sequence:
         lines.append(f"  Período: {_date_time(sequence[0].local, True)} → {_date_time(sequence[-1].local, True)} "
                      f"({account.days} dia{'' if account.days == 1 else 's'})")
@@ -522,8 +533,8 @@ SEGMENT_COLUMNS = ("Nº", "Início", "Fim", "Posts", "Intervalos", "Intervalo m�
                    "Classificação", "Descrição")
 SEGMENT_WIDTHS = (6, 17, 17, 7, 10, 12, 18, 13, 60)
 POST_COLUMNS = ("Nº", "Data", "Hora", "Dia da semana", "Intervalo desde o anterior (min)", "Intervalo", "Trecho",
-                "Rajada", "Tipo", "Fixado", "Na sequência", "Link")
-POST_WIDTHS = (6, 11, 7, 13, 14, 16, 8, 8, 11, 8, 12, 44)
+                "Rajada", "Tipo", "Fixado", "Na sequência", "Origem do horário", "Link")
+POST_WIDTHS = (6, 11, 7, 13, 14, 16, 8, 8, 11, 8, 12, 20, 44)
 SEGMENT_LABELS = {"steady": "Ritmo", "burst": "Rajada", "pause": "Pausa"}
 KIND_NAMES = {"photo": "Foto", "video": "Vídeo", "reel": "Reel", "carousel": "Carrossel"}
 _FLAG = {True: "Sim", False: "Não", None: ""}
@@ -585,6 +596,10 @@ def segment_rows(account: AccountAnalysis) -> list[list[Cell]]:
     return rows
 
 
+def _source_label(post: PostTime) -> str:
+    return SOURCE_LABELS.get(post.source, post.source or "")
+
+
 def post_rows(account: AccountAnalysis) -> list[list[Cell]]:
     """Aba Posts: uma publicação por linha (colunas `POST_COLUMNS`): a sequência em ordem cronológica, depois os
     fixados fora dela e, por último, os sem data válida."""
@@ -598,10 +613,10 @@ def post_rows(account: AccountAnalysis) -> list[list[Cell]]:
                      f"{local.hour:02d}:{local.minute:02d}", WEEKDAYS[local.weekday()], _minutes(item.interval),
                      "" if item.interval is None else format_duration(item.interval), segment,
                      _FLAG[in_burst] if item.in_sequence else "", KIND_NAMES.get(post.kind, post.kind or ""),
-                     _FLAG[post.pinned], _FLAG[item.in_sequence], _link(post.code)])
+                     _FLAG[post.pinned], _FLAG[item.in_sequence], _source_label(post), _link(post.code)])
     for post in account.undated:
         rows.append([len(rows) + 1, "", "", "", None, "", None, "", KIND_NAMES.get(post.kind, post.kind or ""),
-                     _FLAG[post.pinned], "Não", _link(post.code)])
+                     _FLAG[post.pinned], "Não", _source_label(post), _link(post.code)])
     return rows
 
 
@@ -615,6 +630,8 @@ def summary_sheet_rows(account: AccountAnalysis) -> list[list[Cell]]:
         rows.append(["Ignorados sem data válida", len(a.undated)])
     if a.duplicates:
         rows.append(["Duplicados ignorados (mesmo código)", a.duplicates])
+    if a.estimated:
+        rows.append([ESTIMATED_LABEL, f"{a.estimated} ({ESTIMATED_PRECISION})"])
     if sequence:
         rows.append(["Período", f"{_date_time(sequence[0].local, True)} → {_date_time(sequence[-1].local, True)} "
                                 f"({a.days} dia{'' if a.days == 1 else 's'})"])

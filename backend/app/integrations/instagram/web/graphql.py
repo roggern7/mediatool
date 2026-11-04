@@ -492,8 +492,9 @@ def _error_summaries(payload: object, secrets: tuple[str, ...]) -> list[dict]:
     return out[:_MAX_ERRORS]
 
 
-def _diagnostic(resp: WebResponse, payload: object, detail: str, secrets: tuple[str, ...]) -> dict:
-    diag: dict = {"detail": detail, "status": resp.status, "path": GRAPHQL_PATH,
+def _diagnostic(resp: WebResponse, payload: object, detail: str, secrets: tuple[str, ...],
+                path: str = GRAPHQL_PATH) -> dict:
+    diag: dict = {"detail": detail, "status": resp.status, "path": path,
                   "content_type": resp.content_type, "size": len(resp.text or "")}
     if isinstance(payload, Mapping):
         diag["top_keys"] = sorted(str(k) for k in payload)[:_MAX_KEYS]
@@ -621,6 +622,7 @@ class InstagramWebGraphQL:
         self._last_errors: dict | None = None
         # Totais seguros da última listagem (páginas com `errors`, erros, descartes inesperados por motivo).
         self.listing_totals: dict = _new_totals()
+        self._path = GRAPHQL_PATH   # endpoint da última consulta (spec.path), para os diagnósticos
 
     def _spec(self, spec: QuerySpec) -> QuerySpec:
         if spec.name not in self._resolved:
@@ -670,13 +672,14 @@ class InstagramWebGraphQL:
             "Content-Type": "application/x-www-form-urlencoded",   # corpo é formulário
             "X-FB-LSD": state.lsd,                                 # repete o lsd do formulário
             "X-FB-Friendly-Name": spec.name,                       # nome da consulta, como o navegador
-            "X-Root-Field-Name": spec.root_field,                  # campo raiz; aceito no real, necessidade não isolada
             "Origin": BASE,                                        # POST same-origin
             "Referer": BASE + referer_path,                        # página que originou a consulta
             "Sec-Fetch-Dest": "empty",                             # fetch() de cors same-origin
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
+        if spec.root_header:
+            headers["X-Root-Field-Name"] = spec.root_field         # campo raiz; aceito no real, necessidade não isolada
         if state.app_id:
             headers["X-IG-App-ID"] = state.app_id                  # app do documento (senão o do WebHttpConfig)
         csrftoken = self._http.csrftoken()
@@ -695,13 +698,14 @@ class InstagramWebGraphQL:
     def _query(self, spec: QuerySpec, variables: Mapping[str, object], referer_path: str, op: dict) -> dict:
         """``op["rebootstrapped"]`` é compartilhado pela operação inteira (1 re-bootstrap por operação)."""
         spec = self._spec(spec)
+        self._path = spec.path
         force = False
         while True:
             state = self._bootstrap.get(force=force)
             self.last_viewer_id = None
             self._last_errors = None
             secrets =(state.fb_dtsg, state.lsd, state.jazoest)
-            resp = self._http.post_form(GRAPHQL_PATH, self._form(spec, variables, state),
+            resp = self._http.post_form(spec.path, self._form(spec, variables, state),
                                         self._headers(spec, state, referer_path))
             self._last_status = resp.status
             err = classify_response(resp, stage=STAGE)
@@ -742,7 +746,8 @@ class InstagramWebGraphQL:
                 log.warning("GraphQL %s: perfil indisponível para a conta da sessão (1357005 no campo raiz, HTTP %s)",
                             spec.name, resp.status)
                 raise InstagramWebError("profile_not_found", _PROFILE_UNAVAILABLE_MESSAGE, stage=STAGE,
-                                        diagnostic=_diagnostic(resp, payload, "profile_unavailable", secrets))
+                                        diagnostic=_diagnostic(resp, payload, "profile_unavailable", secrets,
+                                                               self._path))
             return self._extract(spec, resp, payload, secrets)
 
     def _after_renewal_error(self, spec: QuerySpec, resp: WebResponse, payload: object,
@@ -773,7 +778,7 @@ class InstagramWebGraphQL:
         log.warning("GraphQL %s: token/sessão web ainda recusado após a renovação (HTTP %s); classificado como %s",
                     spec.name, resp.status, code)
         return InstagramWebError(code, message, retryable=code == "request_auth_failed", stage=STAGE,
-                                 diagnostic=_diagnostic(resp, payload, detail, secrets))
+                                 diagnostic=_diagnostic(resp, payload, detail, secrets, self._path))
 
     def _authenticated_viewer(self, payload: object) -> bool:
         data = payload.get("data") if isinstance(payload, Mapping) else None
@@ -793,10 +798,11 @@ class InstagramWebGraphQL:
             code, detail = "content_unavailable", "root_null_authenticated"
             message = "O Instagram não entregou as publicações deste perfil para a conta da sessão."
         log.warning("GraphQL: sessão confirmada, mas sem publicações na resposta (%s, HTTP %s)", detail, resp.status)
-        return InstagramWebError(code, message, stage=STAGE, diagnostic=_diagnostic(resp, payload, detail, secrets))
+        return InstagramWebError(code, message, stage=STAGE,
+                                 diagnostic=_diagnostic(resp, payload, detail, secrets, self._path))
 
     def _contract(self, resp: WebResponse, payload: object, detail: str, secrets: tuple[str, ...]):
-        diag = _diagnostic(resp, payload, detail, secrets)
+        diag = _diagnostic(resp, payload, detail, secrets, self._path)
         log.warning("GraphQL: contrato inesperado (%s, HTTP %s)", detail, resp.status)
         return InstagramWebError("contract_changed", _CONTRACT_MESSAGE, stage=STAGE, diagnostic=diag)
 

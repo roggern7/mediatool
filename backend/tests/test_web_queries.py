@@ -29,7 +29,9 @@ def test_profile_posts_spec_matches_contract():
     assert PROFILE_POSTS == QuerySpec("PolarisProfilePostsQuery", "28991540097136703",
                                       "xdt_api__v1__feed__user_timeline_graphql_connection", "2026-10-03", RELAY)
     assert KNOWN_QUERIES == ("PolarisProfilePostsQuery", "PolarisLoggedOutDesktopWWWProfileReelsTabContentQuery_connection",
+                             "PolarisProfileReelsTabContentQuery", "PolarisProfileReelsTabContentQuery_connection",
                              "PolarisPostActionLoadPostQueryQuery")
+    assert PROFILE_POSTS.path == "/graphql/query" and PROFILE_POSTS.root_header is True
 
 
 def test_reels_tab_spec_matches_contract_and_accepts_override():

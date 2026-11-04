@@ -33,6 +33,8 @@ class QuerySpec:
     root_field: str        # chave esperada dentro de data
     observed_at: str       # data da evidência
     relay_providers: Mapping[str, bool]
+    path: str = "/graphql/query"   # endpoint do POST (as consultas da aba Reels logada usam /api/graphql)
+    root_header: bool = True       # envia X-Root-Field-Name (o navegador não manda nas da aba Reels logada)
 
 
 PROFILE_POSTS = QuerySpec(
@@ -51,12 +53,29 @@ REELS_TAB_CONNECTION = QuerySpec(
     "node", "2026-10-29", {},
 )
 
+# Aba Reels do perfil COM a sessão (consulta de padrões de postagem; web/reels_timeline.py). Observado no navegador
+# logado em 2026-11-04: o navegador usa `POST /api/graphql` (sem X-Root-Field-Name), mas vindo do app esse endereço
+# responde 429 vazio; `POST /graphql/query` (com X-Root-Field-Name, como a grade) VERIFICADO no real no mesmo dia: 3
+# páginas, 36 Reels. Resposta em
+# `data.fetch__XDTUserDict.clips_connection`. 1a página com `variables={"data", "user_id"}`; as seguintes na
+# `_connection` com `variables={"after", "data", "first", "id"}`.
+_REELS_TAB_LOGGED_PROVIDERS = {"__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": True}
+REELS_TAB_LOGGED = QuerySpec(
+    "PolarisProfileReelsTabContentQuery", "29109455938671025", "fetch__XDTUserDict", "2026-11-04",
+    _REELS_TAB_LOGGED_PROVIDERS,
+)
+REELS_TAB_LOGGED_CONNECTION = QuerySpec(
+    "PolarisProfileReelsTabContentQuery_connection", "28971369649196954", "fetch__XDTUserDict", "2026-11-04",
+    _REELS_TAB_LOGGED_PROVIDERS,
+)
+
 # Consultas desativadas: o nome continua válido em `instagram_web_doc_ids` e em `MEDIA_TOOL_IG_DOC_<NAME>` /
 # `MEDIA_TOOL_IG_ROOT_<NAME>` (configuração salva antes da remoção), mas nenhum valor é usado.
 DISABLED_QUERY_NAMES: tuple[str, ...] = ("PolarisPostActionLoadPostQueryQuery",)
 
 # Nomes aceitos em `instagram_web_doc_ids` (o schema valida contra esta lista).
-KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, REELS_TAB_CONNECTION.name, *DISABLED_QUERY_NAMES)
+KNOWN_QUERIES: tuple[str, ...] = (PROFILE_POSTS.name, REELS_TAB_CONNECTION.name, REELS_TAB_LOGGED.name,
+                                  REELS_TAB_LOGGED_CONNECTION.name, *DISABLED_QUERY_NAMES)
 
 _disabled_override_logged = False
 

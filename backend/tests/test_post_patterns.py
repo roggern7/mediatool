@@ -207,5 +207,22 @@ def test_multi_sheet_writer_validates_names_and_keeps_text_inline():
                                                          xlsx_writer.Sheet(bad, ["A"], [], [10])])
 
 
+def test_estimated_reels_tab_times_are_marked_in_xlsx_csv_and_text():
+    posts = series("a", [60, 60])
+    posts[1] = PostTime("a", posts[1].code, posts[1].taken_at, "reel", False, source="reels_tab")
+    files = read_zip(build_report_zip(posts, title="Teste", zone=MINUS_3))
+    sheets = read_xlsx(files["a/a.xlsx"])
+    header = sheets["Posts"][0]
+    origin = header.index("Origem do horário")
+    assert header[-1] == "Link" and [row[origin] for row in sheets["Posts"][1:]] == [
+        "Publicação", "Estimado (aba Reels)", "Publicação"]
+    assert ["Horários estimados pela aba Reels", "1 (precisão de ~±30 s)"] in sheets["Resumo"]
+    assert [row[origin] for row in read_csv(files["a/posts.csv"])[1:]] == [
+        "Publicação", "Estimado (aba Reels)", "Publicação"]
+    assert "Horários estimados pela aba Reels: 1 (precisão de ~±30 s)" in files["a/padroes.txt"].decode("utf-8")
+    plain = read_zip(build_report_zip(series("b", [60]), title="Teste", zone=MINUS_3))
+    assert "Horários estimados" not in plain["b/padroes.txt"].decode("utf-8")
+
+
 def test_report_filename():
     assert report_filename("Meu: teste/1", datetime(2026, 11, 4, 9, 5)) == "padroes_Meu_teste_1_2026-11-04_0905.zip"

@@ -66,7 +66,7 @@ from app.jobs.pipeline import (
     links_resolve_options,
     note_links_session_refusal,
 )
-from app.services import disk, edit_service
+from app.services import disk, edit_service, export_time
 from app.services.instagram_gate import DEFAULT_MAX_PAGES_PER_HOUR, PAGES_STATE_KEY, InstagramPaused
 
 if TYPE_CHECKING:
@@ -102,6 +102,27 @@ EMPTY_FIRST_PAGE_MESSAGE = (
 # Lote só de padrões (migration 0026): fim da listagem sem nenhum download.
 PATTERNS_DONE_MESSAGE = "{count} publicações analisadas (só padrões: nada foi baixado)."
 PATTERNS_DONE_ONE_MESSAGE = "1 publicação analisada (só padrões: nada foi baixado)."
+# Etapa "aba Reels" (migration 0027): depois da grade, os Reels que só aparecem na aba Reels entram em `post_times`
+# com `source` = REELS_TAB_SOURCE (horário estimado). Falha nela não derruba o lote: vira este aviso na mensagem.
+REELS_TAB_SOURCE = "reels_tab"
+REELS_TAB_FAILED_MESSAGE = "A aba Reels não pôde ser lida: {reason}"
+REELS_TAB_INTERNAL_ERROR = "erro inesperado (consulte o log do aplicativo)"
+# Lote que baixa (importação por perfil com vídeo ou capa): resumo da etapa na mensagem final do lote.
+REELS_TAB_SUMMARY = "Grade: {grid} itens; aba Reels: {reels} vídeos que não estavam na grade"
+REELS_TAB_SKIPPED = " ({failed} não puderam ser importados)"
+
+
+def _reels_tab_summary(grid: int, videos: int, failed: int) -> str:
+    """Texto da etapa aba Reels com singular/plural corretos."""
+    text = (f"Grade: {grid} {'item' if grid == 1 else 'itens'}; aba Reels: {videos} "
+            f"{'vídeo que não estava' if videos == 1 else 'vídeos que não estavam'} na grade")
+    if failed:
+        text += f" ({failed} {'não pôde ser importado' if failed == 1 else 'não puderam ser importados'})"
+    return text
+# Tipos de conteúdo cujo lote baixa vídeo ou capa ("Somente vídeos", "Somente capas", "Vídeos e capas", "Todas").
+_REELS_DOWNLOAD_CONTENT = frozenset({"videos", "all", "reels"})
+REELS_TAB_FLUSH = 50   # registros por gravação
+_POST_KINDS = frozenset({"photo", "video", "reel", "carousel"})   # CHECK de post_times.kind
 # O provider encerrou o trecho sem erro, sem fim real do perfil e sem avançar nenhuma página: não é fim do perfil.
 LISTING_STALLED_MESSAGE = (
     "A listagem parou antes do fim do perfil sem avançar. A importação não foi dada como concluída e o ponto de "
@@ -200,6 +221,30 @@ def _patterns_only(batch: dict[str, Any]) -> bool:
     return bool(batch.get("patterns_only"))
 
 
+def _reels_download(batch: dict[str, Any]) -> bool:
+    """Lote por perfil que baixa vídeo/capa: a etapa "aba Reels" também baixa os Reels que não estão na grade."""
+    return (not _patterns_only(batch) and batch.get("import_mode") != "links"
+            and batch.get("content_type") in _REELS_DOWNLOAD_CONTENT)
+
+
+def _join_message(*parts: str | None) -> str | None:
+    """Junta as frases da mensagem final do lote (ignora as vazias); None se não sobrar nenhuma."""
+    sentences = [part.strip().rstrip(".") + "." for part in parts if part and part.strip()]
+    return " ".join(sentences) or None
+
+
+class _ReelsStep:
+    """Resultado da etapa "aba Reels" (só em memória)."""
+
+    def __init__(self) -> None:
+        self.posts_added = 0        # horários novos gravados em post_times (source reels_tab)
+        self.videos = 0             # Reels fora da grade que viraram job novo
+        self.failed = 0             # Reels pulados por erro DA publicação
+        self.summary: str | None = None
+        self.warning: str | None = None
+        self.interrupted = False    # backpressure: a etapa é refeita no próximo trecho
+
+
 def _primary_role(batch: dict[str, Any]) -> str:
     """Papel que conta na quantidade pedida ("Últimas N"): a capa em "Somente capas"; o original nos demais (o vídeo
     e a capa dele contam como UM item)."""
@@ -216,6 +261,17 @@ def _wanted_by_type(batch: dict[str, Any], item: RemoteMedia) -> bool:
     if content == "images":
         return item.media_type == "image"
     return True
+
+
+def _views_ok(play_count: object, min_views: int | None, max_views: int | None) -> bool:
+    """Filtro de visualizações da etapa "aba Reels" (mesma regra da listagem): sem filtro aprova; com filtro, sem
+    contagem reprova, abaixo do mínimo ou acima do máximo reprova."""
+    if min_views is None and max_views is None:
+        return True
+    if not isinstance(play_count, int) or isinstance(play_count, bool):
+        return False
+    return not ((min_views is not None and play_count < min_views)
+                or (max_views is not None and play_count > max_views))
 
 
 def _is_link_error(exc: InstagramError) -> bool:
@@ -763,27 +819,45 @@ class ImportRunner:
             logger.info("Lote %s: listagem pausada (Instagram pausado); será retomada do checkpoint", batch_id)
             return
         limit = batch["requested_limit"]
-        found = self.ctx.jobs.count_for_batch(batch_id)
         if chunk.stop == "limit" or self._limit_reached(batch_id, limit):
-            self._finish_listing(batch_id, None, self._patterns_message(current), listing_end="limit")
+            # Etapa "aba Reels" (migration 0027) antes de encerrar: horários e/ou Reels que não estão na grade.
+            step = self._reels_tab_step(current, grid_end="limit")
+            if step.interrupted:
+                return   # backpressure: a etapa é refeita no próximo trecho (dedupe por código)
+            if self._stop.is_set() or self._is_cancelled(batch_id):
+                self._after_chunk(batch, chunk, None, yielded, chunk_limit)   # cancelamento/encerramento: como acima
+                return
+            message = _join_message(self._patterns_message(current), step.summary, step.warning)
+            self._finish_listing(batch_id, None, message, listing_end="limit")
             return
         has_next = current["listing_has_next"]
         if has_next is None or not has_next:
             # ÚNICO fim de perfil: o provider encerrou sem erro e o último checkpoint diz que não há próxima página
             # (has_next_page=false). Sem checkpoint nenhum = provider que não pagina por checkpoint (gallery-dl).
+            # Antes de encerrar, a etapa "aba Reels" (migration 0027; inclusive com a grade vazia).
+            step = self._reels_tab_step(current, grid_end="profile_end")
+            if step.interrupted:
+                return   # backpressure: a etapa é refeita no próximo trecho (dedupe por código)
+            if self._stop.is_set() or self._is_cancelled(batch_id):
+                self._after_chunk(batch, chunk, None, yielded, chunk_limit)   # cancelamento/encerramento: como acima
+                return
+            found = self.ctx.jobs.count_for_batch(batch_id)
             message = END_OF_PROFILE_MESSAGE.format(found=found) if limit is not None and found < limit else None
             if current.get("listing_period_end"):
                 # Fim pelo corte do período de postagem (checkpoint `period_end`): não é o fim do perfil.
                 message = None
                 logger.info("Lote %s: listagem chegou às publicações anteriores ao período pedido", batch_id)
-            elif found == 0 and current.get("listing_pages") == 1 and not current.get("listing_posts_seen"):
+            elif (found == 0 and current.get("listing_pages") == 1 and not current.get("listing_posts_seen")
+                  and not (_patterns_only(current) and step.posts_added)):
                 # 1a página com 0 publicações e sem próxima: termina, mas com motivo próprio (não "fim do perfil").
+                # Só padrões com Reels lidos da aba (conta só de Reels): não é página vazia, é o resultado normal.
                 message = EMPTY_FIRST_PAGE_MESSAGE
                 self.ctx.batches.update_listing(batch_id, listing_empty_first_page=1)
                 logger.warning("Lote %s: a 1a página do perfil veio vazia e sem próxima página", batch_id)
             if _patterns_only(current) and message != EMPTY_FIRST_PAGE_MESSAGE:
                 message = self._patterns_message(current)
-            self._finish_listing(batch_id, None, message, listing_end="profile_end")
+            self._finish_listing(batch_id, None, _join_message(message, step.summary, step.warning),
+                                 listing_end="profile_end")
             return
         if chunk.pages_ok > 0 or (chunk_limit is not None and yielded >= chunk_limit and chunk.progressed):
             # Ainda há páginas e o trecho avançou (o provider parou pelo teto de páginas do trecho, ou pelo limite
@@ -1213,6 +1287,200 @@ class ImportRunner:
         if _patterns_only(batch):
             return self._post_times_count(batch_id) >= limit
         return self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch)) >= limit
+
+    def _reels_tab_step(self, batch: dict[str, Any], *, grid_end: str) -> _ReelsStep:
+        """Etapa "aba Reels" (migration 0027), depois que a listagem da grade terminou sem erro (`grid_end`: "limit"
+        ou "profile_end", que inclui período e grade vazia). Lê a aba Reels do perfil (mais novo -> mais antigo) e:
+
+        - lote com horário dos posts: grava o horário ESTIMADO de cada Reel em `post_times` (`source` reels_tab;
+          INSERT OR IGNORE: o da grade fica), até `requested_limit` Reels não fixados;
+        - lote por perfil que baixa vídeo/capa (`_reels_download`): cada Reel que NÃO veio da grade neste lote e passa
+          nos filtros (período pelo provider; visualizações pela `play_count` da aba, sem contagem = reprovado) é
+          resolvido como na importação por link (`resolve_post`) e vira job pelo mesmo caminho da grade. Quantidade:
+          grade parada por limite -> só os mais novos que o item mais antigo do lote; senão até completar o limite.
+
+        Erro de UMA publicação pula só ela; qualquer outro erro (sessão, 429, pausa...) encerra a etapa com aviso,
+        sem apagar nada. Backpressure: estado `waiting_backpressure` e a etapa inteira é refeita depois (dedupe)."""
+        step = _ReelsStep()
+        batch_id = batch["id"]
+        timing = _post_times(batch)
+        download = _reels_download(batch)
+        if not (timing or download):
+            return step
+        downloader = self.ctx.downloader_factory()
+        read = getattr(downloader, "iter_reels_post_times", None)
+        if read is None:
+            return step   # provider sem leitura da aba Reels: nada muda
+        limit = batch["requested_limit"]
+        grid_items = self.ctx.jobs.count_for_batch(batch_id, role=_primary_role(batch))
+        timing_codes = self.ctx.batches.post_time_codes(batch_id) if timing else set()
+        grid_codes = set(timing_codes)
+        if download:
+            grid_codes |= self.ctx.batches.job_post_codes(batch_id)
+        oldest = None
+        if download and grid_end == "limit":
+            oldest = export_time.publication_moment(self.ctx.batches.oldest_job_taken_at(batch_id) or "")
+        min_views = max_views = None
+        if download and (batch.get("min_views") is not None or batch.get("max_views") is not None):
+            from app.services.import_service import MIN_VIEWS_ENABLED
+
+            if MIN_VIEWS_ENABLED:
+                min_views, max_views = batch.get("min_views"), batch.get("max_views")
+        cancel = threading.Event()
+        with self._lock:
+            if self._stop.is_set():
+                return step
+            self._current = (batch_id, cancel)
+            self._current_thread = threading.get_ident()
+        posts: list[dict[str, Any]] = []
+        timing_unpinned = 0
+        timing_done = not timing
+        download_done = not download
+        items_count = grid_items
+        records = None
+        logger.info("Lote %s: lendo a aba Reels (%s)", batch_id,
+                    " e ".join(name for name, on in (("horários", timing), ("download", download)) if on))
+        try:
+            records = read(batch["source_profile"], limit=None if download else limit,
+                           posted_after=batch.get("posted_after"), cancel=cancel)
+            for record in records:
+                if cancel.is_set() or self._is_cancelled(batch_id):
+                    cancel.set()
+                    break
+                code = record.get("code")
+                if not isinstance(code, str) or not code:
+                    continue
+                pinned = record.get("pinned") if isinstance(record.get("pinned"), bool) else None
+                if not timing_done:
+                    if code not in timing_codes:
+                        timing_codes.add(code)
+                        kind = record.get("kind")
+                        posts.append({"code": code, "taken_at": record.get("taken_at"),
+                                      "kind": kind if kind in _POST_KINDS else None, "pinned": pinned,
+                                      "source": REELS_TAB_SOURCE})
+                        if len(posts) >= REELS_TAB_FLUSH:
+                            step.posts_added += self._add_reels_times(batch, posts)
+                    if pinned is not True:
+                        timing_unpinned += 1
+                        timing_done = limit is not None and timing_unpinned >= limit
+                if not download_done and code not in grid_codes and record.get("in_grid") is not True:
+                    if oldest is not None:
+                        moment = export_time.publication_moment(record.get("taken_at") or "")
+                        if moment is None or moment < oldest:
+                            # Mais antigo que o item mais antigo da grade: fora dos N mais recentes. Fixado é pulado
+                            # sem encerrar (pode ser antigo e estar no topo).
+                            download_done = pinned is not True
+                            if timing_done and download_done:
+                                break
+                            continue
+                    if not _views_ok(record.get("play_count"), min_views, max_views):
+                        continue
+                    if limit is not None and grid_end != "limit" and items_count >= limit:
+                        download_done = True
+                    elif self._reels_backpressure(batch):
+                        step.interrupted = True
+                        self._set_listing(batch_id, listing_state="waiting_backpressure")
+                        logger.info("Lote %s: aba Reels aguardando downloads (backpressure); a etapa será refeita",
+                                    batch_id)
+                        break
+                    else:
+                        grid_codes.add(code)
+                        created = self._add_reels_post(batch, downloader, code, cancel, step)
+                        if cancel.is_set():
+                            break
+                        if created:
+                            step.videos += 1
+                            items_count += 1
+                if timing_done and download_done:
+                    break
+        except InstagramPaused:
+            step.warning = REELS_TAB_FAILED_MESSAGE.format(reason="o Instagram está pausado no Media Tool")
+            logger.warning("Lote %s: aba Reels interrompida (Instagram pausado)", batch_id)
+        except InstagramError as exc:
+            if not cancel.is_set():
+                if self.ctx.worker is not None:
+                    self.ctx.worker.pause_for(exc.code)   # 429/sessão: mesma pausa global da listagem
+                step.warning = REELS_TAB_FAILED_MESSAGE.format(reason=safe_message(exc.message))
+                logger.warning("Lote %s: a aba Reels não pôde ser lida (%s)%s", batch_id, exc.code,
+                               _diagnostic_suffix(safe_diagnostic(exc)))
+        except Exception:  # noqa: BLE001 - a etapa nunca derruba o lote
+            if not cancel.is_set():
+                logger.exception("Lote %s: erro inesperado na etapa da aba Reels", batch_id)
+                step.warning = REELS_TAB_FAILED_MESSAGE.format(reason=REELS_TAB_INTERNAL_ERROR)
+        finally:
+            close = getattr(records, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - fechar o gerador nunca derruba o runner
+                    logger.warning("Lote %s: falha ao encerrar o gerador da aba Reels", batch_id)
+            with self._lock:
+                self._current = None
+                self._current_thread = None
+        if posts and not self._is_cancelled(batch_id):
+            step.posts_added += self._add_reels_times(batch, posts)
+        if download and not step.interrupted and (step.warning is None or step.videos or step.failed):
+            step.summary = _reels_tab_summary(grid_items, step.videos, step.failed)
+        logger.info("Lote %s: aba Reels: %s horários novos, %s Reels fora da grade importados, %s pulados",
+                    batch_id, step.posts_added, step.videos, step.failed)
+        return step
+
+    def _add_reels_times(self, batch: dict[str, Any], posts: list[dict[str, Any]]) -> int:
+        """Grava os horários da aba Reels (INSERT OR IGNORE) só com o lote ainda em `listing`."""
+        added = 0
+        with self.ctx.db.transaction():
+            current = self.ctx.batches.get(batch["id"])
+            if current is not None and current["status"] == "listing":
+                added = self.ctx.batches.add_post_times(batch["id"], batch["source_profile"], posts)
+        posts.clear()
+        return added
+
+    def _reels_backpressure(self, batch: dict[str, Any]) -> bool:
+        """Mesmos tetos de ingests pendentes da listagem e do lote por link, antes de pedir a próxima publicação."""
+        return (self.ctx.jobs.pending_ingest_count(batch["id"]) + 1 > MAX_PENDING_INGEST
+                or self.ctx.batches.pending_ingest_global() + 1 > MAX_PENDING_INGEST_GLOBAL
+                or self._process_backlog_full(batch))
+
+    def _add_reels_post(self, batch: dict[str, Any], downloader: Any, code: str, cancel: threading.Event,
+                        step: _ReelsStep) -> bool:
+        """Resolve UM Reel da aba (fluxo da importação por link: documento público e, se restrito, 2a tentativa com a
+        sessão) e cria os jobs dele. Erro DA publicação: pula só ela (`step.failed`); os demais sobem."""
+        batch_id = batch["id"]
+        if instagram_paused(self.ctx.worker):
+            raise InstagramPaused("pausa")
+        try:
+            items = downloader.resolve_post(code, cancel=cancel, path_kind="reel",
+                                            **links_resolve_options(self.ctx, batch_id))
+        except InstagramError as exc:
+            note_links_session_refusal(self.ctx, batch_id, exc)
+            if cancel.is_set() or not _is_link_error(exc):
+                raise
+            step.failed += 1
+            logger.warning("Lote %s: um Reel da aba Reels não pôde ser importado (%s)%s", batch_id, exc.code,
+                           _diagnostic_suffix(safe_diagnostic(exc)))
+            return False
+        if cancel.is_set():
+            return False
+        if not items or any(item.source_post_id != code for item in items):
+            # Vazia ou resposta de OUTRA publicação: nada é gravado (mesma defesa do lote por link).
+            step.failed += 1
+            logger.warning("Lote %s: um Reel da aba Reels não pôde ser importado (%s)", batch_id,
+                           "post_mismatch" if items else "vazio")
+            return False
+        wanted = [item for item in items if _wanted_by_type(batch, item)]
+        created = False
+        with self.ctx.db.transaction():
+            if self._is_cancelled(batch_id):
+                return False
+            for item in wanted:
+                if self._add_item(batch, item):
+                    created = True
+            self.ctx.batches.sync_found(batch_id)
+        if self.ctx.worker is not None and getattr(downloader, "resolve_post_authenticated", True):
+            self.ctx.worker.note_auth_success()
+        if created:
+            self.ctx.wake_worker()
+        return created
 
     def _post_times_count(self, batch_id: int) -> int:
         return self.ctx.batches.post_times_counts([batch_id]).get(batch_id, 0)

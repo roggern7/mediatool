@@ -189,8 +189,8 @@ def test_cancel_during_the_listing_stops_at_the_page_boundary(harness_factory):
     batch_id = batch(h)
     real_flush = h.ctx.import_runner._flush
 
-    def flush_then_cancel(b, buffer, checkpoint):
-        created = real_flush(b, buffer, checkpoint)
+    def flush_then_cancel(b, buffer, checkpoint, posts=None):
+        created = real_flush(b, buffer, checkpoint, posts)
         if checkpoint is not None:   # o dono cancela logo depois do checkpoint da página 1
             h.client.post(f"/api/batches/{batch_id}/cancel")
         return created
