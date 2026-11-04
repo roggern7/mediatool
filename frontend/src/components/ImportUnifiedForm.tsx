@@ -108,6 +108,7 @@ export function ImportUnifiedForm({
   onError,
   onConsult,
   consultBusy,
+  patternsMode = false,
 }: {
   /** Motivo que impede iniciar vindo da página (sessão, pausa); null = pode iniciar. */
   blocker: string | null;
@@ -121,9 +122,11 @@ export function ImportUnifiedForm({
   /** Consulta de perfil único (prévia), como na aba "Por perfil". */
   onConsult: (username: string) => void;
   consultBusy: boolean;
+  /** Aba "Consultar padrões": só perfis, mídia fixa "none" (nada é baixado), horário sempre ligado. */
+  patternsMode?: boolean;
 }) {
   const [text, setText] = useState("");
-  const [media, setMedia] = useState<MediaChoice>("videos");
+  const [media, setMedia] = useState<MediaChoice>(patternsMode ? "none" : "videos");
   const [postTimes, setPostTimes] = useState(false);
   // "Nada — só consultar padrões": horário ligado e travado; sem pós-processamento, ZIP automático nem visualizações.
   const patternsOnly = media === "none";
@@ -212,10 +215,20 @@ export function ImportUnifiedForm({
         submit();
       }}
     >
+      {patternsMode ? (
+        <div className="muted small" style={{ marginBottom: 10 }}>
+          Lê o horário das publicações de cada perfil, sem baixar nenhuma mídia, e gera o relatório de padrões (.zip):
+          tempo médio entre posts, rajadas, pausas, horários e dias preferidos e a sequência dos posts.
+        </div>
+      ) : null}
       <Field
-        label="Cole links de publicações e/ou perfis"
+        label={patternsMode ? "Perfis" : "Cole links de publicações e/ou perfis"}
         htmlFor="imp-unified-text"
-        hint="Um por linha (vírgula e ponto e vírgula também separam; espaço só entre links e @usuario): links de /p/, /reel/, /tv/, links de perfil, @usuario ou usuario."
+        hint={
+          patternsMode
+            ? "Um por linha: usuario, @usuario ou link do perfil."
+            : "Um por linha (vírgula e ponto e vírgula também separam; espaço só entre links e @usuario): links de /p/, /reel/, /tv/, links de perfil, @usuario ou usuario."
+        }
       >
         <textarea
           id="imp-unified-text"
@@ -223,7 +236,7 @@ export function ImportUnifiedForm({
           rows={5}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={"https://www.instagram.com/reel/ABC123/\n@perfil"}
+          placeholder={patternsMode ? "@perfil\nusuario" : "https://www.instagram.com/reel/ABC123/\n@perfil"}
         />
       </Field>
       <div className="row small" aria-live="polite" style={{ marginTop: 6 }}>
@@ -249,12 +262,12 @@ export function ImportUnifiedForm({
         </ul>
       ) : null}
 
-      <div style={{ marginTop: 14 }}>
+      <div style={{ marginTop: 14 }} hidden={patternsMode}>
         <div className="field-label" id="imp-media-label" style={{ marginBottom: 6 }}>
           Tipo de mídia
         </div>
         <div className="radio-list" role="radiogroup" aria-labelledby="imp-media-label">
-          {MEDIA_CHOICES.map((choice) => (
+          {MEDIA_CHOICES.filter((choice) => choice.value !== "none").map((choice) => (
             <label key={choice.value} className="radio" title={choice.hint}>
               <input
                 type="radio"
@@ -290,7 +303,9 @@ export function ImportUnifiedForm({
       </div>
 
       <fieldset disabled={!hasProfiles} style={{ marginTop: 14, border: "none", padding: 0, minWidth: 0 }}>
-        <legend className="field-label">Perfis {hasProfiles ? "" : "(só vale quando a lista tem perfis)"}</legend>
+        <legend className="field-label">
+          {patternsMode ? "Quais publicações analisar" : `Perfis ${hasProfiles ? "" : "(só vale quando a lista tem perfis)"}`}
+        </legend>
         <div className="row wrap" style={{ gap: 12, alignItems: "flex-start" }}>
           <Field label="Quantidade por perfil" htmlFor="imp-quantity" error={hasProfiles && !quantity.ok ? quantity.error : null}>
             <div className="row">
@@ -348,7 +363,7 @@ export function ImportUnifiedForm({
               ) : null}
             </div>
           </Field>
-          {VIEWS_FILTER_ENABLED ? (
+          {VIEWS_FILTER_ENABLED && !patternsMode ? (
             <>
               <ViewsSelect
                 id="imp-min-views"
@@ -373,7 +388,7 @@ export function ImportUnifiedForm({
             </>
           ) : null}
         </div>
-        {VIEWS_FILTER_ENABLED ? (
+        {VIEWS_FILTER_ENABLED && !patternsMode ? (
           <div className={`small${hasProfiles && !views.ok ? " tone-err" : " muted"}`}>
             {patternsOnly
               ? "Só padrões não usa filtro de visualizações. Quantidade e período continuam valendo (a quantidade conta publicações)."
