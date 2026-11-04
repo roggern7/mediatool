@@ -94,7 +94,8 @@ def analysis_out(ctx: AppContext, analysis: dict[str, Any], stats: dict[str, Any
 
 def item_out(item: dict[str, Any], zone: export_time.Zone) -> dict[str, Any]:
     checked_date, checked_time = profile_report.local_parts(item["checked_at"], zone)
-    return {**item, "checked_date": checked_date, "checked_time": checked_time}
+    latest_reel_date, _ = profile_report.local_parts(item["latest_reel_at"], zone)
+    return {**item, "checked_date": checked_date, "checked_time": checked_time, "latest_reel_date": latest_reel_date}
 
 
 def create_analysis(ctx: AppContext, text: str) -> dict[str, Any]:

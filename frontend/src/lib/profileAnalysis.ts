@@ -293,6 +293,8 @@ export interface Cell {
   text: string;
   tone?: Tone;
   title?: string;
+  /** Selo ao lado do texto (ex.: "Só Reels"). */
+  badge?: { text: string; tone: Tone };
 }
 
 /** Célula sem dado que se aplique (perfil ainda não lido, cancelado ou indisponível). */
@@ -301,6 +303,7 @@ export const EMPTY_CELL: Cell = { text: "—" };
 export interface ItemCells {
   posts: Cell;
   views: Cell;
+  reels: Cell;
   stories: Cell;
   highlights: Cell;
   status: Cell;
@@ -317,8 +320,17 @@ export function checkCell(value: ProfileCheck | null): Cell {
   return UNVERIFIED_CELL;
 }
 
+/** Posts conta só a grade. Conteúdo publicado = posts da grade + Reels da aba Reels: com 0 na grade e Reels lidos, a
+ *  conta publica (só Reels), e a célula diz isso em vez de parecer vazia. */
 export function postsCell(item: ProfileAnalysisItem): Cell {
   if (item.posts_state === "unverified" || item.posts_count === null) return UNVERIFIED_CELL;
+  if (item.posts_count === 0 && (item.reels_count ?? 0) > 0) {
+    return {
+      text: "0 na grade",
+      title: "Nenhum post na grade, mas a conta publica Reels na aba Reels",
+      badge: { text: "Só Reels", tone: "accent" },
+    };
+  }
   if (item.posts_exact) return { text: formatCount(item.posts_count) };
   return {
     text: `≈ ${item.posts_text ?? formatCount(item.posts_count)}`,
@@ -334,6 +346,16 @@ export function viewsCell(item: ProfileAnalysisItem): Cell {
     text: formatCount(item.views_total),
     title: reels === 1 ? "Soma do último Reel lido" : `Soma dos últimos ${formatCount(reels)} Reels lidos`,
   };
+}
+
+/** Reels da 1a página da aba Reels: "12+" quando a aba tem mais, senão o número exato. Tooltip com o último Reel. */
+export function reelsCell(item: ProfileAnalysisItem): Cell {
+  if (item.reels_count === null) return UNVERIFIED_CELL;
+  const text = item.reels_more ? `${formatCount(item.reels_count)}+` : formatCount(item.reels_count);
+  const parts = [item.reels_more ? "A aba Reels tem mais do que os lidos" : null];
+  if (item.latest_reel_date) parts.push(`Último Reel: ${item.latest_reel_date}`);
+  const title = parts.filter(Boolean).join(" · ");
+  return title ? { text, title } : { text };
 }
 
 function errorText(item: ProfileAnalysisItem): string | undefined {
@@ -365,6 +387,7 @@ function dashes(status: Cell): ItemCells {
   return {
     posts: EMPTY_CELL,
     views: EMPTY_CELL,
+    reels: EMPTY_CELL,
     stories: EMPTY_CELL,
     highlights: EMPTY_CELL,
     status,
@@ -389,6 +412,7 @@ export function itemCells(item: ProfileAnalysisItem): ItemCells {
   return {
     posts: postsCell(item),
     views: viewsCell(item),
+    reels: reelsCell(item),
     stories: checkCell(item.stories),
     highlights: checkCell(item.highlights),
     status: statusCell(item),

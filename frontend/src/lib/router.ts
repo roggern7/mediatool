@@ -45,4 +45,5 @@ export const ROUTES = {
   profiles: "/analise-perfis",
   presets: "/presets",
   settings: "/configuracoes",
+  postTimes: "/padroes",
 } as const;

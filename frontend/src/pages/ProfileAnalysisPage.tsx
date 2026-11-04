@@ -399,6 +399,7 @@ function AnalysisPanel({ id, onChanged, onClose }: { id: number; onChanged: () =
               <th>Perfil</th>
               <th>Posts</th>
               <th>Views</th>
+              <th title="Reels da aba Reels na primeira página lida; 12+ quando há mais">Reels</th>
               <th>Stories</th>
               <th>Destaques</th>
               <th>Status</th>
@@ -432,6 +433,9 @@ function ItemRow({ item }: { item: ProfileAnalysisItem }) {
       <td className="nowrap">
         <CellView cell={cells.views} />
       </td>
+      <td className="nowrap">
+        <CellView cell={cells.reels} />
+      </td>
       <td>
         <CellView cell={cells.stories} />
       </td>
@@ -462,6 +466,12 @@ function CellView({ cell }: { cell: Cell }) {
   return (
     <span className={cell === EMPTY_CELL ? "dim" : undefined} title={cell.title}>
       {cell.text}
+      {cell.badge ? (
+        <>
+          {" "}
+          <Pill tone={cell.badge.tone}>{cell.badge.text}</Pill>
+        </>
+      ) : null}
     </span>
   );
 }

@@ -169,6 +169,11 @@ def test_report_endpoint_validation(harness):
         assert response.status_code == 422, response.text
     assert harness.client.get("/api/post-times/report.zip", params={"batch_id": 999}).status_code == 404
     assert harness.client.get("/api/post-times/report.zip", params={"group_id": 999}).status_code == 404
+    for params, status, code in (({}, 422, "invalid_input"), ({"batch_id": 1, "group_id": 1}, 422, "invalid_input"),
+                                 ({"batch_id": 999}, 404, "batch_not_found"),
+                                 ({"group_id": 999}, 404, "group_not_found")):
+        response = harness.client.get("/api/post-times/report", params=params)
+        assert (response.status_code, response.json()["code"]) == (status, code), response.text
 
 
 def test_report_zip_for_batch_and_group(harness_factory):
@@ -205,6 +210,11 @@ def test_report_zip_for_batch_and_group(harness_factory):
             assert all(f"/p/{code}/" in posts_text for code in ("P0", "P7", "CARR"))
             report = files[f"{profile}/padroes.txt"].decode("utf-8")
             assert f"=== @{profile} ===" in report and report.count("=== @") == 1
+        data = h.client.get("/api/post-times/report", params=params).json()
+        assert [account["username"] for account in data["accounts"]] == profiles
+        assert data["zip_url"] == "/api/post-times/report.zip?" + "&".join(f"{k}={v}" for k, v in params.items())
+        assert all(len(account["items"]) == 9 and len(account["hours"]) == 24 for account in data["accounts"])
+        assert len(data["comparison"]) == (2 if len(profiles) >= 2 else 0)
 
 
 def test_web_provider_calls_on_post_once_per_publication_before_type_filter():

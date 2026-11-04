@@ -17,8 +17,8 @@ TERMINAL_STATUSES_SQL = "('completed', 'cancelled', 'interrupted')"
 RESUMABLE_STATUSES = ("cancelled", "interrupted")
 ITEMS_PAGE = 500
 SNAPSHOT_COLUMNS = ("account_status", "display_name", "posts_state", "posts_count", "posts_exact", "posts_text",
-                    "views_state", "views_total", "views_reels", "stories", "highlights", "error_code",
-                    "error_message")
+                    "views_state", "views_total", "views_reels", "reels_count", "reels_more", "latest_reel_at",
+                    "stories", "highlights", "error_code", "error_message")
 _STATS = (
     "SELECT analysis_id, SUM(state = 'done') AS done, SUM(state IN ('pending', 'running')) AS pending,"
     " MAX(CASE WHEN state = 'running' THEN username END) AS running_username,"
