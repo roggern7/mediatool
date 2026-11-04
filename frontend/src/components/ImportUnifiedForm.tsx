@@ -292,7 +292,7 @@ export function ImportUnifiedForm({
         </label>
         <div className="muted small">
           {patternsOnly
-            ? "Sempre ligado em “Nada — só consultar padrões”."
+            ? "Sempre ligado em “Consultar padrões”."
             : "Guarda o horário de cada publicação dos perfis para baixar à parte um relatório .zip de padrões (tempo médio entre posts e sequências)."}
         </div>
         {onlyLinks ? (

@@ -21,12 +21,12 @@ export const MEDIA_CHOICES: { value: MediaChoice; label: string; hint: string }[
   { value: "videos_covers", label: "Vídeos e capas", hint: "Cada vídeo/Reel e a capa dele; fotos são ignoradas." },
   {
     value: "all",
-    label: "Todas — fotos, vídeos e capas",
+    label: "Todas: Fotos, Vídeos e Capas",
     hint: "Todos os itens de cada publicação (carrossel inteiro, na ordem) e a capa de cada vídeo.",
   },
   {
     value: "none",
-    label: "Nada — só consultar padrões",
+    label: "Nada: Só Consultar Padrões",
     hint: "Não baixa nenhuma mídia: só lê o horário das publicações de cada perfil para o relatório de padrões (.zip).",
   },
 ];
@@ -42,7 +42,7 @@ export function postProcessingApplies(media: MediaChoice): boolean {
   return media !== "covers" && media !== "photos" && media !== "none";
 }
 
-/** Lote/grupo só de padrões ("Nada — só consultar padrões"): nada foi baixado. */
+/** Lote/grupo só de padrões (aba "Consultar padrões"): nada foi baixado. */
 export function isPatternsOnly(x: { media?: MediaChoice | null; media_set?: MediaChoice | null }): boolean {
   return x.media === "none" || x.media_set === "none";
 }
@@ -63,7 +63,7 @@ export function postTimesReportUrl(target: { kind: "batch" | "group"; id: number
 }
 
 export const PATTERNS_NEED_PROFILES_TEXT =
-  "“Nada — só consultar padrões” vale só para perfis: links de publicações não têm padrão de postagem. " +
+  "“Consultar padrões” vale só para perfis: links de publicações não têm padrão de postagem. " +
   "Inclua ao menos um perfil na lista.";
 
 /** O que o pedido vai fazer com o horário dos posts; null sem horário pedido. */
