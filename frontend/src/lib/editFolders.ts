@@ -21,9 +21,9 @@ export function formatDay(day: string | null): string {
   return match ? `${match[3]}/${match[2]}/${match[1]}` : "-";
 }
 
-/** Nome da pasta: perfil(s), "Importação por link", "Enviados do computador — dia" ou "Outros vídeos". */
+/** Nome da pasta: perfil(s), "Importação por link", "Enviados do computador: dia" ou "Outros vídeos". */
 export function folderTitle(folder: EditFolder): string {
-  if (folder.kind === "local") return `Enviados do computador — ${formatDay(folder.day)}`;
+  if (folder.kind === "local") return `Enviados do computador: ${formatDay(folder.day)}`;
   if (folder.kind === "other") return "Outros vídeos";
   if (folder.import_mode === "links") return "Importação por link";
   const names = folder.profiles.map((p) => `@${p}`);

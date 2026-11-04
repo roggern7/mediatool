@@ -68,7 +68,7 @@ describe("LibraryVideoPicker", () => {
     const html = renderToStaticMarkup(createElement(EditFolderList, { folders, onOpen: () => undefined }));
     expect(html).toContain("2 perfis: @ana, @bia");
     expect(html).toContain("3 vídeos · 1 versão editada");
-    expect(html).toContain("Enviados do computador — 28/10/2026");
+    expect(html).toContain("Enviados do computador: 28/10/2026");
     expect(html.match(/<button/g)).toHaveLength(2);
   });
 });

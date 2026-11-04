@@ -63,7 +63,7 @@ describe("editFolders: nomes das pastas", () => {
   it("importação por link, envios do computador por dia e outros", () => {
     expect(folderTitle(folder({ import_mode: "links", profiles: [] }))).toBe("Importação por link");
     const local = folder({ key: "local:2026-10-28", kind: "local", import_mode: null, day: "2026-10-28", video_count: 1 });
-    expect(folderTitle(local)).toBe("Enviados do computador — 28/10/2026");
+    expect(folderTitle(local)).toBe("Enviados do computador: 28/10/2026");
     expect(folderSubtitle(local)).toBe("1 vídeo");
     const other = folder({ key: "other", kind: "other", import_mode: null, profiles: [] });
     expect(folderTitle(other)).toBe("Outros vídeos");
