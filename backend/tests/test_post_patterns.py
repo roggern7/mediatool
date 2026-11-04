@@ -6,17 +6,23 @@ import csv
 import io
 import zipfile
 from datetime import UTC, datetime, timedelta, timezone
+from xml.etree import ElementTree
 
 import pytest
 
+from app.services import xlsx_writer
 from app.services.export_time import utc_zone, zone_from_tzinfo
 from app.services.post_patterns import (
+    POST_COLUMNS,
+    SEGMENT_COLUMNS,
     PostTime,
     analyze_account,
     build_report_zip,
     format_duration,
     narrative,
+    post_rows,
     report_filename,
+    segment_rows,
 )
 
 MINUS_3 = zone_from_tzinfo(timezone(timedelta(hours=-3)))
@@ -86,32 +92,119 @@ def test_account_with_zero_or_one_post(count):
     assert len(narrative(account)) == count
 
 
+NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+      "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+      "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+      "ct": "http://schemas.openxmlformats.org/package/2006/content-types"}
+
+
 def read_zip(data: bytes) -> dict[str, bytes]:
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         return {name: archive.read(name) for name in archive.namelist()}
 
 
-def test_zip_has_three_files_with_bom_and_semicolon():
-    files = read_zip(build_report_zip(series("a", [72, 5, 30]), title="Teste", zone=MINUS_3))
-    assert sorted(files) == ["posts.csv", "relatorio.txt", "resumo.csv"]
-    text = files["relatorio.txt"].decode("utf-8")
-    assert "Padrões de publicação – Teste" in text and "Fuso: UTC-03:00" in text and "Comparativo" not in text
-    for name in ("posts.csv", "resumo.csv"):
-        assert files[name].startswith(b"\xef\xbb\xbf")
-    posts = list(csv.reader(io.StringIO(files["posts.csv"].decode("utf-8-sig")), delimiter=";"))
-    assert posts[0][:3] == ["perfil", "codigo", "link"]
-    assert posts[2][2] == "https://www.instagram.com/p/C1/" and posts[2][6] == "72,0"
-    assert posts[1][3:6] == ["03/11/2026", "08:00", "terça"]
-    summary = list(csv.reader(io.StringIO(files["resumo.csv"].decode("utf-8-sig")), delimiter=";"))
-    row = dict(zip(summary[0], summary[1], strict=True))
-    assert row["intervalo_medio_min"] == "35,7" and row["rajadas"] == "1"
+def read_csv(data: bytes) -> list[list[str]]:
+    assert data.startswith(b"\xef\xbb\xbf") and b"\r\n" in data
+    return list(csv.reader(io.StringIO(data.decode("utf-8-sig")), delimiter=";"))
 
 
-def test_several_accounts_produce_a_comparison():
+def read_xlsx(data: bytes) -> dict[str, list[list]]:
+    """Abas -> linhas (texto inline como str, número como float), conferindo a estrutura do pacote."""
+    parts = read_zip(data)
+    workbook = ElementTree.fromstring(parts["xl/workbook.xml"])
+    rels = ElementTree.fromstring(parts["xl/_rels/workbook.xml.rels"])
+    types = ElementTree.fromstring(parts["[Content_Types].xml"])
+    targets = {rel.get("Id"): rel.get("Target") for rel in rels.findall("rel:Relationship", NS)}
+    overrides = {o.get("PartName") for o in types.findall("ct:Override", NS) if o.get("ContentType").endswith(
+        "worksheet+xml")}
+    sheets = workbook.findall("m:sheets/m:sheet", NS)
+    assert len(overrides) == len(sheets) == len(workbook.findall("m:definedNames/m:definedName", NS))
+    assert sum(target == "styles.xml" for target in targets.values()) == 1
+    result = {}
+    for sheet in sheets:
+        name = sheet.get("name")
+        assert len(name) <= 31 and not set(name) & set("[]:*?/\\")
+        target = "xl/" + targets[sheet.get(f"{{{NS['r']}}}id")]
+        assert "/" + target in overrides and target in parts
+        root = ElementTree.fromstring(parts[target])
+        assert root.find("m:sheetViews/m:sheetView/m:pane", NS).get("state") == "frozen"
+        assert root.find("m:autoFilter", NS) is not None and root.find(".//m:f", NS) is None
+        rows = []
+        for number, row in enumerate(root.find("m:sheetData", NS)):
+            if number == 0:
+                assert {cell.get("s") for cell in row} == {"1"}   # cabeçalho em negrito
+            values = []
+            for cell in row:
+                text, value = cell.find("m:is/m:t", NS), cell.find("m:v", NS)
+                values.append(text.text if text is not None else float(value.text) if value is not None else None)
+            rows.append(values)
+        result[name] = rows
+    return result
+
+
+def test_zip_one_profile_has_only_its_folder():
+    files = read_zip(build_report_zip(series("a.b", [72, 5, 30]), title="Teste", zone=MINUS_3))
+    assert sorted(files) == ["a_b/a_b.xlsx", "a_b/padroes.txt", "a_b/posts.csv", "a_b/sequencia.csv"]
+    text = files["a_b/padroes.txt"].decode("utf-8")
+    assert text.startswith("Padrões de publicação – @a.b\n") and "Fuso: UTC-03:00" in text and "Rajada:" in text
+    assert "=== @a.b ===" in text and "Comparativo" not in text
+    posts = read_csv(files["a_b/posts.csv"])
+    assert tuple(posts[0]) == POST_COLUMNS
+    assert posts[1][:4] == ["1", "03/11/2026", "08:00", "terça"]
+    assert posts[2][4:8] == ["72,0", "1 h 12 min", "1", "Sim"] and posts[2][-1] == "https://www.instagram.com/p/C1/"
+    assert tuple(read_csv(files["a_b/sequencia.csv"])[0]) == SEGMENT_COLUMNS
+    sheets = read_xlsx(files["a_b/a_b.xlsx"])
+    assert list(sheets) == ["Resumo", "Sequência", "Posts"]
+    assert sheets["Resumo"][0] == ["Item", "Valor"] and sheets["Resumo"][1] == ["Posts analisados", 4.0]
+    assert ["Padrões identificados", None] in sheets["Resumo"] and ["09h", 3.0] in sheets["Resumo"]
+    assert tuple(sheets["Sequência"][0]) == SEGMENT_COLUMNS and tuple(sheets["Posts"][0]) == POST_COLUMNS
+    assert sheets["Posts"][2][4] == 72.0 and sheets["Posts"][2][8] == "Reel"
+    assert len(sheets["Posts"]) == len(posts) == 5
+
+
+def test_two_profiles_get_a_comparison_and_never_mix():
     posts = series("rapida", [5, 5, 5, 5]) + series("lenta", [180, 200, 190], prefix="L")
-    text = read_zip(build_report_zip(posts, title="Duas", zone=MINUS_3))["relatorio.txt"].decode("utf-8")
-    assert "=== @rapida ===" in text and "=== @lenta ===" in text and "=== Comparativo ===" in text
-    assert "Quem posta mais: @rapida" in text and "Mais regular:" in text
+    files = read_zip(build_report_zip(posts, title="Duas", zone=MINUS_3))
+    assert {name.split("/")[0] for name in files} == {"comparativo.xlsx", "comparativo.txt", "rapida", "lenta"}
+    assert len([name for name in files if "/" in name]) == 8
+    comparison = files["comparativo.txt"].decode("utf-8")
+    assert "=== Comparativo ===" in comparison and "Quem posta mais: @rapida" in comparison
+    assert "=== @rapida ===" not in comparison
+    table = read_xlsx(files["comparativo.xlsx"])["Comparativo"]
+    assert [row[0] for row in table] == ["Perfil", "@rapida", "@lenta"] and table[1][1] == 5.0
+    for own, other in (("rapida", "/p/L"), ("lenta", "/p/C")):
+        for name in (f"{own}/{own}.xlsx", f"{own}/posts.csv", f"{own}/sequencia.csv", f"{own}/padroes.txt"):
+            data = files[name] if not name.endswith(".xlsx") else b"".join(read_zip(files[name]).values())
+            assert other.encode() not in data, name
+        text = files[f"{own}/padroes.txt"].decode("utf-8")
+        assert f"=== @{own} ===" in text and text.count("=== @") == 1
+    assert len(read_csv(files["rapida/posts.csv"])) == 6 and len(read_csv(files["lenta/posts.csv"])) == 5
+
+
+def test_sheet_segments_match_the_narrative():
+    account = analyze_account("a", series("a", [72, 72, 72, 72, 5, 19 * 60 + 30, 72]), MINUS_3)
+    segments, posts = segment_rows(account), post_rows(account)
+    assert [row[7] for row in segments] == ["Ritmo", "Rajada", "Pausa", "Ritmo"]
+    story = narrative(account)
+    for line, row in zip(story, segments, strict=False):   # a narrativa tem uma linha a mais ("último post")
+        assert line.startswith(f"{row[1][:5]} {row[1][-5:]}") and line.endswith(row[8])
+    assert [row[6] for row in posts] == [1, 1, 1, 1, 1, 2, 3, 4]
+    assert [row[7] for row in posts] == ["Não"] * 4 + ["Sim", "Sim", "Não", "Não"]
+    for row in segments:   # o intervalo médio do trecho é a média dos intervalos dos posts com aquele Trecho
+        values = [post[4] for post in posts if post[6] == row[0] and post[4] is not None]
+        assert len(values) == row[4] and round(sum(values) / len(values), 1) == row[5]
+
+
+def test_multi_sheet_writer_validates_names_and_keeps_text_inline():
+    target = io.BytesIO()
+    xlsx_writer.write_xlsx_sheets(target, [xlsx_writer.Sheet("Um", ["A", "B"], [["=1+1", 2]], [10, 10]),
+                                           xlsx_writer.Sheet("Dois", ["C"], [], [10])])
+    sheets = read_xlsx(target.getvalue())
+    assert sheets == {"Um": [["A", "B"], ["=1+1", 2.0]], "Dois": [["C"]]}
+    for bad in ("x" * 32, "a/b", "", "Um"):
+        with pytest.raises(ValueError):
+            xlsx_writer.write_xlsx_sheets(io.BytesIO(), [xlsx_writer.Sheet("Um", ["A"], [], [10]),
+                                                         xlsx_writer.Sheet(bad, ["A"], [], [10])])
 
 
 def test_report_filename():

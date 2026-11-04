@@ -23,8 +23,8 @@ POST_TIMES_NOT_FOUND_MESSAGE = (
 
 @router.get("/post-times/report.zip", response_class=Response)
 def post_times_report(ctx: Ctx, batch_id: OptionalId = None, group_id: OptionalId = None) -> Response:
-    """ZIP com relatorio.txt, resumo.csv e posts.csv de um lote (`batch_id`) OU de um grupo (`group_id`). Sem
-    horários gravados: 404 `post_times_not_found`. Nunca consulta o Instagram."""
+    """ZIP com uma pasta por perfil (e comparativo com 2+ perfis) de um lote (`batch_id`) OU de um grupo
+    (`group_id`). Sem horários gravados: 404 `post_times_not_found`. Nunca consulta o Instagram."""
     if (batch_id is None) == (group_id is None):
         raise AppError(422, "invalid_input", "Informe batch_id ou group_id (um dos dois).")
     if batch_id is not None:

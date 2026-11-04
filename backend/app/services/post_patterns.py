@@ -1,8 +1,9 @@
 """Padrões de publicação por conta do Instagram a partir dos horários dos posts (funções puras).
 
-Entrada: `PostTime` (horário UTC de cada publicação). Saída: um ZIP em memória com `relatorio.txt` (especificações,
-padrões identificados e sequência narrativa por conta, mais um comparativo quando há 2+ contas), `resumo.csv` (uma
-linha por conta) e `posts.csv` (todas as publicações). CSVs com `;`, BOM UTF-8, CRLF e decimal com vírgula.
+Entrada: `PostTime` (horário UTC de cada publicação). Saída: um ZIP em memória com uma pasta por perfil
+(`<perfil>/<perfil>.xlsx` com as abas Resumo, Sequência e Posts; `padroes.txt` com especificações, padrões e sequência
+narrativa só daquele perfil; `posts.csv`; `sequencia.csv`) e, com 2+ perfis, `comparativo.xlsx` e `comparativo.txt` na
+raiz (o único conteúdo que junta perfis). CSVs com `;`, BOM UTF-8, CRLF e decimal com vírgula.
 
 Regras (limiares nas constantes abaixo):
 - Por conta: deduplica por código (fica a primeira ocorrência), ignora datas inválidas (contadas à parte) e ordena por
@@ -29,9 +30,10 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 from app.services import export_time
-from app.services.export_names import sanitize_component
+from app.services.export_names import safe_stem, sanitize_component
 from app.services.export_time import Zone
 from app.services.profile_report import neutralize
+from app.services.xlsx_writer import Cell, Sheet, write_xlsx_sheets
 
 BURST_MINUTES = 15.0
 PAUSE_MIN_MINUTES = 6 * 60.0
@@ -479,74 +481,194 @@ def _comparison(accounts: list[AccountAnalysis]) -> list[str]:
     return lines
 
 
-def build_text(accounts: list[AccountAnalysis], *, title: str, generated_at: datetime, zone_text: str) -> str:
-    lines = [f"Padrões de publicação – {title}",
-             f"Gerado em: {_date_time(generated_at, True)}",
-             f"Fuso: {zone_text} (todos os horários deste relatório são locais)",
-             f"Contas ({len(accounts)}): {', '.join('@' + a.username for a in accounts) or '-'}",
-             f"Rajada: posts com até {BURST_MINUTES:.0f} min de intervalo. Pausa: intervalo maior que "
-             f"{format_duration(PAUSE_MIN_MINUTES)} e que {PAUSE_MEDIAN_FACTOR:.0f}x a mediana da conta.",
-             ""]
-    for account in accounts:
-        lines += _account_section(account)
-    if len(accounts) >= 2:
-        lines += _comparison(accounts)
-    return "\n".join(lines)
+def _header(heading: str, generated_at: datetime, zone_text: str) -> list[str]:
+    return [f"Padrões de publicação – {heading}",
+            f"Gerado em: {_date_time(generated_at, True)}",
+            f"Fuso: {zone_text} (todos os horários deste relatório são locais)"]
+
+
+def _legend() -> str:
+    return (f"Rajada: posts com até {BURST_MINUTES:.0f} min de intervalo. Pausa: intervalo maior que "
+            f"{format_duration(PAUSE_MIN_MINUTES)} e que {PAUSE_MEDIAN_FACTOR:.0f}x a mediana da conta.")
+
+
+def profile_text(account: AccountAnalysis, *, generated_at: datetime, zone_text: str) -> str:
+    """padroes.txt de um perfil: cabeçalho e a seção só dele."""
+    lines = [*_header(f"@{account.username}", generated_at, zone_text), _legend(), ""]
+    return "\n".join(lines + _account_section(account))
+
+
+def comparison_text(accounts: list[AccountAnalysis], *, title: str, generated_at: datetime, zone_text: str) -> str:
+    """comparativo.txt (2+ perfis): cabeçalho e a seção "Comparativo"."""
+    lines = [*_header(title, generated_at, zone_text),
+             f"Contas ({len(accounts)}): {', '.join('@' + a.username for a in accounts)}", _legend(), ""]
+    return "\n".join(lines + _comparison(accounts))
 
 
 def _link(code: str) -> str:
     return f"https://www.instagram.com/p/{quote(code, safe='')}/" if code else ""
 
 
-SUMMARY_COLUMNS = ("perfil", "posts_analisados", "fixados_fora", "sem_data_valida", "duplicados", "primeiro_post",
-                   "ultimo_post", "dias_no_periodo", "posts_por_dia", "intervalo_medio_min", "intervalo_mediano_min",
-                   "intervalo_minimo_min", "intervalo_maximo_min", "coef_variacao", "regularidade", "rajadas",
-                   "maior_rajada_posts", "pausas_longas", "maior_pausa_min", "horarios_preferidos",
-                   "faixa_intervalo_mais_comum", "tipo_mais_postado")
-POST_COLUMNS = ("perfil", "codigo", "link", "data_local", "hora_local", "dia_semana", "intervalo_desde_anterior_min",
-                "tipo", "fixado", "na_sequencia")
+# ---------------------------------------------------------------- planilhas e CSVs
+
+COMPARISON_COLUMNS = ("Perfil", "Posts analisados", "Fixados fora", "Sem data válida", "Duplicados", "Primeiro post",
+                      "Último post", "Dias no período", "Posts/dia", "Intervalo médio (min)",
+                      "Intervalo mediano (min)", "Intervalo mínimo (min)", "Intervalo máximo (min)",
+                      "Coef. de variação", "Regularidade", "Rajadas", "Maior rajada (posts)", "Pausas longas",
+                      "Maior pausa (min)", "Horários preferidos", "Faixa de intervalo mais comum", "Tipo mais postado")
+COMPARISON_WIDTHS = (22, 10, 10, 10, 10, 17, 17, 10, 10, 12, 12, 12, 12, 10, 13, 9, 11, 9, 12, 20, 22, 20)
+SUMMARY_SHEET_COLUMNS = ("Item", "Valor")
+SEGMENT_COLUMNS = ("Nº", "Início", "Fim", "Posts", "Intervalos", "Intervalo médio (min)", "Intervalo médio (texto)",
+                   "Classificação", "Descrição")
+SEGMENT_WIDTHS = (6, 17, 17, 7, 10, 12, 18, 13, 60)
+POST_COLUMNS = ("Nº", "Data", "Hora", "Dia da semana", "Intervalo desde o anterior (min)", "Intervalo", "Trecho",
+                "Rajada", "Tipo", "Fixado", "Na sequência", "Link")
+POST_WIDTHS = (6, 11, 7, 13, 14, 16, 8, 8, 11, 8, 12, 44)
+SEGMENT_LABELS = {"steady": "Ritmo", "burst": "Rajada", "pause": "Pausa"}
+KIND_NAMES = {"photo": "Foto", "video": "Vídeo", "reel": "Reel", "carousel": "Carrossel"}
+_FLAG = {True: "Sim", False: "Não", None: ""}
 
 
-def _csv_text(header: tuple[str, ...], rows: list[list[str]]) -> bytes:
+def _minutes(value: float | None, places: int = 1) -> float | None:
+    return None if value is None else round(value, places)
+
+
+def _top_kind(account: AccountAnalysis) -> str:
+    if not account.kinds:
+        return ""
+    name, amount = account.kinds.most_common(1)[0]
+    return f"{KIND_LABELS.get(name, name)} ({_percent(amount, sum(account.kinds.values()))}%)"
+
+
+def comparison_rows(accounts: list[AccountAnalysis]) -> list[list[Cell]]:
+    """Uma linha por perfil (colunas `COMPARISON_COLUMNS`), números como número."""
+    rows: list[list[Cell]] = []
+    for a in accounts:
+        first = _date_time(a.sequence[0].local, True) if a.sequence else None
+        last = _date_time(a.sequence[-1].local, True) if a.sequence else None
+        rows.append([f"@{a.username}", len(a.sequence), len(a.pinned_outside), len(a.undated), a.duplicates, first,
+                     last, a.days if a.sequence else None, _minutes(a.posts_per_day, 2), _minutes(a.mean),
+                     _minutes(a.median), _minutes(a.minimum), _minutes(a.maximum), _minutes(a.cv, 2), a.regularity,
+                     len(a.bursts), max(a.bursts, default=None), len(a.pauses), _minutes(max(a.pauses, default=None)),
+                     ", ".join(_hour(h) for h in a.top_hours), a.typical_bucket or "", _top_kind(a)])
+    return rows
+
+
+def _post_segments(account: AccountAnalysis) -> tuple[list[int | None], list[bool]]:
+    """Por post da sequência: nº do trecho (o do intervalo que chega nele; o 1º post fica no trecho 1) e se faz parte
+    de uma rajada (do 1º ao último post dela)."""
+    count = len(account.sequence)
+    numbers: list[int | None] = [None] * count
+    burst = [False] * count
+    for number, segment in enumerate(account.segments, start=1):
+        end = segment.start + len(segment.intervals)
+        for index in range(segment.start + 1, end + 1):
+            numbers[index] = number
+        if segment.kind == "burst":
+            for index in range(segment.start, end + 1):
+                burst[index] = True
+    if account.segments:
+        numbers[0] = 1
+    return numbers, burst
+
+
+def segment_rows(account: AccountAnalysis) -> list[list[Cell]]:
+    """Aba Sequência: um trecho por linha (colunas `SEGMENT_COLUMNS`), em ordem cronológica."""
+    rows: list[list[Cell]] = []
+    sequence = account.sequence
+    for number, segment in enumerate(account.segments, start=1):
+        mean = sum(segment.intervals) / len(segment.intervals)
+        rows.append([number, _date_time(sequence[segment.start].local, True),
+                     _date_time(sequence[segment.start + len(segment.intervals)].local, True), segment.posts,
+                     len(segment.intervals), round(mean, 1), format_duration(mean), SEGMENT_LABELS[segment.kind],
+                     _segment_text(segment)])
+    return rows
+
+
+def post_rows(account: AccountAnalysis) -> list[list[Cell]]:
+    """Aba Posts: uma publicação por linha (colunas `POST_COLUMNS`): a sequência em ordem cronológica, depois os
+    fixados fora dela e, por último, os sem data válida."""
+    numbers, burst = _post_segments(account)
+    rows: list[list[Cell]] = []
+    items = [(item, numbers[i], burst[i]) for i, item in enumerate(account.sequence)]
+    items += [(item, None, False) for item in account.pinned_outside]
+    for item, segment, in_burst in items:
+        local, post = item.local, item.post
+        rows.append([len(rows) + 1, f"{local.day:02d}/{local.month:02d}/{local.year:04d}",
+                     f"{local.hour:02d}:{local.minute:02d}", WEEKDAYS[local.weekday()], _minutes(item.interval),
+                     "" if item.interval is None else format_duration(item.interval), segment,
+                     _FLAG[in_burst] if item.in_sequence else "", KIND_NAMES.get(post.kind, post.kind or ""),
+                     _FLAG[post.pinned], _FLAG[item.in_sequence], _link(post.code)])
+    for post in account.undated:
+        rows.append([len(rows) + 1, "", "", "", None, "", None, "", KIND_NAMES.get(post.kind, post.kind or ""),
+                     _FLAG[post.pinned], "Não", _link(post.code)])
+    return rows
+
+
+def summary_sheet_rows(account: AccountAnalysis) -> list[list[Cell]]:
+    """Aba Resumo (Item | Valor): especificações, padrões identificados e distribuição por hora e dia da semana."""
+    a, sequence = account, account.sequence
+    rows: list[list[Cell]] = [["Posts analisados", len(sequence)]]
+    if a.pinned_outside:
+        rows.append(["Fixados fora da sequência", len(a.pinned_outside)])
+    if a.undated:
+        rows.append(["Ignorados sem data válida", len(a.undated)])
+    if a.duplicates:
+        rows.append(["Duplicados ignorados (mesmo código)", a.duplicates])
+    if sequence:
+        rows.append(["Período", f"{_date_time(sequence[0].local, True)} → {_date_time(sequence[-1].local, True)} "
+                                f"({a.days} dia{'' if a.days == 1 else 's'})"])
+        rows.append(["Posts por dia", _minutes(a.posts_per_day, 2)])
+    if a.intervals:
+        rows += [["Intervalo médio", format_duration(a.mean)], ["Intervalo mediano", format_duration(a.median)],
+                 ["Intervalo mínimo", format_duration(a.minimum)], ["Intervalo máximo", format_duration(a.maximum)]]
+        cv = "" if a.cv is None else f" (coeficiente de variação {_decimal(a.cv, 2)})"
+        rows.append(["Regularidade", f"{a.regularity}{cv}"])
+        rows.append([f"Rajadas (até {BURST_MINUTES:.0f} min)", len(a.bursts)])
+        if a.bursts:
+            rows.append(["Maior rajada (posts)", max(a.bursts)])
+        rows.append([f"Pausas (mais de {format_duration(a.pause_threshold)})", len(a.pauses)])
+        if a.pauses:
+            rows.append(["Maior pausa", format_duration(max(a.pauses))])
+    if sequence:
+        rows.append(["Horários preferidos", f"{_join([_hour(h) for h in a.top_hours])} "
+                                            f"({a.top_hours_share:.0f}% dos posts)"])
+        active = sorted((d for d in range(7) if a.weekdays[d]), key=lambda d: (-a.weekdays[d], d))[:3]
+        rows.append(["Dias mais ativos", ", ".join(f"{WEEKDAYS[d]} ({a.weekdays[d]})" for d in active)])
+    if a.typical_bucket:
+        rows.append(["Intervalo típico", f"mediana {format_duration(a.median)}; faixa mais frequente "
+                                         f"{a.typical_bucket} ({a.typical_bucket_share:.0f}%)"])
+    if a.kinds:
+        rows.append(["Tipo mais postado", _top_kind(a)])
+    rows += [[None, None], ["Padrões identificados", None]]
+    rows += [[None, line] for line in a.patterns]
+    rows += [[None, None], ["Posts por hora (local)", None]]
+    rows += [[f"{h:02d}h", a.hours[h]] for h in range(24)]
+    rows += [[None, None], ["Posts por dia da semana", None]]
+    rows += [[WEEKDAYS[d], a.weekdays[d]] for d in range(7)]
+    return rows
+
+
+def _csv_cell(value: Cell) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return str(value).replace(".", ",")
+    return neutralize(value) if isinstance(value, str) else str(value)
+
+
+def _csv_text(header: tuple[str, ...], rows: list[list[Cell]]) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
     writer.writerow(header)
-    writer.writerows(rows)
+    writer.writerows([_csv_cell(value) for value in row] for row in rows)
     return buffer.getvalue().encode("utf-8-sig")
 
 
-def summary_rows(accounts: list[AccountAnalysis]) -> list[list[str]]:
-    rows = []
-    for a in accounts:
-        first = _date_time(a.sequence[0].local, True) if a.sequence else ""
-        last = _date_time(a.sequence[-1].local, True) if a.sequence else ""
-        kind = ""
-        if a.kinds:
-            name, amount = a.kinds.most_common(1)[0]
-            kind = f"{KIND_LABELS.get(name, name)} ({_percent(amount, sum(a.kinds.values()))}%)"
-        rows.append([neutralize(a.username), str(len(a.sequence)), str(len(a.pinned_outside)), str(len(a.undated)),
-                     str(a.duplicates), first, last, str(a.days) if a.sequence else "", _decimal(a.posts_per_day, 2),
-                     _decimal(a.mean), _decimal(a.median), _decimal(a.minimum), _decimal(a.maximum),
-                     _decimal(a.cv, 2), a.regularity, str(len(a.bursts)), str(max(a.bursts, default=0) or ""),
-                     str(len(a.pauses)), _decimal(max(a.pauses)) if a.pauses else "",
-                     ", ".join(_hour(h) for h in a.top_hours), a.typical_bucket or "", kind])
-    return rows
-
-
-def post_rows(accounts: list[AccountAnalysis]) -> list[list[str]]:
-    rows = []
-    flag = {True: "Sim", False: "Não", None: ""}
-    for a in accounts:
-        for item in a.posts:
-            local, post = item.local, item.post
-            rows.append([neutralize(a.username), neutralize(post.code), _link(post.code),
-                         f"{local.day:02d}/{local.month:02d}/{local.year:04d}", f"{local.hour:02d}:{local.minute:02d}",
-                         WEEKDAYS[local.weekday()], _decimal(item.interval), post.kind or "", flag[post.pinned],
-                         flag[item.in_sequence]])
-        for post in a.undated:
-            rows.append([neutralize(a.username), neutralize(post.code), _link(post.code), "", "", "", "",
-                         post.kind or "", flag[post.pinned], "Não"])
-    return rows
+def _xlsx(sheets: list[Sheet]) -> bytes:
+    buffer = io.BytesIO()
+    write_xlsx_sheets(buffer, sheets)
+    return buffer.getvalue()
 
 
 def _entry(name: str) -> zipfile.ZipInfo:
@@ -555,18 +677,48 @@ def _entry(name: str) -> zipfile.ZipInfo:
     return info
 
 
+def _slug(text: str) -> str:
+    return re.sub(r"[\s_]+", "_", sanitize_component(text).replace(".", "_"))[:TITLE_MAX_LENGTH].strip("_ ")
+
+
+def _folder_names(accounts: list[AccountAnalysis]) -> list[str]:
+    """Nome da pasta de cada perfil: usuário saneado, nunca vazio/reservado, sem repetir (sufixo _2, _3...)."""
+    names: list[str] = []
+    for account in accounts:
+        base = safe_stem(_slug(account.username))
+        name, extra = base, 1
+        while name.lower() in {used.lower() for used in names}:
+            extra += 1
+            name = f"{base}_{extra}"
+        names.append(name)
+    return names
+
+
 def build_report_zip(posts: list[PostTime], *, title: str, zone: Zone | None = None) -> bytes:
-    """ZIP em memória com relatorio.txt, resumo.csv e posts.csv. `zone`: fuso de apresentação (`export_time.Zone`);
-    None = fuso padrão do Media Tool."""
+    """ZIP em memória: uma pasta por perfil (`<perfil>.xlsx` com as abas Resumo, Sequência e Posts; `padroes.txt`;
+    `posts.csv`; `sequencia.csv`) e, com 2+ perfis, `comparativo.xlsx` e `comparativo.txt` na raiz. `zone`: fuso de
+    apresentação (`export_time.Zone`); None = fuso padrão do Media Tool."""
     zone = zone or default_zone()
     now = datetime.now(UTC)
+    generated_at, zone_text = _to_local(now, zone), zone_label(zone, now)
     accounts = analyze(posts, zone)
-    text = build_text(accounts, title=title, generated_at=_to_local(now, zone), zone_text=zone_label(zone, now))
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(_entry("relatorio.txt"), text.encode("utf-8"))
-        archive.writestr(_entry("resumo.csv"), _csv_text(SUMMARY_COLUMNS, summary_rows(accounts)))
-        archive.writestr(_entry("posts.csv"), _csv_text(POST_COLUMNS, post_rows(accounts)))
+        if len(accounts) >= 2:
+            archive.writestr(_entry("comparativo.xlsx"), _xlsx([Sheet(
+                "Comparativo", COMPARISON_COLUMNS, comparison_rows(accounts), COMPARISON_WIDTHS)]))
+            archive.writestr(_entry("comparativo.txt"), comparison_text(
+                accounts, title=title, generated_at=generated_at, zone_text=zone_text).encode("utf-8"))
+        for account, folder in zip(accounts, _folder_names(accounts), strict=True):
+            segments, items = segment_rows(account), post_rows(account)
+            archive.writestr(_entry(f"{folder}/{folder}.xlsx"), _xlsx([
+                Sheet("Resumo", SUMMARY_SHEET_COLUMNS, summary_sheet_rows(account), (38, 70)),
+                Sheet("Sequência", SEGMENT_COLUMNS, segments, SEGMENT_WIDTHS),
+                Sheet("Posts", POST_COLUMNS, items, POST_WIDTHS)]))
+            archive.writestr(_entry(f"{folder}/padroes.txt"), profile_text(
+                account, generated_at=generated_at, zone_text=zone_text).encode("utf-8"))
+            archive.writestr(_entry(f"{folder}/posts.csv"), _csv_text(POST_COLUMNS, items))
+            archive.writestr(_entry(f"{folder}/sequencia.csv"), _csv_text(SEGMENT_COLUMNS, segments))
     return buffer.getvalue()
 
 
@@ -575,6 +727,6 @@ def report_filename(title: str, generated_at: datetime) -> str:
     é convertido para o fuso padrão do Media Tool."""
     if generated_at.tzinfo is not None:
         generated_at = _to_local(generated_at, default_zone())
-    name = re.sub(r"[\s_]+", "_", sanitize_component(title).replace(".", "_"))[:TITLE_MAX_LENGTH].strip("_ ")
+    name = _slug(title)
     stamp = generated_at.strftime("%Y-%m-%d_%H%M")
     return f"padroes_{name}_{stamp}.zip" if name else f"padroes_{stamp}.zip"
