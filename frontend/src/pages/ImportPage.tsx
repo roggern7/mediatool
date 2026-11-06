@@ -95,7 +95,7 @@ import { BatchLinksPanel } from "../components/BatchLinksPanel";
 import { ImportGroupPanel } from "../components/ImportGroupPanel";
 import { ImportLinksForm } from "../components/ImportLinksForm";
 import { ImportUnifiedForm } from "../components/ImportUnifiedForm";
-import { analyzedPostsText, createdText, isPatternsOnly } from "../lib/importUnified";
+import { alreadyDownloadedNote, analyzedPostsText, createdText, isPatternsOnly } from "../lib/importUnified";
 import { PostTimesReportButton } from "../components/PostTimesReportButton";
 import { EditSettingsForm } from "../components/edit/EditSettingsForm";
 import { DEFAULT_EDIT_FORM, type EditForm } from "../lib/editSettings";
@@ -1122,9 +1122,13 @@ function BatchSummary({ batch }: { batch: Batch }) {
         ["Baixados", p.downloaded],
         // Lote só de download não tem etapa de processamento para contar.
         ...(downloadOnly ? [] : ([["Processados", p.processed]] as [string, number][])),
-        ["Ignorados", p.skipped],
-        // Importação unificada: já existentes e filtrados por tipo/período/visualizações (ausentes em backends antigos).
-        ...(typeof p.duplicates === "number" ? ([["Duplicados", p.duplicates]] as [string, number][]) : []),
+        // Já existentes na Biblioteca (não baixados de novo, mas parte do lote) e filtrados por tipo/período/
+        // visualizações (ausentes em backends antigos, que só mandam "Ignorados").
+        ...(typeof p.duplicates === "number"
+          ? ([["Já baixados antes", p.duplicates]] as [string, number][]).concat(
+              p.skipped > p.duplicates ? [["Ignorados", p.skipped - p.duplicates]] : [],
+            )
+          : ([["Ignorados", p.skipped]] as [string, number][])),
         ...(typeof p.filtered === "number" ? ([["Filtrados", p.filtered]] as [string, number][]) : []),
         ["Erros", p.failed],
         ["Pendentes", p.pending],
@@ -1184,6 +1188,11 @@ function BatchSummary({ batch }: { batch: Batch }) {
               : "Coletando a lista de mídias do perfil."}
         </div>
       ) : null}
+      {!patternsOnly && alreadyDownloadedNote(p) ? (
+        <div className="muted small" style={{ marginTop: 5 }}>
+          {alreadyDownloadedNote(p)}
+        </div>
+      ) : null}
       {viewsFilterText(visibleFilter(batch.views_filter), p.downloaded) ? (
         <div className="muted small" style={{ marginTop: 5 }}>
           {viewsFilterText(visibleFilter(batch.views_filter), p.downloaded)}
@@ -1231,7 +1240,7 @@ function RecentTable({
             <th className="num">Encontrados</th>
             <th className="num">Baixados</th>
             <th className="num">Processados</th>
-            <th className="num">Ignorados</th>
+            <th className="num">Já baixados</th>
             <th className="num">Erros</th>
             <th>Criado em</th>
             {onRemove ? <th aria-label="Ações" /> : null}
@@ -1293,7 +1302,7 @@ function RecentTable({
                 <td className="num muted" title={downloadOnly ? "Somente originais" : undefined}>
                   {downloadOnly || patternsOnly ? "-" : formatCount(p.processed)}
                 </td>
-                <td className="num muted">{formatCount(p.skipped)}</td>
+                <td className="num muted">{patternsOnly ? "-" : formatCount(p.duplicates ?? p.skipped)}</td>
                 <td className={`num ${p.failed > 0 ? "tone-err" : "muted"}`}>{formatCount(p.failed)}</td>
                 <td className="muted nowrap">{formatDateTime(item.created_at)}</td>
                 {onRemove ? (

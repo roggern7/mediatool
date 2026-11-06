@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ClassifyResult, UnifiedImportResult } from "../api/types";
 import { LIBRARY_TYPE_FILTERS, libraryTypeQuery, mediaKindLabel } from "./importCovers";
 import {
+  alreadyDownloadedNote,
   MEDIA_CHOICES,
   autoExportText,
   autoExportNeedsProcessing,
@@ -148,14 +149,27 @@ describe("Biblioteca: capas", () => {
   });
 });
 
-describe("contadores Duplicados e Filtrados", () => {
+describe("contadores Já baixados antes e Filtrados", () => {
   it("mostra os dois quando o backend manda, inclusive zero", () => {
-    expect(progressExtrasText({ duplicates: 2, filtered: 1500 })).toBe("Duplicados: 2 · Filtrados: 1.500");
-    expect(progressExtrasText({ duplicates: 0, filtered: 0 })).toBe("Duplicados: 0 · Filtrados: 0");
+    expect(progressExtrasText({ duplicates: 2, filtered: 1500 })).toBe("Já baixados antes: 2 · Filtrados: 1.500");
+    expect(progressExtrasText({ duplicates: 0, filtered: 0 })).toBe("Já baixados antes: 0 · Filtrados: 0");
   });
   it("backend antigo sem os campos: nada", () => {
     expect(progressExtrasText({})).toBeNull();
     expect(progressExtrasText({ filtered: 3 })).toBe("Filtrados: 3");
+  });
+});
+
+describe("aviso dos itens já baixados antes", () => {
+  it("diz que não baixou de novo e que vão no ZIP", () => {
+    const two = alreadyDownloadedNote({ duplicates: 2 });
+    expect(two).toContain("2 itens já tinham sido baixados antes");
+    expect(two).toContain("vão juntos no ZIP");
+    expect(alreadyDownloadedNote({ duplicates: 1 })).toContain("1 item já tinha sido baixado antes");
+  });
+  it("sem repetidos ou backend antigo: nada", () => {
+    expect(alreadyDownloadedNote({ duplicates: 0 })).toBeNull();
+    expect(alreadyDownloadedNote({})).toBeNull();
   });
 });
 

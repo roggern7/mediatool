@@ -22,7 +22,7 @@ export const JOB_STAGE_LABEL: Record<JobStage, string> = {
   processing: "Processando",
   finalizing: "Finalizando",
   done: "Concluído",
-  skipped: "Ignorado",
+  skipped: "Reaproveitado",
 };
 
 export const BATCH_STATUS_LABEL: Record<BatchStatus, string> = {
@@ -163,7 +163,7 @@ export function jobKindLabel(kind: "ingest" | "process"): string {
   return kind === "process" ? "Processamento" : "Download";
 }
 
-/** "Duplicado" só faz sentido para downloads; reprocessar mídia existente não é duplicidade. */
+/** "Já baixado antes" só faz sentido para downloads; reprocessar mídia existente não é duplicidade. */
 export function showDuplicate(job: { kind: "ingest" | "process"; is_duplicate: boolean }): boolean {
   return job.kind === "ingest" && job.is_duplicate;
 }

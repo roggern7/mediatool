@@ -344,7 +344,7 @@ export function QueuePage() {
                                       : "Mídia já importada antes"
                                   }
                                 >
-                                  Duplicado
+                                  Já baixado antes
                                 </span>
                               ) : null}
                             </div>
