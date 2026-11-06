@@ -239,12 +239,31 @@ export function createdText(result: UnifiedImportResult): string {
 }
 
 /**
- * Contadores da importação unificada, com os mesmos rótulos do resumo da Importação: "Duplicados: 2 · Filtrados: 5".
+ * Contadores da importação unificada, com os mesmos rótulos do resumo da Importação:
+ * "Já baixados antes: 2 · Filtrados: 5".
  * Só os que o backend manda (ausentes em backends antigos); null sem nenhum dos dois.
  */
 export function progressExtrasText(p: Pick<BatchProgress, "duplicates" | "filtered">): string | null {
   const parts: string[] = [];
-  if (typeof p.duplicates === "number") parts.push(`Duplicados: ${formatCount(p.duplicates)}`);
+  if (typeof p.duplicates === "number") parts.push(`Já baixados antes: ${formatCount(p.duplicates)}`);
   if (typeof p.filtered === "number") parts.push(`Filtrados: ${formatCount(p.filtered)}`);
   return parts.length ? parts.join(" · ") : null;
+}
+
+/**
+ * Aviso do resumo do lote quando parte dos itens já estava na Biblioteca: eles não são baixados de novo (o arquivo
+ * seria o mesmo), mas continuam fazendo parte da importação e vão no ZIP/pasta dela. null sem repetidos.
+ */
+export function alreadyDownloadedNote(p: Pick<BatchProgress, "duplicates">): string | null {
+  const n = p.duplicates;
+  if (typeof n !== "number" || n <= 0) return null;
+  const head =
+    n === 1
+      ? "1 item já tinha sido baixado antes e não foi baixado de novo: o app usou o arquivo que já estava na Biblioteca."
+      : `${formatCount(n)} itens já tinham sido baixados antes e não foram baixados de novo: o app usou os arquivos que já estavam na Biblioteca.`;
+  const tail =
+    n === 1
+      ? " Ele faz parte desta importação e vai junto no ZIP e na exportação para pasta."
+      : " Eles fazem parte desta importação e vão juntos no ZIP e na exportação para pasta.";
+  return head + tail;
 }
