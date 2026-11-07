@@ -125,6 +125,21 @@ def recover_capcut_jobs(ctx: AppContext) -> int:
     return resumed
 
 
+def release_models_memory() -> None:
+    """Libera os modelos de transcrição e o alinhador carregados (voltam a carregar no próximo job)."""
+    try:
+        from app.integrations.capcut import align, transcribe
+
+        transcribe.release_models()
+        align.release()
+        import gc
+
+        gc.collect()
+        logger.info("Legendas CapCut: fila vazia, memória dos modelos liberada")
+    except Exception:  # noqa: BLE001 - liberar memória nunca derruba o executor
+        logger.debug("Legendas CapCut: não foi possível liberar os modelos", exc_info=True)
+
+
 class CapCutRunner:
     def __init__(self, ctx: AppContext, *, clock: Callable[[], datetime] | None = None) -> None:
         self.ctx = ctx
@@ -172,15 +187,21 @@ class CapCutRunner:
             return False
 
     def _loop(self) -> None:
+        busy = False
         while not self._stop.is_set():
             try:
                 worked = self.run_next()
             except Exception:  # noqa: BLE001 - a thread nunca morre por causa de um job
                 logger.exception("Falha inesperada no executor das Legendas CapCut")
                 worked = False
-            if not worked:
-                self._wake.wait(IDLE_WAIT_SECONDS)
-                self._wake.clear()
+            if worked:
+                busy = True
+                continue
+            if busy:  # a fila acabou de esvaziar: devolve a memória dos modelos (large-v3 + alinhador ~4-5 GB)
+                busy = False
+                release_models_memory()
+            self._wake.wait(IDLE_WAIT_SECONDS)
+            self._wake.clear()
 
     # ---- execução ----------------------------------------------------------------------------------------------
     def run_next(self) -> bool:
