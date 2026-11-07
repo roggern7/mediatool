@@ -246,7 +246,8 @@ def test_migration_0030_up_down(tmp_path):
     db = Database(tmp_path / "m.db")
     try:
         apply_migrations(db)
-        assert schema_version(db) == 30
+        assert schema_version(db) == 31
+        revert_migration(db, 31)   # a 0031 (lotes) vem depois e é revertida antes
         columns = {row["name"] for row in db.fetchall("PRAGMA table_info(capcut_styles)")}
         assert "design" in columns
         db.execute("INSERT INTO capcut_styles (name, source_draft, style, created_at) VALUES ('a', 'r', '{}', 'x')")
@@ -255,6 +256,6 @@ def test_migration_0030_up_down(tmp_path):
         assert schema_version(db) == 29
         columns = {row["name"] for row in db.fetchall("PRAGMA table_info(capcut_styles)")}
         assert "design" not in columns and db.scalar("SELECT name FROM capcut_styles") == "a", "dados mantidos"
-        assert apply_migrations(db) == [30]
+        assert apply_migrations(db) == [30, 31]
     finally:
         db.close_all()

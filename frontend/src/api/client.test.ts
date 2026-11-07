@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, api } from "./client";
+import { ApiError, api, capcutBatchZipUrl } from "./client";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -633,5 +633,76 @@ describe("cliente: análise de perfis", () => {
       "/api/profile-analyses/7/resume",
     ]);
     expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("POST");
+  });
+});
+
+describe("cliente: lotes das Legendas CapCut", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it("createCapcutBatch manda o corpo exato com o header do painel", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ batch: { id: 3 }, skipped: [] }, 202));
+    const body = {
+      mode: "edit_caption" as const,
+      filter: { folder: "batch:4", captioned: "no" as const },
+      include_done: false,
+      caption: { style_id: null, overrides: { fps: "60" as const } },
+      edit: { preset_id: null, duration_mode: "30" as const, speed: 1.2, sharpen: true, start_seconds: 0 },
+    };
+    await api.createCapcutBatch(body);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/capcut/batches");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["X-Media-Tool-Client"]).toBe("panel");
+    expect(JSON.parse(String(init.body))).toEqual(body);
+  });
+
+  it("listagens e leitura: lotes, jobs do lote, seletor e estimativa", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ items: [], total: 0 })));
+    await api.listCapcutBatches({ status: "running", mode: null, q: "", limit: 20, offset: 0 });
+    await api.getCapcutBatch(7);
+    await api.listCapcutBatchJobs(7, { status: "failed", limit: 50, offset: 50 });
+    await api.capcutLibrary({ q: "gato", folder: "local:2026-11-07", captioned: "yes", limit: 50, before_id: 90 });
+    await api.capcutEstimate("caption", 12);
+    const urls = fetchMock.mock.calls.map((c) => c[0]);
+    expect(urls).toEqual([
+      "/api/capcut/batches?status=running&limit=20&offset=0",
+      "/api/capcut/batches/7",
+      "/api/capcut/batches/7/jobs?status=failed&limit=50&offset=50",
+      "/api/capcut/library?q=gato&folder=local%3A2026-11-07&captioned=yes&limit=50&before_id=90",
+      "/api/capcut/estimate?mode=caption&count=12",
+    ]);
+  });
+
+  it("ações do lote e pausa individual usam POST/DELETE nas rotas do contrato", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ id: 7 })));
+    await api.pauseCapcutBatch(7);
+    await api.resumeCapcutBatch(7);
+    await api.cancelCapcutBatch(7);
+    await api.retryFailedCapcutBatch(7);
+    await api.revealCapcutBatch(7);
+    await api.holdCapcutJob(11);
+    await api.releaseCapcutJob(11);
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(null, { status: 204 })));
+    await api.deleteCapcutBatch(7);
+    const calls = fetchMock.mock.calls.map((c) => `${(c[1] as RequestInit).method} ${String(c[0])}`);
+    expect(calls).toEqual([
+      "POST /api/capcut/batches/7/pause",
+      "POST /api/capcut/batches/7/resume",
+      "POST /api/capcut/batches/7/cancel",
+      "POST /api/capcut/batches/7/retry-failed",
+      "POST /api/capcut/batches/7/reveal",
+      "POST /api/capcut/jobs/11/hold",
+      "POST /api/capcut/jobs/11/release",
+      "DELETE /api/capcut/batches/7",
+    ]);
+    expect(capcutBatchZipUrl(7)).toBe("/api/capcut/batches/7/zip");
   });
 });

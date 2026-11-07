@@ -2,9 +2,16 @@ import type {
   Batch,
   CapCutAnimationItem,
   CapCutAnimationType,
+  CapCutBatch,
+  CapCutBatchCreate,
+  CapCutBatchCreated,
+  CapCutBatchList,
+  CapCutBatchMode,
+  CapCutBatchStatus,
   CapCutCatalogPage,
   CapCutDesign,
   CapCutDraft,
+  CapCutEstimate,
   CapCutFontItem,
   CapCutFontSource,
   CapCutPreview,
@@ -14,6 +21,8 @@ import type {
   CapCutJobList,
   CapCutJobStatus,
   CapCutJobsCreated,
+  CapCutLibraryItem,
+  CapCutLibraryQuery,
   CapCutSettings,
   CapCutSettingsUpdate,
   CapCutStatus,
@@ -430,6 +439,29 @@ export const api = {
   revealCapcutJob: (id: number) => request<{ ok: boolean }>("POST", `/capcut/jobs/${id}/reveal`),
   pauseCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/pause"),
   resumeCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/resume"),
+  holdCapcutJob: (id: number) => request<CapCutJob>("POST", `/capcut/jobs/${id}/hold`),
+  releaseCapcutJob: (id: number) => request<CapCutJob>("POST", `/capcut/jobs/${id}/release`),
+  /** Seletor de vídeos do lote: vídeos originais (sem capas), id DESC, keyset, com a situação das legendas. */
+  capcutLibrary: (q: CapCutLibraryQuery = {}) =>
+    request<Paged<CapCutLibraryItem>>("GET", "/capcut/library", { query: { ...q } }),
+  capcutEstimate: (mode: CapCutBatchMode, count: number) =>
+    request<CapCutEstimate>("GET", "/capcut/estimate", { query: { mode, count } }),
+  /** Filtro resolvido no servidor pode levar alguns segundos com muitos vídeos. */
+  createCapcutBatch: (body: CapCutBatchCreate) =>
+    request<CapCutBatchCreated>("POST", "/capcut/batches", { body, timeoutMs: SLOW_TIMEOUT_MS }),
+  listCapcutBatches: (
+    q: { status?: CapCutBatchStatus | null; mode?: CapCutBatchMode | null; q?: string; limit?: number; offset?: number } = {},
+  ) => request<CapCutBatchList>("GET", "/capcut/batches", { query: { ...q } }),
+  getCapcutBatch: (id: number) => request<CapCutBatch>("GET", `/capcut/batches/${id}`),
+  listCapcutBatchJobs: (id: number, q: { status?: CapCutJobStatus | null; limit?: number; offset?: number } = {}) =>
+    request<CapCutJobList>("GET", `/capcut/batches/${id}/jobs`, { query: { ...q } }),
+  pauseCapcutBatch: (id: number) => request<CapCutBatch>("POST", `/capcut/batches/${id}/pause`),
+  resumeCapcutBatch: (id: number) => request<CapCutBatch>("POST", `/capcut/batches/${id}/resume`),
+  cancelCapcutBatch: (id: number) => request<CapCutBatch>("POST", `/capcut/batches/${id}/cancel`),
+  retryFailedCapcutBatch: (id: number) => request<CapCutBatch>("POST", `/capcut/batches/${id}/retry-failed`),
+  revealCapcutBatch: (id: number) => request<{ ok: boolean }>("POST", `/capcut/batches/${id}/reveal`),
+  /** Some do histórico (não apaga arquivos); 409 com job aberto. */
+  deleteCapcutBatch: (id: number) => request<void>("DELETE", `/capcut/batches/${id}`),
 };
 
 /** Arquivo da fonte para o @font-face da prévia (404 quando não há arquivo local). */
@@ -445,6 +477,11 @@ export function capcutPreviewFileUrl(preview: Pick<CapCutPreview, "id" | "file_u
 /** Download do vídeo legendado (GET simples: o navegador baixa com o nome do arquivo). */
 export function capcutJobFileUrl(id: number): string {
   return `/api/capcut/jobs/${id}/file`;
+}
+
+/** ZIP com os vídeos concluídos do lote (GET simples: o navegador baixa `lote-<id>.zip`). */
+export function capcutBatchZipUrl(id: number): string {
+  return `/api/capcut/batches/${id}/zip`;
 }
 
 /** Rota isenta do limite de 1 MB do corpo (o teto é o tamanho máximo de download, 2 GB por padrão). */

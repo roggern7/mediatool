@@ -252,7 +252,7 @@ def test_migration_0029_up_down(tmp_path):
     db = Database(tmp_path / "m.db")
     try:
         apply_migrations(db)
-        assert schema_version(db) == 30
+        assert schema_version(db) == 31
         tables = {row["name"] for row in db.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert {"capcut_jobs", "capcut_styles"} <= tables
         indexes = {row["name"] for row in db.fetchall("SELECT name FROM sqlite_master WHERE type = 'index'")}
@@ -266,12 +266,13 @@ def test_migration_0029_up_down(tmp_path):
         assert db.scalar("SELECT media_id FROM capcut_jobs") is None, "ON DELETE SET NULL"
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("UPDATE capcut_jobs SET status = 'x'")
+        revert_migration(db, 31)
         revert_migration(db, 30)
         revert_migration(db, 29)
         assert schema_version(db) == 28
         tables = {row["name"] for row in db.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert not {"capcut_jobs", "capcut_styles"} & tables
-        assert apply_migrations(db) == [29, 30]
+        assert apply_migrations(db) == [29, 30, 31]
     finally:
         db.close_all()
 

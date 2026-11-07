@@ -1,8 +1,14 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
 import { formatBytes } from "../../lib/format";
 import type { Tone } from "../../lib/labels";
-import { UPLOAD_ACCEPT, UPLOAD_STATUS_LABEL, queueSummary, type UploadStatus } from "../../lib/uploadQueue";
+import {
+  UPLOAD_ACCEPT,
+  UPLOAD_STATUS_LABEL,
+  queueSummary,
+  splitVideoFiles,
+  type UploadStatus,
+} from "../../lib/uploadQueue";
 import type { UploadQueueApi } from "../../lib/useUploadQueue";
 import { Pill, ProgressBar } from "../ui";
 
@@ -15,23 +21,45 @@ const STATUS_TONE: Record<UploadStatus, Tone> = {
   error: "err",
 };
 
-/** Zona de arrastar e soltar + botão de escolher arquivos; lista de envios com progresso, erro e remover. */
+/**
+ * Zona de arrastar e soltar + botão de escolher arquivos; lista de envios com progresso, erro e remover. Com
+ * `onFolderOthers`, mostra também "Escolher pasta" (`webkitdirectory`): só os vídeos da pasta entram na fila e a
+ * quantidade de outros arquivos é avisada.
+ */
 export function LocalFilesDrop({
   queue,
   onIgnored,
   onRemove,
+  onFolderOthers,
 }: {
   queue: UploadQueueApi;
   onIgnored: (count: number) => void;
   onRemove: (key: string) => void;
+  onFolderOthers?: (count: number) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   const summary = queueSummary(queue.items);
+  const withFolder = onFolderOthers !== undefined;
+
+  useEffect(() => {
+    // `webkitdirectory` não está nos tipos do React: vai como atributo.
+    folderInput.current?.setAttribute("webkitdirectory", "");
+  }, [withFolder]);
 
   function accept(list: FileList | null) {
     if (!list || list.length === 0) return;
     const ignored = queue.add(Array.from(list));
+    if (ignored > 0) onIgnored(ignored);
+  }
+
+  function acceptFolder(list: FileList | null) {
+    if (!list || list.length === 0) return;
+    const { videos, others } = splitVideoFiles(Array.from(list));
+    if (others > 0) onFolderOthers?.(others);
+    if (videos.length === 0) return;
+    const ignored = queue.add(videos);
     if (ignored > 0) onIgnored(ignored);
   }
 
@@ -70,6 +98,25 @@ export function LocalFilesDrop({
             e.target.value = "";
           }}
         />
+        {withFolder ? (
+          <>
+            <button type="button" className="btn btn-sm" onClick={() => folderInput.current?.click()}>
+              Escolher pasta
+            </button>
+            <input
+              ref={folderInput}
+              type="file"
+              multiple
+              className="sr-only"
+              tabIndex={-1}
+              aria-label="Escolher uma pasta de vídeos do computador"
+              onChange={(e) => {
+                acceptFolder(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </>
+        ) : null}
         <span className="muted small">
           MP4, MOV, WebM ou MKV de até 2 GB. Os vídeos entram na biblioteca (2 envios por vez); o mesmo conteúdo
           já existente é reaproveitado.

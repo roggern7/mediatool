@@ -14,6 +14,11 @@ Modo de exportação (`export_mode` das configurações, lido quando o job/prév
 `interactive`; o modo usado fica em `options.export_mode` do job (e em `export_mode` da prévia). Sem fallback: se o
 isolado não puder ser usado, o núcleo levanta `isolated_unavailable` (não transitório) e o job falha.
 
+Lotes (docs/CAPCUT.md, "Lotes"): job com `edit_job_id` só é pego quando a edição (job `process` do worker) terminou; a
+fonte passa a ser a rendition editada (edição com erro/cancelada => `failed` `edit_failed`, sem nova tentativa). No
+modo `edit` o CapCut não é aberto: a rendition é copiada para a pasta do lote como `<nome>_editado.mp4`. A pausa da
+fila também segura esses jobs.
+
 Prévias do editor visual: ficam só em memória (fora do banco e da lista de jobs), passam na frente dos jobs comuns
 (mesmo com a fila pausada), rodam no mesmo executor (um CapCut por vez) e não mexem em tentativas nem em nada dos jobs.
 Uma prévia nova cancela as prévias ainda na fila (pendentes/em espera). CapCut ocupado/PC em uso => `waiting` com nova
@@ -24,6 +29,8 @@ as 10 mais recentes.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import threading
 import uuid
 from collections.abc import Callable
@@ -68,6 +75,10 @@ WAIT_CODES = {
 MSG_UNEXPECTED = "Erro inesperado ao legendar este vídeo. Os detalhes ficaram no log do Media Tool."
 MSG_SOURCE_MISSING = "O arquivo original deste vídeo não está mais na Biblioteca."
 MSG_RESUMED = "Retomado após interrupção"
+MSG_EDIT_MISSING = "A versão editada deste vídeo não está mais na Biblioteca."
+MSG_EDIT_CANCELLED = "a edição foi cancelada."
+MSG_COPY_FAILED = "Não foi possível copiar o vídeo editado para a pasta do lote."
+EDIT_MODES = ("edit", "edit_caption")
 PREVIEW_SAMPLE_TEXT = "Exemplo de legenda no seu estilo"
 PREVIEW_KEEP_FILES = 10
 PREVIEW_KEEP_ENTRIES = 30
@@ -85,8 +96,13 @@ def stage_percent(stage: str | None, fraction: float | None) -> int:
 
 def recover_capcut_jobs(ctx: AppContext) -> int:
     """Startup: `running` volta para `pending` (detalhe "retomado após interrupção") devolvendo a tentativa
-    interrompida; job aberto com cancelamento pedido termina cancelado. Retorna quantos voltaram para a fila."""
+    interrompida; job aberto com cancelamento pedido (dele ou do lote) termina cancelado; temporários de ZIP de lote
+    que sobraram são apagados. Retorna quantos voltaram para a fila."""
     cancelled, resumed = CapCutRepository(ctx.db).recover()
+    from app.services.capcut_batch_service import sweep_zip_temps
+
+    if sweep_zip_temps(ctx):
+        logger.info("Recovery: temporários de ZIP de lote das Legendas CapCut apagados")
     if cancelled or resumed:
         logger.info("Recovery: %s job(s) de legenda de volta à fila, %s cancelado(s)", resumed, cancelled)
     return resumed
@@ -170,6 +186,12 @@ class CapCutRunner:
         finally:
             with self._lock:
                 self._current_id = None
+            if job.get("capcut_batch_id") is not None:
+                try:
+                    self.repo.refresh_batch_finished(job["capcut_batch_id"])
+                except Exception:  # noqa: BLE001 - só o `finished_at` do lote; a leitura seguinte corrige
+                    logger.warning("Legendas CapCut: lote %s sem atualizar o fim", job["capcut_batch_id"],
+                                   exc_info=True)
         return True
 
     def _now(self, offset: float = 0.0) -> str:
@@ -180,13 +202,23 @@ class CapCutRunner:
         if self.repo.cancel_requested(job_id):
             self._finish_cancelled(job_id)
             return
-        try:
-            video = self.ctx.storage.resolve(job["source_path"])
-        except Exception:  # noqa: BLE001 - caminho inválido no banco: mesmo efeito de arquivo ausente
-            video = None
-        if video is None or not video.is_file():
-            self._fail(job_id, "source_missing", MSG_SOURCE_MISSING)
-            return
+        mode = job.get("mode") or "caption"
+        if job.get("edit_job_id") is not None or mode in EDIT_MODES:
+            edited = self._edited_source(job)
+            if edited is None:
+                return
+            video, rendition = edited
+            if mode == "edit":
+                self._deliver_edit(job, video, rendition)
+                return
+        else:
+            try:
+                video = self.ctx.storage.resolve(job["source_path"])
+            except Exception:  # noqa: BLE001 - caminho inválido no banco: mesmo efeito de arquivo ausente
+                video = None
+            if video is None or not video.is_file():
+                self._fail(job_id, "source_missing", MSG_SOURCE_MISSING)
+                return
         try:
             core = capcut_service.load_core()
         except Exception:  # noqa: BLE001 - sem núcleo só um processador injetado (testes) consegue rodar
@@ -209,10 +241,76 @@ class CapCutRunner:
         self._complete(job_id, result)
         self._pause_if_user_wants_capcut(result, None)
 
+    def _edited_source(self, job: dict[str, Any]) -> tuple[Path, dict[str, Any]] | None:
+        """(arquivo da rendition editada, rendition) do job de lote com edição. None = o job já foi encerrado aqui
+        (edição com erro/cancelada, rendition ausente) ou voltou para a fila (edição aberta de novo)."""
+        job_id = job["id"]
+        edit = self.ctx.jobs.get(job["edit_job_id"]) if job.get("edit_job_id") else None
+        rendition = None
+        if edit is None:
+            # Job de edição apagado (limpeza do histórico): a rendition com os mesmos params da edição.
+            params = (job["options"] or {}).get("edit_params")
+            if params is not None and job["media_id"]:
+                rendition = self.ctx.media.find_rendition(job["media_id"], None, params)
+        elif edit["status"] in ("failed", "cancelled"):
+            reason = edit.get("error_message") or (MSG_EDIT_CANCELLED if edit["status"] == "cancelled"
+                                                   else "erro desconhecido.")
+            self._fail(job_id, "edit_failed", f"A edição deste vídeo falhou: {reason}")
+            return None
+        elif edit["status"] != "completed":
+            # A edição voltou a ficar aberta depois da escolha do job: espera de novo, sem gastar a tentativa.
+            self._requeue(job_id, status="pending", attempts=max(job["attempts"] - 1, 0), stage=None,
+                          stage_progress=None, progress=0, detail=None)
+            return None
+        elif edit.get("rendition_id"):
+            rendition = self.ctx.media.get_rendition(edit["rendition_id"])
+        path = None
+        if rendition is not None:
+            try:
+                path = self.ctx.storage.resolve(rendition["processed_path"])
+            except Exception:  # noqa: BLE001 - caminho inválido no banco: mesmo efeito de arquivo ausente
+                path = None
+        if path is None or not path.is_file():
+            self._fail(job_id, "source_missing", MSG_EDIT_MISSING)
+            return None
+        return path, rendition
+
+    def _output_stem(self, job: dict[str, Any]) -> str:
+        media = self.ctx.media.get(job["media_id"]) if job["media_id"] else None
+        return Path((media or {}).get("original_filename") or job["source_path"]).stem
+
+    def _deliver_edit(self, job: dict[str, Any], video: Path, rendition: dict[str, Any]) -> None:
+        """Modo `edit`: copia a rendition para a pasta do lote (`<nome>_editado.mp4`, sem sobrescrever) e conclui."""
+        job_id = job["id"]
+        folder = Path((job["options"] or {})["output_dir"])
+        suffix = video.suffix.lower() or ".mp4"
+        stem = f"{self._output_stem(job)}_editado"
+        part: Path | None = None
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / f"{stem}{suffix}"
+            counter = 2
+            while target.exists():
+                target = folder / f"{stem} ({counter}){suffix}"
+                counter += 1
+            part = folder / f".{target.name}.{job_id}.part"
+            self.repo.update_job(job_id, stage="finalizing", progress=50, detail="Copiando o vídeo editado")
+            shutil.copyfile(video, part)
+            os.replace(part, target)
+        except OSError:
+            logger.warning("Legendas CapCut: job %s sem copiar a edição para a pasta do lote", job_id, exc_info=True)
+            if part is not None:
+                part.unlink(missing_ok=True)
+            self._fail(job_id, "copy_failed", MSG_COPY_FAILED)
+            return
+        probe = {key: rendition.get(key) for key in ("width", "height", "duration", "fps")}
+        probe["has_audio"] = bool(rendition.get("has_audio"))
+        self._complete(job_id, SimpleNamespace(output_path=target, probe=probe, warnings=[], chunks=None,
+                                               draft_name=None, words=None))
+
     def _spec_fields(self, job: dict[str, Any], video: Path) -> dict[str, Any]:
         options = job["options"] or {}
-        media = self.ctx.media.get(job["media_id"]) if job["media_id"] else None
-        stem = Path((media or {}).get("original_filename") or job["source_path"]).stem
+        stem = self._output_stem(job)
         data_dir = self.ctx.settings.data_dir
         return {
             "job_id": job["id"],

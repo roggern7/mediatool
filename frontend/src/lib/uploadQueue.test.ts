@@ -7,6 +7,7 @@ import {
   UNSUPPORTED_FILE_TEXT,
   UPLOAD_RETRY_DELAYS_MS,
   addFiles,
+  splitVideoFiles,
   checkLocalFile,
   isBusy,
   markDone,
@@ -134,5 +135,21 @@ describe("uploadQueue: verificação antes do envio e nova tentativa", () => {
     expect(uploadRetryDelay("too_many_uploads", UPLOAD_RETRY_DELAYS_MS.length)).toBeNull();
     expect(uploadRetryDelay("invalid_media", 0)).toBeNull();
     expect(uploadRetryDelay("payload_too_large", 0)).toBeNull();
+  });
+});
+
+describe("splitVideoFiles (escolher pasta)", () => {
+  it("só os vídeos entram; os outros arquivos da pasta são contados", () => {
+    const files = [
+      { name: "a.MP4", type: "video/mp4" },
+      { name: "capa.jpg", type: "image/jpeg" },
+      { name: "b.mkv", type: "" },
+      { name: "notas.txt", type: "text/plain" },
+      { name: "sem-extensao", type: "video/quicktime" },
+      { name: "outro", type: "" },
+    ];
+    const { videos, others } = splitVideoFiles(files);
+    expect(videos.map((f) => f.name)).toEqual(["a.MP4", "b.mkv", "sem-extensao"]);
+    expect(others).toBe(3);
   });
 });
