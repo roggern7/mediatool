@@ -131,6 +131,12 @@ def is_running() -> list[int]:
     `process_query_failed` (nunca "fechado", que liberaria gravar o índice e abrir o CapCut)."""
     if os.name != "nt":
         return []
+    # Consulta nativa (Toolhelp32, ~20 ms). O `tasklist` levava ~500 ms por chamada e o status da página é lido a cada
+    # poucos segundos (engasgos verificados em 2026-11-07); fica só de reserva se a consulta nativa falhar.
+    try:
+        return [p.pid for p in process_table() if p.name.lower() == PROCESS_NAME.lower()]
+    except CapCutError:
+        pass
     try:
         result = subprocess.run(["tasklist", "/FO", "CSV", "/NH", "/FI", f"IMAGENAME eq {PROCESS_NAME}"],
                                 capture_output=True, text=True, errors="replace", timeout=15,

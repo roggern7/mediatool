@@ -113,3 +113,12 @@ def test_chunks_merge_blocks_too_short_to_read_without_crossing_sentence_end():
     assert not any(c.text == "Ei," for c in chunks)
     assert chunks[0].text == "É o mercegão.", "não atravessa o fim da frase"
     assert all(len(c.words) <= 3 and len(c.text) <= 24 for c in chunks), "respeita os limites configurados"
+
+
+def test_release_models_memory_clears_loaded_models(monkeypatch):
+    from app.jobs import capcut_runner
+
+    T._models[("large-v3", "x")] = object()
+    align._sessions["y"] = (object(), {}, 0.02)
+    capcut_runner.release_models_memory()
+    assert T._models == {} and align._sessions == {}

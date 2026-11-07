@@ -208,10 +208,22 @@ def test_is_running_query_failure_is_transient_error_not_closed(monkeypatch, mod
             raise subprocess.TimeoutExpired(["tasklist"], 15)
         return subprocess.CompletedProcess(["tasklist"], 1, stdout="", stderr="erro")
 
+    def native_fails():
+        raise CapCutError("process_query_failed", "falhou", transient=True)
+
+    monkeypatch.setattr(install_mod, "process_table", native_fails)   # cai na reserva (tasklist), que também falha
     monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
     with pytest.raises(CapCutError) as exc:
         install_mod.is_running()
     assert exc.value.code == "process_query_failed" and exc.value.transient is True
+
+
+def test_is_running_uses_native_process_list_without_tasklist(monkeypatch):
+    table = [install_mod.ProcessInfo(10, 4, "explorer.exe", 1), install_mod.ProcessInfo(77, 4, "CapCut.exe", 2)]
+    monkeypatch.setattr(install_mod, "process_table", lambda: table)
+    monkeypatch.setattr(install_mod.subprocess, "run", lambda *a, **k: pytest.fail("não deveria chamar o tasklist"))
+    if os.name == "nt":
+        assert install_mod.is_running() == [77]
 
 
 P = install_mod.ProcessInfo
