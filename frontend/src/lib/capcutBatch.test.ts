@@ -21,6 +21,8 @@ import {
   captionedText,
   cleanFilter,
   editFormFromPreset,
+  isNoEditChange,
+  toBatchEdit,
   editSummaryText,
   estimateText,
   exportFormFrom,
@@ -207,7 +209,7 @@ describe("lote: pedido por modo", () => {
       mode: "edit",
       media_ids: [1, 2, 3],
       include_done: true,
-      edit: { preset_id: null, duration_mode: "30", speed: 1.2, sharpen: true, start_seconds: 2.5 },
+      edit: { preset_id: null, duration_mode: "30", speed: 1.2, sharpen: true, mirror: false, start_seconds: 2.5 },
     });
     expect(body.caption).toBeUndefined();
   });
@@ -224,6 +226,7 @@ describe("lote: pedido por modo", () => {
       custom_seconds: 45.5,
       speed: 1,
       sharpen: false,
+      mirror: false,
       start_seconds: 0,
     });
   });
@@ -269,7 +272,12 @@ describe("lote: pedido por modo", () => {
       startText: "0,5",
       speed: 1.1,
       sharpen: true,
+      mirror: false,
     });
+    const mirrored = editFormFromPreset(DEFAULT_BATCH_EDIT, { id: 5, params: { ...params, mirror: true } as PresetParams });
+    expect(mirrored.mirror).toBe(true);
+    expect(toBatchEdit({ ...mirrored, mirror: false }).mirror).toBe(false);
+    expect(isNoEditChange({ ...DEFAULT_BATCH_EDIT, mirror: true })).toBe(false);
     const custom = editFormFromPreset(DEFAULT_BATCH_EDIT, { id: 4, params: { speed: 1, trim_start: 0, max_duration: 45 } as PresetParams });
     expect(custom).toMatchObject({ durationMode: "custom", customText: "45", startText: "", sharpen: false });
     const cleared = editFormFromPreset(custom, null);
