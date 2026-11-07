@@ -331,6 +331,7 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET | /api/health | | `{status:"ok", version, time}` |
 | GET | /api/diagnostics | | `Diagnostics` |
 | POST/GET | /api/profile-analyses | seção 8.8 | Análise de Perfis |
+| GET/PUT/POST/DELETE | /api/capcut/* | seção 8.9 | Legendas CapCut |
 | GET | /api/presets | | `Preset[]` |
 | POST | /api/presets | `{name, params}` | `Preset` 201 |
 | GET/PUT/DELETE | /api/presets/{id} | PUT `{name?, params?}` | `Preset` / 204 (409 builtin) |
@@ -1758,6 +1759,71 @@ guarda o número com Posts exato = Não. Status: Ativa, Privada, Restrita, Indis
 consultado (interrompida). Indisponível: Posts, Posts exato, Views, Reels somados, Stories e Destaques = "Não verificado",
 com Data e Horário reais. Cancelado e Não consultado: no CSV/XLSX, "Não consultado" por coluna e Data/Horário vazios; no
 HTML, uma célula `colspan=4`, a pill de Status e uma célula `colspan=2`, todas com texto.
+
+### 8.9 Legendas CapCut
+
+Migration **0029** (estritamente aditiva; reversão manual por `app.db.migrate.revert_migration` com
+`migrations/down/0029_capcut.down.sql`, nunca no startup). Rotas em `app/api/capcut.py`, regras em
+`app/services/capcut_service.py`, executor em `app/jobs/capcut_runner.py`. O núcleo (transcrição local, rascunho e
+exportação pelo CapCut) fica em `app/integrations/capcut/` e é documentado em `docs/CAPCUT.md`; a integração só o importa
+dentro das funções, então sem as dependências dele o resto do app funciona e o status responde `available: false`.
+
+Tabelas: `capcut_jobs` (fila e histórico; `media_id` com `ON DELETE SET NULL`; `source_path` = cópia do
+`original_path` na criação; `options` = instantâneo JSON das configurações + `style_id`/`style_name` + estilo
+serializado; `transcript` = palavras, reaproveitadas na nova tentativa; `output_path` absoluto; `output_probe` e
+`warnings` em JSON; `origin` `manual`|`auto`|`api`; `batch_id` do lote de importação quando automático) e
+`capcut_styles` (`name` único, `source_draft`, `style`/`summary` JSON, `is_default` espelha a configuração). O estilo
+embutido "Padrão (capcut-agent-skill)" não fica no banco: é o id `0` na API (`style: null` no job).
+
+Configurações: chave JSON `capcut` na tabela `settings` (rota própria, fora de `PUT /api/settings`): `output_dir`
+(`null` = `<storage>/capcut`; caminho absoluto em disco local, sem UNC/rede, sem `..`, fora da raiz da unidade; criada ao
+salvar), `resolution` `original`|`480P`|`720P`|`1080P`|`2K`|`4K`, `bitrate` `low`|`recommended`|`high`, `fps`
+`60` (padrão)|`50`|`30`|`25`|`24`|`original`, `highlight` (true), `highlight_color` `#RRGGBB`|null, `max_words` 1..10 (3),
+`max_chars` 8..80 (24), `whisper_model` `small`|`medium`|`large-v3-turbo` (padrão), `keep_original_audio` (true),
+`keep_draft` (false), `auto_after_download` (false), `max_attempts` 1..10 (3), `default_style_id` (null = embutido).
+Pausa da fila: `app_state.capcut_queue_paused = "1"`.
+
+Estados do job: `pending` (na fila; `next_attempt_at` = quando pode rodar) -> `running` -> `completed` | `failed` |
+`cancelled`; `waiting` = CapCut ocupado (`wait_reason: capcut_busy`) ou PC em uso (`wait_reason: desktop_busy`: teclado/mouse do dono nos últimos 15 s antes de abrir o CapCut, ou foco tomado pelo dono durante a automação; nova checagem a cada 60 s, sem gastar tentativa). Etapas (`stage`): `transcribing` (0-35%),
+`drafting` (35-40), `waiting_capcut`/`launching`/`opening` (40-50), `exporting` (50-90), `finalizing` (90-98),
+`cleaning` (98-100); `progress` é o agregado 0..100.
+
+Regras do executor: thread única, UM job por vez, o mais antigo com prazo vencido. A tentativa conta ao pegar o job.
+`capcut_busy` -> `waiting` por 30 s, devolvendo a tentativa. Erro transitório do núcleo -> `pending` com espera de
+30 s, 2 min e 5 min enquanto `attempts < max_attempts`; depois `failed`. Erro não transitório -> `failed` com o `code` e a
+mensagem do núcleo; exceção inesperada -> `failed` `unexpected_error` com mensagem genérica (traceback só no log).
+Original ausente -> `failed` `source_missing` sem chamar o núcleo; sem núcleo e sem processador injetado -> `failed`
+`deps_missing`. Cancelamento: `pending`/`waiting` terminam na hora; `running` grava `cancel_requested` e sinaliza o
+`threading.Event` passado ao núcleo. A volta para `waiting`/`pending` (CapCut ocupado, erro transitório,
+encerramento) é uma gravação condicional (`... AND cancel_requested = 0`): se o cancelamento chegou nesse intervalo,
+o job termina `cancelled`. Cancelar é idempotente: `running` com cancelamento já pedido que nenhum executor está rodando
+termina `cancelled`. Encerramento do app sinaliza o cancelamento cooperativo e espera até 45 s (o núcleo fecha o CapCut
+que abriu); o job em andamento volta para `pending` sem gastar tentativa. Recuperação no startup
+(`recover_capcut_jobs`): `pending`/`running`/`waiting` com cancelamento pedido -> `cancelled`; os demais `running` ->
+`pending` ("Retomado após interrupção") devolvendo a tentativa interrompida (nunca acima de `max_attempts`).
+
+Automático após o download: com `auto_after_download`, cada vídeo NOVO com papel `original` registrado pelo ingest
+(depois do insert e da miniatura) vira um job `auto` do lote. Duplicatas e reaproveitados não disparam; falha ao
+enfileirar só vai para o log e não muda o resultado do download.
+
+| Método | Caminho | Corpo / query | Resposta |
+|---|---|---|---|
+| GET | /api/capcut/status | | `{available, reason, installed, version, drafts_dir, running_pids, deps, skill, models, queue: {pending, running, waiting, failed, completed, cancelled, paused}, settings}`; sem o núcleo: 200 com `available: false` |
+| GET/PUT | /api/capcut/settings | PUT: campos parciais (`null` = padrão) | `CapCutSettings` (+ `output_dir_is_default`); 422 `invalid_output_dir`\|`validation_error`; 404 `style_not_found` |
+| GET | /api/capcut/drafts | | `[{name, modified_at, text_segments, preview}]`; 409 `capcut_unavailable` ou o `code` do núcleo |
+| GET | /api/capcut/styles | | `[{id, name, builtin, is_default, source_draft, summary, created_at}]` (id 0 = embutido, sempre primeiro) |
+| POST | /api/capcut/styles | `{name, draft_name, segment_index?=0}` | `Style` 201; 409 `style_name_taken`\|`capcut_unavailable`\|código do núcleo (`draft_not_found`, `no_text_segment`) |
+| DELETE | /api/capcut/styles/{id} | | 204 (padrão excluído volta ao embutido); 404 `style_not_found` |
+| POST | /api/capcut/styles/{id}/default | id 0 = embutido | `Style[]`; 404 `style_not_found` |
+| GET | /api/capcut/jobs | `status?`, `media_id?`, `limit` 1..200 (50), `offset` | `{items: Job[], total, counts}` (id DESC; nome do arquivo e miniatura da mídia) |
+| POST | /api/capcut/jobs | `{media_ids: id[] (1..500), style_id?: int (0 = embutido), overrides?: {resolution, bitrate, fps, highlight, highlight_color, max_words, max_chars, whisper_model, keep_original_audio, keep_draft, output_dir}}` | 202 `{created: Job[], skipped: [{media_id, reason: media_not_found\|not_video\|cover\|already_queued}]}`; `origin` `manual` com `X-Media-Tool-Client: panel`, senão `api`; 404 `style_not_found`; 422 `invalid_output_dir` |
+| GET | /api/capcut/jobs/{id} | | `Job`; 404 `capcut_job_not_found` |
+| DELETE | /api/capcut/jobs/{id} | | 204 (só encerrado; o arquivo de saída fica; a pasta de trabalho `<data_dir>/capcut/work/<id>` e os intermediários anotados do job são apagados); 409 `capcut_job_active` |
+| POST | /api/capcut/jobs/{id}/cancel | | `Job` |
+| POST | /api/capcut/jobs/{id}/retry | | `Job` (`failed`/`cancelled` -> `pending`, `attempts = 0`, transcrição mantida); 409 `capcut_job_not_retryable` |
+| GET | /api/capcut/jobs/{id}/file | | o vídeo legendado (download); só arquivo dentro do `output_dir` do job: 403 `not_allowed`; 404 `capcut_output_not_found` |
+| POST | /api/capcut/jobs/{id}/reveal | | `{ok: true}`: abre o Explorer com o arquivo selecionado; mesmos erros do `file` e os de abrir no sistema |
+| POST | /api/capcut/queue/pause, /api/capcut/queue/resume | | `{paused}`; pausar não interrompe o job em andamento |
 
 ## 9. Processor (`media_processor`)
 

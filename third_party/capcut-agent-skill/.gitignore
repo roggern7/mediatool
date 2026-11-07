@@ -1,0 +1,90 @@
+# ==============================================================================
+# Security & Credentials (STRICT QUARANTINE - NEVER COMMIT)
+# ==============================================================================
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.env
+*.pem
+*.key
+*.token
+*.secret
+
+# ==============================================================================
+# Local Media Assets, Cache & Renders (Private User Data)
+# ==============================================================================
+outputs/
+*.mov
+*.mp4
+*.m4v
+*.avi
+*.mkv
+*.wav
+*.mp3
+*.aac
+*.m4a
+*.flac
+*.webp
+*.png
+*.jpg
+*.jpeg
+
+# ==============================================================================
+# Python Bytecode & Environments
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==============================================================================
+# Operating System & IDE Artifacts
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
+
+# ==============================================================================
+# Ephemeral Multi-Agent Deliberation Logs (Scratch Workspaces)
+# ==============================================================================
+.agents/teamwork_preview_*
+.agents/sentinel/
+.agents/ORIGINAL_REQUEST.md
+
+# ==============================================================================
+# User Scratch & One-Off Local Scripts
+# ==============================================================================
+build_0924_1.py
+update_subtitles_v2.py

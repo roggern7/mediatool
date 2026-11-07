@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "capcut-agkit",
+  "version": "2026.9.0",
+  "description": "Modular AG Kit for CapCut Desktop video editing automation and Shorts Hook production.",
+  "architecture_version": "2026.9.0",
+  "skills": [
+    {
+      "name": "capcut-editor",
+      "path": "skills/capcut-editor",
+      "entry_point": "skills/capcut-editor/scripts/capcut_draft.py",
+      "skill_md": "skills/capcut-editor/SKILL.md",
+      "references": [
+        "skills/capcut-editor/references/draft_schema.md",
+        "skills/capcut-editor/references/text_styles.md",
+        "skills/capcut-editor/references/audio_guide.md"
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "name": "capcut",
+      "slash_command": "/capcut",
+      "path": "workflows/capcut.md",
+      "requires_agents": [
+        "video-editor"
+      ],
+      "requires_skills": [
+        "capcut-editor"
+      ],
+      "artifact_outputs": [
+        "outputs/renders/",
+        "outputs/test/"
+      ]
+    }
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "path": "agent/orchestrator.md",
+      "role": "coordinator"
+    },
+    {
+      "name": "video-editor",
+      "path": "agent/video-editor.md",
+      "role": "specialist"
+    }
+  ],
+  "rules": [
+    {
+      "name": "8-ironclad-rules",
+      "path": "rules/8-ironclad-rules.md"
+    },
+    {
+      "name": "capcut-conventions",
+      "path": "rules/capcut-conventions.md"
+    },
+    {
+      "name": "short_form_rules",
+      "path": "rules/short_form_rules.md"
+    }
+  ],
+  "scripts": [
+    {
+      "name": "generate_manifest",
+      "path": "scripts/generate_manifest.py",
+      "description": "Scans .agents/ hierarchy and atomically regenerates manifest.json and manifest.lock.json."
+    },
+    {
+      "name": "validate_kit",
+      "path": "scripts/validate_kit.py",
+      "description": "Pre-flight structural and cryptographic validation against the 8 Ironclad Rules."
+    }
+  ]
+}

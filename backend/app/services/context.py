@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.core.config import Settings
 from app.db.connection import Database
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from app.integrations.instagram.web.profile_snapshot import ProfileSnapshot
+    from app.jobs.capcut_runner import CapCutRunner
     from app.jobs.export_runner import ExportRunner
     from app.jobs.import_runner import ImportRunner
     from app.jobs.profile_analysis_runner import ProfileAnalysisRunner
@@ -77,6 +78,10 @@ class AppContext:
     # `app.main.build_context`; nunca passa pelo `session_provider`.
     profile_fetcher: Callable[[str, threading.Event | None], ProfileSnapshot] | None = None
     profile_runner: ProfileAnalysisRunner | None = None
+    # Legendas CapCut: executor (um job por vez) e processador injetável (testes); None = `process_video` do núcleo
+    # `app.integrations.capcut`, importado só na hora de usar.
+    capcut_runner: CapCutRunner | None = None
+    capcut_processor: Callable[..., Any] | None = None
 
     def wake_worker(self) -> None:
         if self.worker is not None:

@@ -1034,3 +1034,144 @@ export interface PostTimesReport {
   comparison: PostTimesComparisonRow[];
   comparison_notes: string[];
 }
+
+/* ---------------- Legendas CapCut (docs/CONTRACTS.md, seção 8.9) ---------------- */
+
+export type CapCutResolution = "original" | "480P" | "720P" | "1080P" | "2K" | "4K";
+export type CapCutBitrate = "low" | "recommended" | "high";
+export type CapCutFps = "original" | "24" | "25" | "30" | "50" | "60";
+export type CapCutWhisperModel = "small" | "medium" | "large-v3-turbo";
+export type CapCutJobStatus = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+export type CapCutStage =
+  | "transcribing"
+  | "drafting"
+  | "waiting_capcut"
+  | "launching"
+  | "opening"
+  | "exporting"
+  | "finalizing"
+  | "cleaning";
+
+export interface CapCutSettings {
+  output_dir: string;
+  output_dir_is_default: boolean;
+  resolution: CapCutResolution;
+  bitrate: CapCutBitrate;
+  fps: CapCutFps;
+  highlight: boolean;
+  highlight_color: string | null;
+  max_words: number;
+  max_chars: number;
+  whisper_model: CapCutWhisperModel;
+  keep_original_audio: boolean;
+  keep_draft: boolean;
+  auto_after_download: boolean;
+  max_attempts: number;
+  default_style_id: number | null;
+}
+
+/** Só os campos enviados mudam; `null` volta ao padrão (pasta de saída, cor do destaque). */
+export type CapCutSettingsUpdate = Partial<Omit<CapCutSettings, "output_dir" | "output_dir_is_default">> & {
+  output_dir?: string | null;
+};
+
+export interface CapCutQueueCounts {
+  pending: number;
+  running: number;
+  waiting: number;
+  failed: number;
+  completed: number;
+  cancelled: number;
+  paused: boolean;
+}
+
+export interface CapCutStatus {
+  available: boolean;
+  reason: string | null;
+  installed: boolean;
+  version: string | null;
+  drafts_dir: string | null;
+  running_pids: number[];
+  deps: Record<string, boolean>;
+  skill: { installed?: boolean; path?: string; commit?: string | null };
+  models: Record<string, boolean>;
+  queue: CapCutQueueCounts;
+  settings: CapCutSettings;
+}
+
+export interface CapCutDraft {
+  name: string;
+  modified_at: string | null;
+  text_segments: number;
+  preview: string;
+}
+
+export interface CapCutStyleSummary {
+  font?: string | null;
+  color?: string | null;
+  highlight_color?: string | null;
+  has_animation?: boolean;
+  has_effect?: boolean;
+  caption_template?: string | null;
+  position_y?: number | null;
+  scale?: number | null;
+}
+
+export interface CapCutStyle {
+  id: number;
+  name: string;
+  builtin: boolean;
+  is_default: boolean;
+  source_draft: string | null;
+  summary: CapCutStyleSummary | null;
+  created_at: string | null;
+}
+
+export interface CapCutJob {
+  id: number;
+  media_id: number | null;
+  media_filename: string | null;
+  media_profile: string | null;
+  media_type: MediaType | null;
+  thumbnail_url: string | null;
+  status: CapCutJobStatus;
+  stage: CapCutStage | null;
+  stage_progress: number | null;
+  progress: number;
+  detail: string | null;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: string | null;
+  wait_reason: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  cancel_requested: boolean;
+  style_id: number | null;
+  style_name: string | null;
+  options: Record<string, unknown>;
+  has_transcript: boolean;
+  chunks: number | null;
+  draft_name: string | null;
+  output_path: string | null;
+  output_name: string | null;
+  output_exists: boolean;
+  output_probe: Record<string, unknown> | null;
+  warnings: string[];
+  origin: "manual" | "auto" | "api";
+  batch_id: number | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
+export interface CapCutJobList {
+  items: CapCutJob[];
+  total: number;
+  counts: Record<CapCutJobStatus, number>;
+}
+
+export interface CapCutJobsCreated {
+  created: CapCutJob[];
+  skipped: { media_id: number; reason: "media_not_found" | "not_video" | "cover" | "already_queued" }[];
+}

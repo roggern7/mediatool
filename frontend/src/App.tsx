@@ -9,6 +9,7 @@ import { ProfileAnalysisPage } from "./pages/ProfileAnalysisPage";
 import { PresetsPage } from "./pages/PresetsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { PostTimesPage } from "./pages/PostTimesPage";
+import { CapCutPage } from "./pages/CapCutPage";
 import { Empty } from "./components/ui";
 
 function normalize(path: string): string {
@@ -23,6 +24,8 @@ function Page({ path }: { path: string }) {
       return <LibraryPage />;
     case ROUTES.edit:
       return <EditPage />;
+    case ROUTES.captions:
+      return <CapCutPage />;
     case ROUTES.queue:
       return <QueuePage />;
     case ROUTES.profiles:

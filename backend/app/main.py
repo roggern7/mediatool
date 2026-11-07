@@ -44,6 +44,7 @@ from app.integrations.instagram.session import InstagramSessionProvider, LocalIn
 from app.integrations.instagram.web.http import InstagramWebHttp, WebHttpConfig
 from app.integrations.instagram.web.profile_snapshot import ProfileSnapshot, fetch_profile_snapshot
 from app.integrations.instagram.web.provider import InstagramWebDownloader, WebStateCache
+from app.jobs.capcut_runner import CapCutRunner, recover_capcut_jobs
 from app.jobs.export_runner import ExportRunner, recover_interrupted_exports
 from app.jobs.import_runner import ImportRunner
 from app.jobs.profile_analysis_runner import ProfileAnalysisRunner, recover_profile_analyses
@@ -151,6 +152,7 @@ def build_context(
     ctx.import_runner = ImportRunner(ctx)
     ctx.export_runner = ExportRunner(ctx)
     ctx.profile_runner = ProfileAnalysisRunner(ctx)
+    ctx.capcut_runner = CapCutRunner(ctx)
     return ctx
 
 
@@ -200,6 +202,7 @@ def create_app(
         run_recovery(ctx)
         recover_interrupted_exports(ctx)
         recover_profile_analyses(ctx)
+        recover_capcut_jobs(ctx)
         ctx.worker.set_concurrency(effective_concurrency(ctx))
         ctx.worker.set_download_concurrency(effective_download_concurrency(ctx))
         ctx.worker.load_pause_state()
@@ -209,10 +212,12 @@ def create_app(
             ctx.import_runner.start()
             ctx.export_runner.start()
             ctx.profile_runner.start()
+            ctx.capcut_runner.start()
         logger.info("Media Tool %s pronto em http://%s:%s", __version__, settings.host, settings.port)
         try:
             yield
         finally:
+            ctx.capcut_runner.stop()
             ctx.profile_runner.stop()
             ctx.export_runner.stop()
             ctx.import_runner.stop()

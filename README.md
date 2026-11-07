@@ -24,6 +24,7 @@ locais. Nada é enviado para servidores de terceiros além das requisições ao 
 - [Baixar ZIP](#baixar-zip)
 - [Exportar para pasta](#exportar-para-pasta)
 - [Análise de Perfis](#análise-de-perfis)
+- [Legendas CapCut](#legendas-capcut)
 - [Diagnóstico](#diagnóstico)
 - [Segurança e privacidade](#segurança-e-privacidade)
 - [gallery-dl](#gallery-dl)
@@ -704,6 +705,24 @@ tabela e guarda tudo no histórico. Download, edição, Biblioteca, extensão e 
   Posts exato, Reels somados e Observação); o HTML mostra as 8 colunas da tela e leva esses detalhes dentro das células.
   Ele é gerado na hora a partir do histórico, sem nova consulta ao Instagram. No relatório, perfil Indisponível sai como
   Não verificado em Posts, Views, Stories e Destaques, com data e horário reais.
+
+## Legendas CapCut
+
+Legenda vídeos da Biblioteca com o CapCut instalado neste computador: o áudio é transcrito localmente, o Media Tool
+monta um projeto do CapCut com as legendas no modelo escolhido e exporta o vídeo pronto para a pasta de saída (padrão:
+`storage\capcut`). Um vídeo por vez.
+
+- **Usar**: na **Biblioteca**, selecione os vídeos e clique em **Legendar no CapCut** (imagens e capas são puladas). O
+  andamento fica em **Legendas CapCut**, com Baixar, Mostrar na pasta, Cancelar e Tentar de novo. Em **Legendas
+  CapCut > Configurações** dá para ligar "Legendar automaticamente após o download".
+- **Passo manual inicial (opcional)**: para usar o seu estilo, crie no CapCut um projeto com uma legenda no estilo
+  desejado (fonte, cores, contorno, animação, modelo de legenda; pinte uma palavra com a cor do destaque), feche o
+  CapCut e, em **Legendas CapCut > Modelo de legenda**, use **Salvar modelo do CapCut**. Sem isso vale o estilo
+  "Padrão (capcut-agent-skill)".
+- Durante a exportação o Media Tool traz o CapCut para a frente e usa o mouse por alguns segundos; evite mexer no
+  computador nesse momento. Se o CapCut estiver aberto em outro projeto, o vídeo espera e tenta de novo.
+- Instalação das dependências, modelos de transcrição e detalhes técnicos: [docs/CAPCUT.md](docs/CAPCUT.md). Contrato
+  da API: `docs/CONTRACTS.md`, seção 8.9.
 
 ## Diagnóstico
 

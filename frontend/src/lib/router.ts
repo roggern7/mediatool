@@ -41,6 +41,7 @@ export const ROUTES = {
   import: "/",
   library: "/biblioteca",
   edit: "/editar",
+  captions: "/legendas",
   queue: "/fila",
   profiles: "/analise-perfis",
   presets: "/presets",
