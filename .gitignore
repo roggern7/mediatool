@@ -28,6 +28,7 @@ storage/originals/*
 storage/processed/*
 storage/temp/*
 storage/thumbs/*
+storage/capcut/*
 !storage/**/.gitkeep
 logs/
 *.log
