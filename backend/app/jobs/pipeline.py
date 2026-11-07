@@ -653,7 +653,20 @@ class JobExecutor:
         if not self._download_only:
             self._stage("thumbnail")
             self._ensure_thumbnail(media_id, original)
+        if media_type == "video" and self._role == "original":
+            self._queue_capcut(media_id)
         return self.ctx.media.get(media_id)
+
+    def _queue_capcut(self, media_id: int) -> None:
+        """Legendas CapCut com "legendar automaticamente após o download" ligado: um job para o vídeo NOVO (duplicatas
+        e reaproveitados não passam aqui). Falha ao enfileirar nunca muda o resultado do download."""
+        try:
+            from app.services import capcut_service
+
+            capcut_service.enqueue_after_download(self.ctx, media_id, self.job.get("batch_id"))
+        except Exception:  # noqa: BLE001 - o download já terminou bem; a legenda é um extra
+            logger.warning("Job %s: não foi possível enfileirar a legenda CapCut da mídia %s", self.job_id, media_id,
+                           exc_info=True)
 
     def _download(self, downloader, item: RemoteMedia, temp_dir: Path) -> Path:
         """Vídeo com fluxos separados (lote por link): vídeo + áudio + junção sem recodificar; em falha de conteúdo

@@ -1,0 +1,104 @@
+{
+  "schema_version": "2026.9.0",
+  "generated_at": "2026-09-25T08:38:29Z",
+  "algorithm": "sha256",
+  "bundle_checksum": "98e08319e30b497e0f35b3d7e40ccb4b22e68d0056db7f8b01651bf9d8cef49d",
+  "files": {
+    "agent/orchestrator.md": {
+      "sha256": "4ae91cce74ee7669aa3825744069251355d75307b893683a342843eea30728ae",
+      "size_bytes": 1587,
+      "modified_time": "2026-09-24T13:11:00Z",
+      "line_count": 28
+    },
+    "agent/video-editor.md": {
+      "sha256": "e514a1b786a9b4cff436a9fecad7ec4818bca44692930ef8dae6e5783e2ac997",
+      "size_bytes": 2279,
+      "modified_time": "2026-09-24T13:10:55Z",
+      "line_count": 38
+    },
+    "rules/short_form_rules.md": {
+      "sha256": "4365d3edeb2b8e02a22b4fe0f4c2b39faf5f4c793e884691d6cc2a0da04f07fb",
+      "size_bytes": 6558,
+      "modified_time": "2026-09-24T16:19:03Z",
+      "line_count": 89
+    },
+    "rules/capcut-conventions.md": {
+      "sha256": "60c5a9e0efd808b08eabe2538790c842c000b6a1443a08683df4112d576a5dd6",
+      "size_bytes": 2371,
+      "modified_time": "2026-09-24T13:11:11Z",
+      "line_count": 53
+    },
+    "rules/8-ironclad-rules.md": {
+      "sha256": "5adfca950f7be4bc836ad1af16790141025a53fead5458dc78580a901f995ddd",
+      "size_bytes": 3876,
+      "modified_time": "2026-09-24T13:11:05Z",
+      "line_count": 70
+    },
+    "scripts/generate_manifest.py": {
+      "sha256": "5704ff95f6b237a171ed20699efd196eea63a5ba2b59b5c3bc68205a5662ff1c",
+      "size_bytes": 7511,
+      "modified_time": "2026-09-24T13:11:35Z"
+    },
+    "scripts/validate_kit.py": {
+      "sha256": "48a07ade1581ebc286301e980d90781f509104e7230289d150ffe87c637ffd6a",
+      "size_bytes": 9420,
+      "modified_time": "2026-09-24T13:11:48Z"
+    },
+    "skills/capcut-editor/SKILL.md": {
+      "sha256": "fb72e0e0fee71687c6471138ec49e6a863f44565e1ef4eda368305433692fce1",
+      "size_bytes": 7816,
+      "modified_time": "2026-09-24T16:19:09Z",
+      "line_count": 191
+    },
+    "skills/capcut-editor/.env.example": {
+      "sha256": "9905105fd127dd570c3a51117b397a74ce9c435e20fab7698de4058a1d5ba87f",
+      "size_bytes": 114,
+      "modified_time": "2026-09-25T08:37:17Z"
+    },
+    "skills/capcut-editor/references/draft_schema.md": {
+      "sha256": "d40e52a5dd0c673e970aee027e9f51d6e354902e401667d5dc84542b6217002c",
+      "size_bytes": 7116,
+      "modified_time": "2026-09-24T15:25:10Z",
+      "line_count": 219
+    },
+    "skills/capcut-editor/references/text_styles.md": {
+      "sha256": "c328339cba2f6a8f32a890575c77dcee336e8f011df733484174e5c58e3f69a7",
+      "size_bytes": 8778,
+      "modified_time": "2026-09-24T15:46:07Z",
+      "line_count": 164
+    },
+    "skills/capcut-editor/references/audio_guide.md": {
+      "sha256": "369a0b3349791de8e6afaf6ef6cc5d136b5e16e3724a82f2cbceac80da6b8bf2",
+      "size_bytes": 5652,
+      "modified_time": "2026-09-24T16:18:56Z",
+      "line_count": 109
+    },
+    "skills/capcut-editor/references/elevenlabs_scribe.md": {
+      "sha256": "6eb7a1e658d4abfd0a5cced3f44af10044cf326a82bd0d3efb66b34c5eb0cb5e",
+      "size_bytes": 4699,
+      "modified_time": "2026-09-24T14:54:19Z",
+      "line_count": 121
+    },
+    "skills/capcut-editor/scripts/capcut_draft.py": {
+      "sha256": "757032b41e68e2f40983e72b93fe4543e11810b1d486ca5933ab6e3d3f673fa7",
+      "size_bytes": 46899,
+      "modified_time": "2026-09-24T14:46:02Z"
+    },
+    "skills/capcut-editor/scripts/scribe_transcribe.py": {
+      "sha256": "ec9d52049e38e0086516c468730eef5ce0c0e4eb810c1403c51070b2d53377f5",
+      "size_bytes": 9974,
+      "modified_time": "2026-09-24T14:59:46Z"
+    },
+    "skills/capcut-editor/scripts/update_scribe_subtitles.py": {
+      "sha256": "6be1038cb48e54ffb9bdd7c6b86f7fb0830f0e4062bfb33bdd7cc8c5a7be1fbe",
+      "size_bytes": 14956,
+      "modified_time": "2026-09-24T15:24:18Z"
+    },
+    "workflows/capcut.md": {
+      "sha256": "73659a2088710c09a225e11f070495403d2a4a0bdc3a885b95969a326e8ab661",
+      "size_bytes": 2963,
+      "modified_time": "2026-09-24T14:55:21Z",
+      "line_count": 98
+    }
+  }
+}

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ExternalLink, FolderOpen, Trash2, Wand2, X } from "lucide-react";
+import { Captions, ExternalLink, FolderOpen, Trash2, Wand2, X } from "lucide-react";
 import { api, messageOf } from "../api/client";
 import type { ExportContent, Media, MediaView, Preset, Rendition } from "../api/types";
 import { LIBRARY_TYPE_FILTERS, isCover, libraryTypeQuery, mediaKindLabel, type LibraryTypeFilter } from "../lib/importCovers";
@@ -41,6 +41,7 @@ import {
   shouldResetToFirst,
   stackFor,
 } from "../lib/keyset";
+import { enqueueSummary } from "../lib/capcut";
 import { nextPollMs } from "../lib/polling";
 import { ROUTES } from "../lib/router";
 import { useDebounced } from "../lib/useDebounced";
@@ -87,6 +88,8 @@ export function LibraryPage() {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [busy, setBusy] = useState(false);
   const [pollMs, setPollMs] = useState<number | null>(null);
+  // Resultado do último "Legendar no CapCut" (com link para a página das legendas).
+  const [capcutNotice, setCapcutNotice] = useState<string | null>(null);
   // Retoma o ZIP/exportação da Biblioteca em andamento, ou volta a oferecer o ZIP pronto, ao reabrir a tela.
   const exportFlow = useExportFlow({ resumeFor: { kind: "library" } });
 
@@ -195,6 +198,21 @@ export function LibraryPage() {
   function exportSelected(mode: "pick" | "zip" = "pick") {
     const source = librarySelectionSource({ allByFilter, view, typeFilter, q, selectedIds });
     if (source) void exportFlow.start(source, mode, exportContent);
+  }
+
+  /** Envia a seleção da página para as Legendas CapCut; o servidor pula o que não é vídeo original. */
+  async function captionSelected() {
+    setBusy(true);
+    try {
+      const result = await api.createCapcutJobs({ media_ids: selectedIds });
+      const text = enqueueSummary(result);
+      toast.push(result.created.length > 0 ? "ok" : "info", text);
+      setCapcutNotice(text);
+    } catch (err) {
+      toast.push("err", messageOf(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function runDialog(presetId?: number) {
@@ -381,6 +399,16 @@ export function LibraryPage() {
             <Wand2 size={13} strokeWidth={1.75} aria-hidden="true" />
             Processar com preset (opcional)
           </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={busy || !items.some((m) => selected.has(m.id) && m.media_type === "video" && !isCover(m))}
+            title="Transcreve o áudio e exporta cada vídeo selecionado com legendas pelo CapCut (só vídeos)"
+            onClick={() => void captionSelected()}
+          >
+            <Captions size={13} strokeWidth={1.75} aria-hidden="true" />
+            Legendar no CapCut
+          </button>
           {view !== "originals" ? (
             <ExportContentSelect value={exportContentChoice} onChange={setExportContentChoice} />
           ) : null}
@@ -406,6 +434,15 @@ export function LibraryPage() {
           </button>
           <button type="button" className="btn btn-sm btn-ghost" onClick={clearSelection}>
             Limpar seleção
+          </button>
+        </div>
+      ) : null}
+      {capcutNotice ? (
+        <div className="alert" role="status">
+          <span className="grow">{capcutNotice}</span>
+          <Link to={ROUTES.captions}>Ver em Legendas CapCut</Link>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => setCapcutNotice(null)}>
+            Fechar
           </button>
         </div>
       ) : null}

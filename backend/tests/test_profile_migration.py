@@ -72,7 +72,8 @@ def test_indexes_come_and_go_with_the_tables(db):
     assert {"ix_profile_items_state", "ix_profile_items_position", "ix_profile_items_open"} <= names
     partial = db.scalar("SELECT sql FROM sqlite_master WHERE name = 'ix_profile_items_open'")
     assert "WHERE state IN ('pending', 'running')" in partial
-    revert_migration(db, 28)   # só a última aplicada pode ser revertida (0028: Reels da análise)
+    revert_migration(db, 29)   # só a última aplicada pode ser revertida (0029: Legendas CapCut)
+    revert_migration(db, 28)   # 0028: Reels da análise
     revert_migration(db, 27)   # 0027: origem do horário
     revert_migration(db, 26)   # 0026: horário dos posts
     revert_migration(db, 25)
@@ -86,7 +87,8 @@ def test_up_down_up_keeps_old_data(db):
     db.execute("INSERT INTO profile_analysis_items (analysis_id, position, username) VALUES (1, 1, 'a1')")
     before = counts(db)
 
-    revert_migration(db, 28)   # só a última aplicada pode ser revertida (0028: Reels da análise)
+    revert_migration(db, 29)   # só a última aplicada pode ser revertida (0029: Legendas CapCut)
+    revert_migration(db, 28)   # 0028: Reels da análise
     revert_migration(db, 27)   # 0027: origem do horário
     revert_migration(db, 26)   # 0026: horário dos posts
     revert_migration(db, 25)
@@ -94,8 +96,8 @@ def test_up_down_up_keeps_old_data(db):
     assert not {"profile_analyses", "profile_analysis_items"} & table_names(db)
     assert db.scalar("SELECT COUNT(*) FROM schema_migrations WHERE version = 25") == 0
 
-    assert apply_migrations(db) == [25, 26, 27, 28]
-    assert schema_version(db) == 28 and counts(db) == before
+    assert apply_migrations(db) == [25, 26, 27, 28, 29]
+    assert schema_version(db) == 29 and counts(db) == before
     assert db.scalar("SELECT COUNT(*) FROM profile_analyses") == 0
 
 
@@ -109,7 +111,7 @@ def test_only_latest_applied_migration_can_be_reverted(tmp_path, db):
     (folder / "down" / "0024_import_requests.down.sql").write_text("DROP TABLE settings;", encoding="utf-8")
     with pytest.raises(RuntimeError, match="última"):
         revert_migration(db, 24, folder)
-    assert schema_version(db) == 28 and "settings" in table_names(db)
+    assert schema_version(db) == 29 and "settings" in table_names(db)
 
 
 def test_revert_requires_down_file(tmp_path, db):
@@ -165,12 +167,13 @@ def test_0027_adds_and_removes_post_times_source(db):
         return {row["name"] for row in db.fetchall("PRAGMA table_info(post_times)")}
 
     apply_migrations(db)
+    revert_migration(db, 29)
     revert_migration(db, 28)
     assert "source" in columns() and schema_version(db) == 27
     assert (MIGRATIONS_DIR / "down" / "0027_post_times_source.down.sql").is_file()
     revert_migration(db, 27)
     assert "source" not in columns() and {"code", "taken_at", "pinned"} <= columns() and schema_version(db) == 26
-    assert apply_migrations(db) == [27, 28] and "source" in columns()
+    assert apply_migrations(db) == [27, 28, 29] and "source" in columns()
 
 
 def test_0028_adds_and_removes_profile_reels(db):
@@ -181,10 +184,11 @@ def test_0028_adds_and_removes_profile_reels(db):
     apply_migrations(db)
     db.execute("INSERT INTO profile_analyses (total, created_at) VALUES (1, ?)", (NOW,))
     db.execute("INSERT INTO profile_analysis_items (analysis_id, position, username) VALUES (1, 1, 'a1')")
-    assert reels <= columns() and schema_version(db) == 28
+    assert reels <= columns() and schema_version(db) == 29
     assert db.fetchone("SELECT reels_count, reels_more, latest_reel_at FROM profile_analysis_items")[0] is None
     assert (MIGRATIONS_DIR / "down" / "0028_profile_reels.down.sql").is_file()
+    revert_migration(db, 29)
     revert_migration(db, 28)
     assert not reels & columns() and "views_reels" in columns() and schema_version(db) == 27
     assert db.scalar("SELECT COUNT(*) FROM profile_analysis_items") == 1
-    assert apply_migrations(db) == [28] and reels <= columns()
+    assert apply_migrations(db) == [28, 29] and reels <= columns()

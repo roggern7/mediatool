@@ -236,7 +236,7 @@ def test_migration_0014_over_schema_0013_with_data_keeps_old_batches(tmp_path, h
         db.execute("UPDATE batches SET status = 'completed', listing_state = 'done', found = 7 WHERE id = ?",
                    (batch_id,))
         before = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
-        assert apply_migrations(db) == [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]   # 0015 só mexe no preset; 0016-0020 só colunas anuláveis
+        assert apply_migrations(db) == [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]   # 0015 só mexe no preset; 0016-0020 só colunas anuláveis
         after = dict(db.fetchone("SELECT * FROM batches WHERE id = ?", (batch_id,)))
         assert {k: after[k] for k in before} == before, "nenhum dado antigo reescrito"
         assert after["import_mode"] is None and db.scalar("SELECT COUNT(*) FROM batch_links") == 0

@@ -1,5 +1,14 @@
 import type {
   Batch,
+  CapCutDraft,
+  CapCutJob,
+  CapCutJobList,
+  CapCutJobStatus,
+  CapCutJobsCreated,
+  CapCutSettings,
+  CapCutSettingsUpdate,
+  CapCutStatus,
+  CapCutStyle,
   Diagnostics,
   EditFolderList,
   EditRequest,
@@ -362,7 +371,35 @@ export const api = {
   /** Relatório de padrões de publicação (JSON) do lote ou do grupo, para ver na tela. */
   postTimesReport: (target: { batch_id: number } | { group_id: number }) =>
     request<PostTimesReport>("GET", "/post-times/report", { query: target, timeoutMs: SLOW_TIMEOUT_MS }),
+
+  /* Legendas CapCut */
+  capcutStatus: () => request<CapCutStatus>("GET", "/capcut/status"),
+  capcutSettings: () => request<CapCutSettings>("GET", "/capcut/settings"),
+  updateCapcutSettings: (patch: CapCutSettingsUpdate) =>
+    request<CapCutSettings>("PUT", "/capcut/settings", { body: patch }),
+  capcutDrafts: () => request<CapCutDraft[]>("GET", "/capcut/drafts"),
+  capcutStyles: () => request<CapCutStyle[]>("GET", "/capcut/styles"),
+  createCapcutStyle: (body: { name: string; draft_name: string; segment_index: number }) =>
+    request<CapCutStyle>("POST", "/capcut/styles", { body }),
+  deleteCapcutStyle: (id: number) => request<void>("DELETE", `/capcut/styles/${id}`),
+  /** 0 = estilo embutido "Padrão (capcut-agent-skill)". */
+  setDefaultCapcutStyle: (id: number) => request<CapCutStyle[]>("POST", `/capcut/styles/${id}/default`),
+  listCapcutJobs: (q: { status?: CapCutJobStatus | null; media_id?: number; limit?: number; offset?: number } = {}) =>
+    request<CapCutJobList>("GET", "/capcut/jobs", { query: q }),
+  createCapcutJobs: (body: { media_ids: number[]; style_id?: number | null }) =>
+    request<CapCutJobsCreated>("POST", "/capcut/jobs", { body }),
+  cancelCapcutJob: (id: number) => request<CapCutJob>("POST", `/capcut/jobs/${id}/cancel`),
+  retryCapcutJob: (id: number) => request<CapCutJob>("POST", `/capcut/jobs/${id}/retry`),
+  deleteCapcutJob: (id: number) => request<void>("DELETE", `/capcut/jobs/${id}`),
+  revealCapcutJob: (id: number) => request<{ ok: boolean }>("POST", `/capcut/jobs/${id}/reveal`),
+  pauseCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/pause"),
+  resumeCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/resume"),
 };
+
+/** Download do vídeo legendado (GET simples: o navegador baixa com o nome do arquivo). */
+export function capcutJobFileUrl(id: number): string {
+  return `/api/capcut/jobs/${id}/file`;
+}
 
 /** Rota isenta do limite de 1 MB do corpo (o teto é o tamanho máximo de download, 2 GB por padrão). */
 export const UPLOAD_URL = "/api/library/uploads";

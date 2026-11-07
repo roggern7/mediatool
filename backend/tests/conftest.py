@@ -126,7 +126,7 @@ def _no_real_desktop(monkeypatch):
     """Nenhum teste abre o diálogo nativo de pasta, o Explorer ou toca a pasta Documentos real: quem precisa injeta
     `ctx.folder_picker`/`ctx.documents_dir` e troca `export_service.open_folder` (ou injeta o próprio falso de
     `subprocess.Popen`/`os.startfile` sobre as funções reais guardadas na importação do módulo de teste)."""
-    from app.services import export_destination, export_service, system_open
+    from app.services import capcut_service, export_destination, export_service, system_open
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("Teste tentou usar o desktop real (diálogo de pasta, Explorer ou Documentos).")
@@ -138,6 +138,7 @@ def _no_real_desktop(monkeypatch):
     for name in ("_pick_with_tk", "_pick_with_powershell", "_run_picker_child"):
         monkeypatch.setattr(export_destination, name, forbidden)
     monkeypatch.setattr(system_open, "open_folder", forbidden)
+    monkeypatch.setattr(capcut_service, "open_path", forbidden)   # "Mostrar na pasta" das Legendas CapCut
     monkeypatch.setattr(system_open.os, "startfile", forbidden, raising=False)
 
 
