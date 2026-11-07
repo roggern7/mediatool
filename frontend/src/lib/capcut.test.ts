@@ -7,6 +7,10 @@ import {
   capcutPollMs,
   capcutSettingsPatch,
   enqueueSummary,
+  exportModeHelp,
+  exportModeLabel,
+  exportModeStatusText,
+  jobExportModeText,
   jobNote,
   jobProgress,
   stageLabel,
@@ -31,7 +35,39 @@ const SETTINGS: CapCutSettings = {
   auto_after_download: false,
   max_attempts: 3,
   default_style_id: null,
+  export_mode: "isolated",
 };
+
+describe("legendas: modo de exportação", () => {
+  it("rótulos, ajuda e status do modo (isolado indisponível mostra o motivo)", () => {
+    expect(exportModeLabel("isolated")).toBe("Isolado (recomendado)");
+    expect(exportModeHelp("isolated")).toBe("Não usa mouse, teclado nem a tela; você pode usar o PC normalmente.");
+    expect(exportModeHelp("interactive")).toBe("Usa a tela e precisa do PC livre.");
+    expect(exportModeLabel(null)).toBe("Desconhecido");
+    expect(exportModeStatusText("isolated", { available: true, reason: null }).ok).toBe(true);
+    const off = exportModeStatusText("isolated", { available: false, reason: "Componentes ausentes: pythoncom." });
+    expect(off.ok).toBe(false);
+    expect(off.text).toContain("pythoncom");
+    expect(off.text).toContain("Interativo");
+    expect(exportModeStatusText("interactive", { available: false, reason: "x" }).ok).toBe(true);
+  });
+
+  it("o patch das configurações leva o modo só quando muda", () => {
+    expect(capcutSettingsPatch(SETTINGS, { ...SETTINGS })).toEqual({});
+    expect(capcutSettingsPatch(SETTINGS, { ...SETTINGS, export_mode: "interactive" })).toEqual({
+      export_mode: "interactive",
+    });
+  });
+});
+
+describe("legendas: modo na lista de jobs", () => {
+  it("mostra Isolado, Interativo ou traço", () => {
+    expect(jobExportModeText("isolated")).toBe("Isolado");
+    expect(jobExportModeText("interactive")).toBe("Interativo");
+    expect(jobExportModeText(null)).toBe("—");
+    expect(jobExportModeText(undefined)).toBe("—");
+  });
+});
 
 describe("legendas: etapas e progresso", () => {
   it("toda etapa tem rótulo em pt-BR e faixa contínua de 0 a 100", () => {

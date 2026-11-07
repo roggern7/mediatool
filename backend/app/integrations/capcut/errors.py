@@ -55,6 +55,19 @@ class DesktopBusy(CapCutError):
         super().__init__(None, message or "O PC está em uso: a exportação no CapCut espera ele ficar livre.")
 
 
+class IsolatedUnavailable(CapCutError):
+    """O modo de exportação isolado não pôde ser usado (área de trabalho, thread presa a ela ou UI Automation). Nunca
+    cai para o modo interativo: o job falha e o dono escolhe o modo nas configurações."""
+
+    code = "isolated_unavailable"
+    transient = False
+
+    def __init__(self, message: str | None = None):
+        super().__init__(None, message or (
+            "O modo de exportação isolado não pôde ser usado neste computador. Nas configurações das Legendas "
+            "CapCut, troque o modo de exportação para \"Interativo\" e tente de novo."))
+
+
 class CapCutCancelled(CapCutError):
     code = "cancelled"
     transient = False

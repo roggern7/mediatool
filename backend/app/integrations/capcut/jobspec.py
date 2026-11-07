@@ -31,6 +31,13 @@ class CapCutJobSpec:
     keep_original_audio: bool = True
     keep_draft: bool = False
     transcript: list[dict[str, Any]] | None = None
+    # Prévia do editor: só o trecho [clip_start, clip_start + clip_duration) (s); sem fala, `sample_text` com tempos
+    # sintéticos no lugar da cópia sem legendas.
+    clip_start: float | None = None
+    clip_duration: float | None = None
+    sample_text: str | None = None
+    # 'isolated' (área de trabalho separada, sem mouse/teclado/tela) | 'interactive' (usa a tela; precisa do PC livre).
+    export_mode: str = "isolated"
 
 
 @dataclass

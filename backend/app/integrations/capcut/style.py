@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -69,6 +69,8 @@ class CaptionStyle:
     fonts: list[Any] = field(default_factory=list)
     words_convention: dict[str, Any] = field(default_factory=lambda: {"unit": "ms", "relative": True})
     version: int = STYLE_VERSION
+    uppercase: bool = False                 # editor visual: texto das legendas em maiúsculas
+    highlight_enabled: bool | None = None   # editor visual: False desliga o destaque; None = segue o job
 
     @property
     def clip(self) -> dict[str, Any]:
@@ -92,6 +94,9 @@ class CaptionStyle:
                 font_path=data.get("font_path"), fonts=copy.deepcopy(data.get("fonts") or []),
                 words_convention=dict(data.get("words_convention") or {"unit": "ms", "relative": True}),
                 version=int(data.get("version") or STYLE_VERSION),
+                uppercase=bool(data.get("uppercase", False)),
+                highlight_enabled=(None if data.get("highlight_enabled") is None
+                                   else bool(data.get("highlight_enabled"))),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CapCutError("invalid_style", "Modelo de legenda inválido.") from exc
@@ -487,6 +492,8 @@ def apply_style(style: CaptionStyle, chunk: Chunk, start_us: int, duration_us: i
                 highlight: HighlightOptions | None = None
                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Materiais de texto, segmentos e materiais extras ({array, object}) de um bloco."""
+    if style.uppercase:
+        chunk = replace(chunk, text=chunk.text.upper(), words=[replace(w, text=w.text.upper()) for w in chunk.words])
     text, spans = _word_spans(chunk)
     total = utf16_len(text)
     styles = parse_content(style.material)["styles"]

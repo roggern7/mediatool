@@ -1,6 +1,15 @@
 import type {
   Batch,
+  CapCutAnimationItem,
+  CapCutAnimationType,
+  CapCutCatalogPage,
+  CapCutDesign,
   CapCutDraft,
+  CapCutFontItem,
+  CapCutFontSource,
+  CapCutPreview,
+  CapCutPreviewRequest,
+  CapCutPreviewStatus,
   CapCutJob,
   CapCutJobList,
   CapCutJobStatus,
@@ -379,8 +388,35 @@ export const api = {
     request<CapCutSettings>("PUT", "/capcut/settings", { body: patch }),
   capcutDrafts: () => request<CapCutDraft[]>("GET", "/capcut/drafts"),
   capcutStyles: () => request<CapCutStyle[]>("GET", "/capcut/styles"),
-  createCapcutStyle: (body: { name: string; draft_name: string; segment_index: number }) =>
-    request<CapCutStyle>("POST", "/capcut/styles", { body }),
+  /** Do rascunho do CapCut (`draft_name` + `segment_index`) ou do editor visual (`design`). */
+  createCapcutStyle: (
+    body: { name: string; draft_name: string; segment_index: number } | { name: string; design: CapCutDesign },
+  ) => request<CapCutStyle>("POST", "/capcut/styles", { body }),
+  /** Só modelos criados pelo editor (409 para os extraídos de rascunho). */
+  updateCapcutStyle: (id: number, body: { name?: string; design: CapCutDesign }) =>
+    request<CapCutStyle>("PUT", `/capcut/styles/${id}`, { body }),
+  capcutFonts: (q: { q?: string; source?: CapCutFontSource | null; include_pro?: boolean; limit?: number; offset?: number }) =>
+    request<CapCutCatalogPage<CapCutFontItem>>("GET", "/capcut/catalog/fonts", {
+      query: { q: q.q?.trim(), source: q.source, include_pro: q.include_pro ? 1 : 0, limit: q.limit, offset: q.offset },
+    }),
+  capcutAnimations: (q: {
+    type: CapCutAnimationType;
+    q?: string;
+    include_pro?: boolean;
+    limit?: number;
+    offset?: number;
+  }) =>
+    request<CapCutCatalogPage<CapCutAnimationItem>>("GET", "/capcut/catalog/animations", {
+      query: { type: q.type, q: q.q?.trim(), include_pro: q.include_pro ? 1 : 0, limit: q.limit, offset: q.offset },
+    }),
+  createCapcutPreview: (body: CapCutPreviewRequest) =>
+    request<{ id: string | number; status: CapCutPreviewStatus; warnings?: string[] }>("POST", "/capcut/previews", {
+      body,
+    }),
+  capcutPreview: (id: string | number) =>
+    request<CapCutPreview>("GET", `/capcut/previews/${encodeURIComponent(String(id))}`),
+  cancelCapcutPreview: (id: string | number) =>
+    request<CapCutPreview>("POST", `/capcut/previews/${encodeURIComponent(String(id))}/cancel`),
   deleteCapcutStyle: (id: number) => request<void>("DELETE", `/capcut/styles/${id}`),
   /** 0 = estilo embutido "Padrão (capcut-agent-skill)". */
   setDefaultCapcutStyle: (id: number) => request<CapCutStyle[]>("POST", `/capcut/styles/${id}/default`),
@@ -395,6 +431,16 @@ export const api = {
   pauseCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/pause"),
   resumeCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/resume"),
 };
+
+/** Arquivo da fonte para o @font-face da prévia (404 quando não há arquivo local). */
+export function capcutFontFileUrl(key: string): string {
+  return `/api/capcut/fonts/file?key=${encodeURIComponent(key)}`;
+}
+
+/** MP4 da prévia real; usa o `file_url` do backend quando vier. */
+export function capcutPreviewFileUrl(preview: Pick<CapCutPreview, "id" | "file_url">): string {
+  return preview.file_url || `/api/capcut/previews/${encodeURIComponent(String(preview.id))}/file`;
+}
 
 /** Download do vídeo legendado (GET simples: o navegador baixa com o nome do arquivo). */
 export function capcutJobFileUrl(id: number): string {

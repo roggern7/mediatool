@@ -1670,3 +1670,86 @@ details.more > summary:hover {
     transition: none !important;
   }
 }
+
+/* ---------- Legendas CapCut: editor visual de modelos ---------- */
+
+.caption-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: linear-gradient(160deg, #3a4048 0%, #24282d 55%, #15181b 100%);
+  flex: none;
+}
+.caption-frame-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.caption-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1080px;
+  height: 1920px;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.caption-box {
+  position: absolute;
+  width: max-content;
+  box-sizing: content-box;
+  overflow-wrap: break-word;
+  white-space: normal;
+}
+.caption-options {
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+.caption-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.caption-option:hover {
+  background: var(--surface-2);
+}
+.caption-option.on {
+  background: var(--surface-3);
+}
+.caption-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76px;
+  gap: 8px;
+  align-items: center;
+}
+.caption-color {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.caption-color input[type="color"] {
+  width: 34px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  cursor: pointer;
+}

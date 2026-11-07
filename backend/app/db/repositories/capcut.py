@@ -1,4 +1,5 @@
-"""Legendas CapCut (migration 0029): fila persistente dos jobs (um por vez) e modelos de legenda salvos."""
+"""Legendas CapCut (migrations 0029/0030): fila persistente dos jobs (um por vez) e modelos de legenda salvos (com o
+`design` do editor visual)."""
 
 from __future__ import annotations
 
@@ -41,6 +42,7 @@ def decode_style(row) -> dict[str, Any] | None:
     if data is not None:
         data["style"] = load_json(data["style"])
         data["summary"] = load_json(data["summary"])
+        data["design"] = load_json(data.get("design"))
     return data
 
 
@@ -201,14 +203,27 @@ class CapCutRepository:
     def style_name_taken(self, name: str) -> bool:
         return self.db.scalar("SELECT 1 FROM capcut_styles WHERE name = ? COLLATE NOCASE", (name,)) is not None
 
-    def create_style(self, *, name: str, source_draft: str, style: dict[str, Any],
-                     summary: dict[str, Any] | None) -> int:
+    def create_style(self, *, name: str, source_draft: str | None, style: dict[str, Any],
+                     summary: dict[str, Any] | None, design: dict[str, Any] | None = None) -> int:
         cursor = self.db.execute(
-            "INSERT INTO capcut_styles (name, source_draft, style, summary, is_default, created_at)"
-            " VALUES (?, ?, ?, ?, 0, ?)",
+            "INSERT INTO capcut_styles (name, source_draft, style, summary, design, is_default, created_at)"
+            " VALUES (?, ?, ?, ?, ?, 0, ?)",
             (name, source_draft, canonical_json(style), None if summary is None else canonical_json(summary),
-             utc_now()))
+             None if design is None else canonical_json(design), utc_now()))
         return int(cursor.lastrowid)
+
+    def update_design_style(self, style_id: int, *, name: str, style: dict[str, Any], summary: dict[str, Any] | None,
+                            design: dict[str, Any]) -> bool:
+        """Só modelo do editor (`design` não nulo); False se não existe ou foi copiado de um rascunho."""
+        cursor = self.db.execute(
+            "UPDATE capcut_styles SET name = ?, style = ?, summary = ?, design = ? WHERE id = ? AND design IS NOT NULL",
+            (name, canonical_json(style), None if summary is None else canonical_json(summary), canonical_json(design),
+             style_id))
+        return cursor.rowcount > 0
+
+    def style_name_taken_by_other(self, name: str, style_id: int) -> bool:
+        return self.db.scalar("SELECT 1 FROM capcut_styles WHERE name = ? COLLATE NOCASE AND id <> ?",
+                              (name, style_id)) is not None
 
     def delete_style(self, style_id: int) -> bool:
         return self.db.execute("DELETE FROM capcut_styles WHERE id = ?", (style_id,)).rowcount > 0

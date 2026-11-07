@@ -1775,16 +1775,36 @@ serializado; `transcript` = palavras, reaproveitadas na nova tentativa; `output_
 `capcut_styles` (`name` único, `source_draft`, `style`/`summary` JSON, `is_default` espelha a configuração). O estilo
 embutido "Padrão (capcut-agent-skill)" não fica no banco: é o id `0` na API (`style: null` no job).
 
+Editor visual (migration **0030**, estritamente aditiva: `capcut_styles.design TEXT` anulável; reversão por
+`migrations/down/0030_capcut_design.down.sql`): modelo criado na tela tem `source_draft = NULL`, `design` (JSON
+versionado abaixo) e `style` = o estilo gerado a partir dele (o que o job usa); os copiados de rascunho têm `design`
+NULL e não podem ser alterados pelo `PUT`. `design` (formatos gerados e regras em `docs/CAPCUT.md`, "Editor visual"):
+`{version: 1, font: {source: bundled|capcut|windows, id (capcut: resource_id), path (windows/bundled: arquivo), name},
+size 2..30, scale 0,3..4, bold, italic, underline, uppercase, color #RRGGBB, opacity 0..1, stroke: {enabled, color,
+width 0..100}, shadow: {enabled, color, opacity 0..1, blur 0..100, distance 0..100, angle -180..180}, background:
+{enabled, color, opacity 0..1, radius 0..1}, align center|left|right, letter_spacing/line_spacing -20..100,
+position: {x, y} -1..1, max_line_width 0,1..1, highlight: {enabled, color}, animation: {in, out, loop: {id, name,
+duration_ms 100..10000} | null}}`. Fonte `windows` só com arquivo .ttf/.otf existente nas pastas de fontes do Windows,
+`bundled` só em `Resources\Font` do CapCut, `capcut` só com id do catálogo local; animação só com id do catálogo com o
+tipo pedido (422 `invalid_design`). Prévias: só em memória no executor (fora de `capcut_jobs`), com prioridade sobre os
+jobs comuns (mesmo com a fila pausada), sem gastar tentativas; uma prévia nova cancela as que ainda estavam na fila;
+saída em `<data_dir>/capcut/previews/<id>.mp4` (ficam as 10 mais recentes).
+
 Configurações: chave JSON `capcut` na tabela `settings` (rota própria, fora de `PUT /api/settings`): `output_dir`
 (`null` = `<storage>/capcut`; caminho absoluto em disco local, sem UNC/rede, sem `..`, fora da raiz da unidade; criada ao
 salvar), `resolution` `original`|`480P`|`720P`|`1080P`|`2K`|`4K`, `bitrate` `low`|`recommended`|`high`, `fps`
 `60` (padrão)|`50`|`30`|`25`|`24`|`original`, `highlight` (true), `highlight_color` `#RRGGBB`|null, `max_words` 1..10 (3),
 `max_chars` 8..80 (24), `whisper_model` `small`|`medium`|`large-v3-turbo` (padrão), `keep_original_audio` (true),
-`keep_draft` (false), `auto_after_download` (false), `max_attempts` 1..10 (3), `default_style_id` (null = embutido).
+`keep_draft` (false), `auto_after_download` (false), `max_attempts` 1..10 (3), `default_style_id` (null = embutido),
+`export_mode` `isolated` (padrão: o CapCut roda numa área de trabalho separada, sem mouse/teclado/tela) |
+`interactive` (usa a tela e precisa do PC livre). `export_mode` NÃO entra no instantâneo do job: é lido quando o job
+ou a prévia começa (trocar o modo vale na nova tentativa) e o modo usado é gravado em `options.export_mode` do job
+(`export_mode` no `Job`) e em `export_mode` da prévia. Sem fallback: se o modo isolado não puder ser usado, o job
+termina `failed` `isolated_unavailable` (não transitório). Detalhes em `docs/CAPCUT.md`, "Modo de exportação isolado".
 Pausa da fila: `app_state.capcut_queue_paused = "1"`.
 
 Estados do job: `pending` (na fila; `next_attempt_at` = quando pode rodar) -> `running` -> `completed` | `failed` |
-`cancelled`; `waiting` = CapCut ocupado (`wait_reason: capcut_busy`) ou PC em uso (`wait_reason: desktop_busy`: teclado/mouse do dono nos últimos 15 s antes de abrir o CapCut, ou foco tomado pelo dono durante a automação; nova checagem a cada 60 s, sem gastar tentativa). Etapas (`stage`): `transcribing` (0-35%),
+`cancelled`; `waiting` = CapCut ocupado (`wait_reason: capcut_busy`) ou PC em uso (`wait_reason: desktop_busy`, só no modo `interactive`: teclado/mouse do dono nos últimos 15 s antes de abrir o CapCut, ou foco tomado pelo dono durante a automação; nova checagem a cada 60 s, sem gastar tentativa). Etapas (`stage`): `transcribing` (0-35%),
 `drafting` (35-40), `waiting_capcut`/`launching`/`opening` (40-50), `exporting` (50-90), `finalizing` (90-98),
 `cleaning` (98-100); `progress` é o agregado 0..100.
 
@@ -1808,12 +1828,20 @@ enfileirar só vai para o log e não muda o resultado do download.
 
 | Método | Caminho | Corpo / query | Resposta |
 |---|---|---|---|
-| GET | /api/capcut/status | | `{available, reason, installed, version, drafts_dir, running_pids, deps, skill, models, queue: {pending, running, waiting, failed, completed, cancelled, paused}, settings}`; sem o núcleo: 200 com `available: false` |
-| GET/PUT | /api/capcut/settings | PUT: campos parciais (`null` = padrão) | `CapCutSettings` (+ `output_dir_is_default`); 422 `invalid_output_dir`\|`validation_error`; 404 `style_not_found` |
+| GET | /api/capcut/status | | `{available, reason, installed, version, drafts_dir, running_pids, deps, skill, models, queue: {pending, running, waiting, failed, completed, cancelled, paused}, settings, export_mode, isolated: {available, reason}}` (`isolated` = pré-requisitos do modo isolado presentes; não cria a área de trabalho); sem o núcleo: 200 com `available: false` |
+| GET/PUT | /api/capcut/settings | PUT: campos parciais (`null` = padrão; `export_mode` só `isolated`\|`interactive`) | `CapCutSettings` (+ `output_dir_is_default`, `export_mode`); 422 `invalid_output_dir`\|`validation_error`; 404 `style_not_found` |
 | GET | /api/capcut/drafts | | `[{name, modified_at, text_segments, preview}]`; 409 `capcut_unavailable` ou o `code` do núcleo |
-| GET | /api/capcut/styles | | `[{id, name, builtin, is_default, source_draft, summary, created_at}]` (id 0 = embutido, sempre primeiro) |
-| POST | /api/capcut/styles | `{name, draft_name, segment_index?=0}` | `Style` 201; 409 `style_name_taken`\|`capcut_unavailable`\|código do núcleo (`draft_not_found`, `no_text_segment`) |
+| GET | /api/capcut/styles | | `[{id, name, builtin, is_default, source_draft, summary, created_at, design}]` (id 0 = embutido, sempre primeiro, com o `design` equivalente como ponto de partida do editor; `design` null nos copiados de rascunho) |
+| POST | /api/capcut/styles | `{name, draft_name, segment_index?=0}` ou `{name, design}` (um dos dois) | `Style` 201 (com `warnings`: avisos do design que não bloqueiam, ex.: caixa de fundo + animação de entrada/saída); 409 `style_name_taken`\|`capcut_unavailable`\|código do núcleo (`draft_not_found`, `no_text_segment`); 422 `invalid_design` |
+| PUT | /api/capcut/styles/{id} | `{name?, design}` | `Style` (só modelo do editor; com `warnings`); 404 `style_not_found`; 409 `style_not_editable` (copiado de rascunho)\|`style_name_taken`; 422 `invalid_design` |
 | DELETE | /api/capcut/styles/{id} | | 204 (padrão excluído volta ao embutido); 404 `style_not_found` |
+| GET | /api/capcut/catalog/fonts | `q?`, `source?` `bundled`\|`windows`\|`capcut`, `include_pro` (0), `limit` 1..200 (50), `offset` | `{items: [{key, name, source, id, path, is_pro, downloaded, previewable}], total}`; `key` estável `bundled:<arquivo>`\|`windows:<arquivo>`\|`capcut:<id>`; ordem: embutidas, Windows, CapCut (cada uma por nome) |
+| GET | /api/capcut/catalog/animations | `type?` `in`\|`out`\|`loop`, `q?`, `include_pro` (0), `limit`, `offset` | `{items: [{id, name, type, is_pro, downloaded, default_duration_ms}], total}` (só as classificadas com segurança) |
+| GET | /api/capcut/fonts/file | `key` | o arquivo da fonte (`font/ttf`\|`font/otf`) para o @font-face, só de pastas permitidas (fontes do Windows, `Resources\Font` do CapCut, `Cache\effect\<id>` baixado); 404 `font_not_found` |
+| POST | /api/capcut/previews | `{design \| style_id (0 = embutido), media_id?, start_s (0), seconds 3..12 (6)}` | 202 `{id, status, warnings}` (`id` = 12 hex; `warnings` = avisos do design); 404 `media_not_found`\|`style_not_found`; 409 `preview_no_media`\|`source_missing`; 422 `not_video`\|`invalid_design`\|`validation_error` |
+| GET | /api/capcut/previews/{id} | | `{id, status (pending\|running\|waiting\|completed\|failed\|cancelled), stage, progress, detail, error_code, error_message, file_url, media_id, start_s, seconds, warnings, export_mode}` (`warnings` = avisos do design + avisos da exportação; `export_mode` null até começar); 404 `preview_not_found` |
+| GET | /api/capcut/previews/{id}/file | | o MP4 720P da prévia; 404 `preview_not_found`\|`preview_file_not_found` |
+| POST | /api/capcut/previews/{id}/cancel | | `Preview` (na fila: cancelada na hora; em execução: o núcleo é sinalizado) |
 | POST | /api/capcut/styles/{id}/default | id 0 = embutido | `Style[]`; 404 `style_not_found` |
 | GET | /api/capcut/jobs | `status?`, `media_id?`, `limit` 1..200 (50), `offset` | `{items: Job[], total, counts}` (id DESC; nome do arquivo e miniatura da mídia) |
 | POST | /api/capcut/jobs | `{media_ids: id[] (1..500), style_id?: int (0 = embutido), overrides?: {resolution, bitrate, fps, highlight, highlight_color, max_words, max_chars, whisper_model, keep_original_audio, keep_draft, output_dir}}` | 202 `{created: Job[], skipped: [{media_id, reason: media_not_found\|not_video\|cover\|already_queued}]}`; `origin` `manual` com `X-Media-Tool-Client: panel`, senão `api`; 404 `style_not_found`; 422 `invalid_output_dir` |
