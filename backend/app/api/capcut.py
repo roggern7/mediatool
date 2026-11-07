@@ -15,6 +15,8 @@ from app.schemas.capcut import (
     AnimationType,
     BatchCreate,
     BatchCreated,
+    BatchesHidden,
+    BatchesHide,
     BatchList,
     BatchOut,
     BatchStatus,
@@ -376,6 +378,13 @@ def batch_zip(ctx: Ctx, batch_id: IdPath) -> FileResponse:
     path = capcut_batch_service.build_zip(ctx, batch_id)
     return FileResponse(path, media_type="application/zip", filename=f"lote-{batch_id}.zip",
                         background=BackgroundTask(path.unlink, missing_ok=True))
+
+
+@router.post("/batches/hide", response_model=BatchesHidden)
+def hide_batches(ctx: Ctx, body: BatchesHide) -> dict[str, Any]:
+    """Remove do histórico vários lotes (`batch_ids`) ou todos os terminados (`all`); os arquivos ficam. Lotes com vídeo
+    aberto ficam e voltam em `active`."""
+    return capcut_batch_service.hide_batches(ctx, body.batch_ids, body.all)
 
 
 @router.delete("/batches/{batch_id}", status_code=204)

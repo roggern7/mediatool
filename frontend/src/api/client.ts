@@ -5,6 +5,7 @@ import type {
   CapCutBatch,
   CapCutBatchCreate,
   CapCutBatchCreated,
+  CapCutBatchesHidden,
   CapCutBatchList,
   CapCutBatchMode,
   CapCutBatchStatus,
@@ -477,6 +478,9 @@ export const api = {
   revealCapcutBatch: (id: number) => request<{ ok: boolean }>("POST", `/capcut/batches/${id}/reveal`),
   /** Some do histórico (não apaga arquivos); 409 com job aberto. */
   deleteCapcutBatch: (id: number) => request<void>("DELETE", `/capcut/batches/${id}`),
+  /** Remove do histórico os lotes escolhidos ou, com `all`, todos os terminados (os arquivos ficam). */
+  hideCapcutBatches: (body: { batch_ids?: number[]; all?: boolean }) =>
+    request<CapCutBatchesHidden>("POST", "/capcut/batches/hide", { body }),
 };
 
 /** Arquivo da fonte para o @font-face da prévia (404 quando não há arquivo local). */

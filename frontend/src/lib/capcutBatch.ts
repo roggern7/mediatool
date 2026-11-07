@@ -546,6 +546,14 @@ export function isBatchRunning(batch: Pick<CapCutBatch, "status">): boolean {
   return batch.status === "running";
 }
 
+/** Texto do aviso depois de remover: "2 lotes removidos do histórico (1 em andamento ficou)". */
+export function hiddenText(hidden: number, active: number): string {
+  const main =
+    hidden === 0 ? "Nenhum lote removido" : `${formatCount(hidden)} ${hidden === 1 ? "lote removido" : "lotes removidos"} do histórico`;
+  if (active === 0) return `${main}.`;
+  return `${main} (${formatCount(active)} em andamento ${active === 1 ? "ficou" : "ficaram"}).`;
+}
+
 /** Lote com job aberto (em andamento ou pausado): não sai do histórico. */
 export function isBatchOpen(batch: Pick<CapCutBatch, "counts">): boolean {
   return openCount(batch.counts) > 0;

@@ -504,6 +504,26 @@ def hide_batch(ctx: AppContext, batch_id: int) -> None:
     repo(ctx).update_batch(batch_id, hidden=1)
 
 
+def hide_batches(ctx: AppContext, batch_ids: list[int], everything: bool) -> dict[str, Any]:
+    """Remove vários lotes do histórico (ou todos, com `everything`); os arquivos ficam. Lote com vídeo na fila, em
+    andamento ou aguardando revisão fica e volta em `active`. Id inexistente ou já removido é ignorado."""
+    if everything:
+        ids = [int(r["id"]) for r in ctx.db.fetchall("SELECT id FROM capcut_batches WHERE hidden = 0 ORDER BY id")]
+    else:
+        ids = list(dict.fromkeys(batch_ids))
+    hidden, active = 0, []
+    for batch_id in ids:
+        batch = repo(ctx).get_batch(batch_id)
+        if batch is None or batch.get("hidden"):
+            continue
+        if repo(ctx).batch_jobs(batch_id, OPEN_STATUSES):
+            active.append(batch_id)
+            continue
+        repo(ctx).update_batch(batch_id, hidden=1)
+        hidden += 1
+    return {"hidden": hidden, "active": active}
+
+
 def hold_job(ctx: AppContext, job_id: int, held: bool) -> dict[str, Any]:
     """Pausa individual (só `pending`/`waiting`; 409 em execução ou encerrado)."""
     capcut_service.get_job(ctx, job_id)

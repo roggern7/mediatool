@@ -724,3 +724,29 @@ def test_zip_checks_space_and_cleans_temporaries(setup, monkeypatch, harness_fac
     harness.__exit__(None, None, None)
     harness_factory(root=root)
     assert not leftover.exists() and other.exists(), "só os temporários do ZIP de lote"
+
+
+def test_hide_batches_specific_and_all_keep_active_ones(harness, tmp_path):
+    from app.services import capcut_batch_service as svc
+    repo = capcut_service.repo(harness.ctx)
+    out = str(tmp_path / "saida")
+    ids = []
+    for n in range(3):
+        media_id = add_media(harness, name=f"h{n}")
+        r = harness.client.post("/api/capcut/batches", json={"mode": "caption", "media_ids": [media_id],
+                                                             "caption": {"overrides": {"output_dir": out}}})
+        assert r.status_code == 202, r.text
+        ids.append(r.json()["batch"]["id"])
+    for batch_id in ids[:2]:  # os dois primeiros terminam; o terceiro continua na fila
+        for job in repo.batch_jobs(batch_id, ("pending",)):
+            repo.update_job(job["id"], status="completed", progress=100)
+    headers = {"X-Media-Tool-Client": "panel"}
+    r = harness.client.post("/api/capcut/batches/hide", json={"batch_ids": [ids[0], ids[2]]}, headers=headers)
+    assert r.status_code == 200 and r.json() == {"hidden": 1, "active": [ids[2]]}
+    listed = [b["id"] for b in harness.client.get("/api/capcut/batches").json()["items"]]
+    assert ids[0] not in listed and ids[1] in listed and ids[2] in listed
+    r = harness.client.post("/api/capcut/batches/hide", json={"all": True}, headers=headers)
+    assert r.json() == {"hidden": 1, "active": [ids[2]]}, "limpar histórico: só os terminados"
+    listed = [b["id"] for b in harness.client.get("/api/capcut/batches").json()["items"]]
+    assert listed == [ids[2]]
+    assert svc.hide_batches(harness.ctx, [999999], False) == {"hidden": 0, "active": []}

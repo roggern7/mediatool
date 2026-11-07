@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CapCutBatch, CapCutBatchCounts, CapCutSettings, PresetParams } from "../api/types";
 import {
   BATCH_MODE_LABEL,
+  hiddenText,
   BATCH_MODE_OPTIONS,
   DEFAULT_BATCH_EDIT,
   EMPTY_SELECTION,
@@ -480,5 +481,13 @@ describe("Edição CapCut: modos e barra de ação", () => {
     expect(processButtonText(0)).toBe("Processar vídeos");
     expect(processButtonText(1)).toBe("Processar 1 vídeo");
     expect(processButtonText(3)).toBe("Processar 3 vídeos");
+  });
+});
+
+describe("histórico de lotes", () => {
+  it("aviso depois de remover", () => {
+    expect(hiddenText(1, 0)).toBe("1 lote removido do histórico.");
+    expect(hiddenText(3, 1)).toBe("3 lotes removidos do histórico (1 em andamento ficou).");
+    expect(hiddenText(0, 2)).toBe("Nenhum lote removido (2 em andamento ficaram).");
   });
 });

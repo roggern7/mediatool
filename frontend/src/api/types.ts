@@ -1416,6 +1416,12 @@ export interface CapCutBatchCreated {
   skipped: { media_id: number; reason: CapCutBatchSkipReason }[];
 }
 
+/** POST /capcut/batches/hide: quantos saíram do histórico e os que ficaram por ainda ter vídeo aberto. */
+export interface CapCutBatchesHidden {
+  hidden: number;
+  active: number[];
+}
+
 export interface CapCutBatchList {
   items: CapCutBatch[];
   total: number;

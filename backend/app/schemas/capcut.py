@@ -479,6 +479,17 @@ class BatchOut(BaseModel):
     options: dict[str, Any]
 
 
+class BatchesHide(StrictModel):
+    """Remove lotes do histórico: os de `batch_ids` ou, com `all`, todos os terminados."""
+    batch_ids: Annotated[list[PositiveId], Field(max_length=500)] = []
+    all: Annotated[bool, Field(strict=True)] = False
+
+
+class BatchesHidden(BaseModel):
+    hidden: int
+    active: list[int]   # lotes que ficaram porque ainda têm vídeo na fila, em andamento ou aguardando revisão
+
+
 class BatchList(BaseModel):
     items: list[BatchOut]
     total: int
