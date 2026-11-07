@@ -353,7 +353,14 @@ export function CapCutPage() {
           </p>
         )}
         <h3 style={{ margin: "16px 0 8px" }}>Histórico de lotes</h3>
-        <BatchHistory openId={shownId} onOpen={(id) => setShown(id)} version={historyVersion} />
+        <BatchHistory
+          openId={shownId}
+          onOpen={(id) => setShown(id)}
+          onRemoved={(ids) => {
+            if (shownId !== null && ids.includes(shownId)) setShown(null);
+          }}
+          version={historyVersion}
+        />
       </section>
 
       <Collapsible ref={stylesRef} title="Modelos de legenda" open={stylesOpen} onToggle={setStylesOpen}>

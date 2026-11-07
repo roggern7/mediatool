@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Download } from "lucide-react";
 import { api, capcutBatchZipUrl, capcutJobFileUrl, messageOf } from "../../api/client";
 import type { CapCutBatch, CapCutJob, CapCutJobStatus } from "../../api/types";
 import {
@@ -22,6 +23,7 @@ import {
   batchProgress,
   batchSummaryText,
   batchTone,
+  zipLabel,
   formatEta,
   isBatchRunning,
   openCount,
@@ -384,7 +386,7 @@ function BatchButtons({
         </button>
       ) : null}
       {can.resume ? (
-        <button type="button" className="btn btn-sm btn-primary" disabled={off} onClick={() => onAction("resume")}>
+        <button type="button" className="btn btn-sm" disabled={off} onClick={() => onAction("resume")}>
           Retomar
         </button>
       ) : null}
@@ -399,8 +401,9 @@ function BatchButtons({
         </button>
       ) : null}
       {can.zip ? (
-        <a className="btn btn-sm btn-ghost" href={capcutBatchZipUrl(batch.id)} download={`lote-${batch.id}.zip`}>
-          Baixar ZIP
+        <a className="btn btn-sm btn-primary" href={capcutBatchZipUrl(batch.id)} download={`lote-${batch.id}.zip`}>
+          <Download size={14} strokeWidth={2} aria-hidden="true" />
+          {zipLabel(batch)}
         </a>
       ) : null}
       {can.cancel ? (

@@ -135,12 +135,14 @@ class _Segment:
 # laranjinha" (repetição de uma frase posterior) espremido em 0,36 s com 4 palavras de duração zero e trocou palavras
 # ("Gerson" por "mesmo"); retranscrever o trecho sozinho consertou uns erros e criou outros, então o trecho não é
 # reescrito às cegas: vai MARCADO para a revisão (o dono ouve, corrige e o alinhador recalcula os tempos).
-# Frase suspeita (toda marcada) = 2+ palavras de duração ~0, ritmo impossível ou confiança média baixa;
-# fora isso, só a palavra de confiança baixa fica marcada.
+# Só sinais GRAVES param o vídeo para revisão (verificado em 2026-11-07: com limiares brandos, 10 de 13 Reels
+# pararam por palavra comum de confiança ~0,5, quase sempre a 1ª da frase). Frase suspeita (toda marcada) = 3+
+# palavras de duração ~0, mais de 14 sílabas/s ou confiança média < 0,40; palavra sozinha só com confiança < 0,10.
 SUSPECT_MIN_WORD_S = 0.03
-SUSPECT_MAX_SYLLABLES_PER_S = 9.0
-SUSPECT_MIN_MEAN_PROB = 0.60
-DOUBT_WORD_PROB = 0.6
+SUSPECT_MIN_COLLAPSED = 3
+SUSPECT_MAX_SYLLABLES_PER_S = 14.0
+SUSPECT_MIN_MEAN_PROB = 0.40
+DOUBT_WORD_PROB = 0.10
 # Nota acústica (média do log-prob das letras) a partir da qual o tempo do alinhador forçado é usado.
 ALIGN_MIN_SCORE = -3.0
 MIN_WORD_S = 0.08
@@ -155,7 +157,7 @@ def syllables(text: str) -> int:
 def _segment_suspicious(seg: _Segment) -> bool:
     if not seg.words:
         return False
-    if sum(1 for w in seg.words if w.end - w.start < SUSPECT_MIN_WORD_S) >= 2:
+    if sum(1 for w in seg.words if w.end - w.start < SUSPECT_MIN_WORD_S) >= SUSPECT_MIN_COLLAPSED:
         return True
     span = max(seg.words[-1].end - seg.words[0].start, 1e-3)
     if len(seg.words) > 1 and sum(syllables(w.text) for w in seg.words) / span > SUSPECT_MAX_SYLLABLES_PER_S:
@@ -249,9 +251,10 @@ def mark_doubts(segments: list[_Segment]) -> list[Word]:
     words: list[Word] = []
     for index, seg in enumerate(segments):
         suspicious = _segment_suspicious(seg)
-        for w in seg.words:
+        for k, w in enumerate(seg.words):
+            # a 1ª palavra da frase costuma vir com confiança baixa sem estar errada (início do segmento no Whisper)
             words.append(Word(w.start, w.end, w.text, w.probability, seg=index,
-                              doubt=suspicious or w.probability < DOUBT_WORD_PROB))
+                              doubt=suspicious or (k > 0 and w.probability < DOUBT_WORD_PROB)))
     return words
 
 

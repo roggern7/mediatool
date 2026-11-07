@@ -53,7 +53,9 @@ def test_mark_doubts_flags_collapsed_sentence_and_low_confidence_words_only():
     segments = [
         _Segment(6.08, 7.92, [Word(6.08, 6.38, "Esse", 1.0), Word(6.38, 6.80, "top,", 1.0)]),
         _Segment(8.10, 8.46, REAL_COLLAPSE[2:7]),
-        _Segment(17.11, 19.59, [Word(18.67, 19.09, "entendeu,", 1.0), Word(19.29, 19.59, "Gerson.", 0.51)]),
+        _Segment(17.11, 19.59, [Word(18.67, 19.09, "entendeu,", 1.0), Word(19.29, 19.59, "Gerson.", 0.05)]),
+        _Segment(20.0, 21.0, [Word(20.0, 20.2, "O", 0.08), Word(20.2, 20.6, "pessoal", 0.95),
+                              Word(20.6, 21.0, "ama", 0.55)]),
     ]
     words = T.mark_doubts(segments)
     by_seg = {}
@@ -61,7 +63,8 @@ def test_mark_doubts_flags_collapsed_sentence_and_low_confidence_words_only():
         by_seg.setdefault(w.seg, []).append(w)
     assert not any(w.doubt for w in by_seg[0])
     assert all(w.doubt for w in by_seg[1]), "frase amontoada/ritmo impossível: toda marcada"
-    assert [w.doubt for w in by_seg[2]] == [False, True], "só a palavra de confiança baixa"
+    assert [w.doubt for w in by_seg[2]] == [False, True], "só a palavra de confiança muito baixa"
+    assert not any(w.doubt for w in by_seg[3]), "1ª palavra da frase e confiança ~0,5 não param o vídeo"
 
 
 def test_word_dict_roundtrip_is_backward_compatible():
