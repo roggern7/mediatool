@@ -221,6 +221,8 @@ export interface BatchEditForm {
   startText: string;
   speed: number;
   sharpen: boolean;
+  /** Espelhar o vídeo (inverter na horizontal); escolher um preset copia o dele. */
+  mirror: boolean;
 }
 
 export const DEFAULT_BATCH_EDIT: BatchEditForm = {
@@ -230,6 +232,7 @@ export const DEFAULT_BATCH_EDIT: BatchEditForm = {
   startText: "",
   speed: 1,
   sharpen: false,
+  mirror: false,
 };
 
 /** Velocidade presa a 0,5x..2,0x no passo de 0,01. */
@@ -258,7 +261,8 @@ export function isNoEditChange(form: BatchEditForm): boolean {
     form.durationMode === "original" &&
     parseStart(form.startText) === 0 &&
     form.speed === 1 &&
-    !form.sharpen
+    !form.sharpen &&
+    !form.mirror
   );
 }
 
@@ -299,6 +303,7 @@ export function editFormFromPreset(form: BatchEditForm, preset: Pick<Preset, "id
     startText: p.trim_start > 0 ? toDecimalInput(p.trim_start) : "",
     speed: snapBatchSpeed(p.speed),
     sharpen: Boolean(p.sharpen),
+    mirror: Boolean(p.mirror),
   };
 }
 
@@ -309,6 +314,7 @@ export function toBatchEdit(form: BatchEditForm): CapCutBatchEditSettings {
     duration_mode: form.durationMode,
     speed: form.speed,
     sharpen: form.sharpen,
+    mirror: form.mirror,
     start_seconds: parseStart(form.startText) ?? 0,
   };
   if (form.durationMode === "custom") {
@@ -332,6 +338,7 @@ export function editSummaryText(form: BatchEditForm, presetName: string | null):
   if (start) parts.push(`início ${toDecimalInput(start)} s`);
   if (form.speed !== 1) parts.push(formatSpeed(form.speed));
   if (form.sharpen) parts.push("nitidez");
+  if (form.mirror) parts.push("espelhado");
   return parts.length > 0 ? parts.join(" · ") : "Sem alterações";
 }
 

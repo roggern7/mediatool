@@ -253,6 +253,11 @@ function EditFields({
         <Switch label={SHARPEN_LABEL} checked={edit.sharpen} onChange={(sharpen) => onEdit({ ...edit, sharpen })} />
         <span className="field-hint">{SHARPEN_DESCRIPTION}</span>
       </div>
+      <div className="field">
+        <span className="field-label">Espelhar</span>
+        <Switch label="Inverter o vídeo (espelho)" checked={edit.mirror} onChange={(mirror) => onEdit({ ...edit, mirror })} />
+        <span className="field-hint">Ligado, a imagem sai invertida da esquerda para a direita. O preset escolhido já preenche.</span>
+      </div>
     </div>
   );
 }

@@ -245,13 +245,16 @@ def edit_plan(ctx: AppContext, edit: BatchEdit) -> dict[str, Any]:
             raise not_found("Preset", "preset_not_found")
     limit = duration_limit(edit)
     start = round(float(edit.start_seconds), 3)
-    if preset is None and limit is None and edit.speed == 1.0 and not edit.sharpen and start == 0:
+    if (preset is None and limit is None and edit.speed == 1.0 and not edit.sharpen and start == 0
+            and not edit.mirror):
         raise AppError(422, "edit_no_changes", "Nenhuma edição selecionada.")
     base = dict(preset["params"]) if preset is not None else {
         "metadata_cleanup": False, "mirror": False, "auto_adjust": False}
     merged = {**base, "trim_start": 0.0, "speed": float(edit.speed), "sharpen": bool(edit.sharpen),
               "max_duration": 0.0 if limit is None else round(limit + EDIT_DURATION_MARGIN, 6), "reencode": True,
               "audio_sync_start": True}
+    if edit.mirror is not None:
+        merged["mirror"] = bool(edit.mirror)   # escolha do lote vale mais que a do preset
     try:
         params = PresetParams(**merged).model_dump()
     except ValidationError:
@@ -262,11 +265,14 @@ def edit_plan(ctx: AppContext, edit: BatchEdit) -> dict[str, Any]:
     parts.append(_speed_text(float(edit.speed)))
     if edit.sharpen:
         parts.append("nitidez")
+    if params.get("mirror"):
+        parts.append("espelhado")
     if start > 0:
         parts.append(f"início em {_number(start)} s")
     return {"params": params, "preset_id": edit.preset_id, "preset_name": preset["name"] if preset else None,
             "duration_mode": edit.duration_mode, "custom_seconds": edit.custom_seconds, "start_seconds": start,
-            "speed": float(edit.speed), "sharpen": bool(edit.sharpen), "summary": " · ".join(parts)}
+            "speed": float(edit.speed), "sharpen": bool(edit.sharpen), "mirror": bool(params.get("mirror")),
+            "summary": " · ".join(parts)}
 
 
 # ---- criação --------------------------------------------------------------------------------------------------------

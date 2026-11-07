@@ -193,7 +193,7 @@ def test_edit_validation_errors(setup):
 # ---- edição ----------------------------------------------------------------------------------------------------------
 def test_edit_params_applied_with_and_without_preset(setup):
     harness, _, _, _, out = setup
-    first, second = _videos(harness, 2)
+    first, second, third, fourth = _videos(harness, 4)
     created = _create(harness, out, mode="edit", media_ids=[first],
                       edit={"duration_mode": "custom", "custom_seconds": 12.5, "speed": 1.5, "sharpen": True,
                             "start_seconds": 45.25})
@@ -216,7 +216,17 @@ def test_edit_params_applied_with_and_without_preset(setup):
     params = harness.ctx.jobs.get(_jobs(harness, with_preset["batch"]["id"])[0]["edit_job_id"])["params"]
     assert params == {"metadata_cleanup": True, "trim_start": 3.0, "mirror": True, "speed": 0.5, "auto_adjust": True,
                       "reencode": True, "zoom": 2.0, "max_duration": 60.03, "audio_sync_start": True}
-    assert with_preset["batch"]["summary"]["edit"] == "Meu preset · 60 s · 0,5x · início em 3 s"
+    assert with_preset["batch"]["summary"]["edit"] == "Meu preset · 60 s · 0,5x · espelhado · início em 3 s"
+    # o lote decide o espelho: desligado mesmo com o preset espelhando; ligado sem preset
+    no_mirror = _create(harness, out, mode="edit", media_ids=[third],
+                        edit={"preset_id": preset.json()["id"], "duration_mode": "original", "speed": 1.05,
+                              "sharpen": False, "mirror": False})
+    params = harness.ctx.jobs.get(_jobs(harness, no_mirror["batch"]["id"])[0]["edit_job_id"])["params"]
+    assert params["mirror"] is False and "espelhado" not in no_mirror["batch"]["summary"]["edit"]
+    only_mirror = _create(harness, out, mode="edit", media_ids=[fourth],
+                          edit={"duration_mode": "original", "speed": 1.0, "sharpen": False, "mirror": True})
+    params = harness.ctx.jobs.get(_jobs(harness, only_mirror["batch"]["id"])[0]["edit_job_id"])["params"]
+    assert params["mirror"] is True and only_mirror["batch"]["summary"]["edit"] == "duração original · 1,0x · espelhado"
 
 
 def test_edit_caption_waits_for_edit_and_uses_rendition(setup):

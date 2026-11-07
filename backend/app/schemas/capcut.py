@@ -402,7 +402,8 @@ class BatchCaption(StrictModel):
 
 
 class BatchEdit(StrictModel):
-    """Edição do lote: preset opcional (seus params são a base) + duração, início do corte, velocidade e nitidez."""
+    """Edição do lote: preset opcional (seus params são a base) + duração, início do corte, velocidade, nitidez e
+    espelho (`mirror`: None = o do preset; sem preset, desligado)."""
 
     preset_id: PositiveId | None = None
     duration_mode: Literal["original", "15", "30", "60", "custom"]
@@ -410,6 +411,7 @@ class BatchEdit(StrictModel):
     start_seconds: Annotated[float, Field(strict=True, ge=0, le=86_400, allow_inf_nan=False)] = 0.0
     speed: Annotated[float, Field(strict=True, ge=0.5, le=2, allow_inf_nan=False)]
     sharpen: Annotated[bool, Field(strict=True)]
+    mirror: Annotated[bool, Field(strict=True)] | None = None
 
     @model_validator(mode="after")
     def _custom_requires_seconds(self) -> BatchEdit:

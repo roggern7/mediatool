@@ -1345,6 +1345,8 @@ export interface CapCutBatchEditSettings {
   /** 0,5..2,0. */
   speed: number;
   sharpen: boolean;
+  /** Espelhar (inverter na horizontal). Ausente = o do preset (sem preset, desligado). */
+  mirror?: boolean;
 }
 
 /** Corpo de POST /api/capcut/batches: `media_ids` OU `filter`. */
