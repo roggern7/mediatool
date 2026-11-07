@@ -175,7 +175,8 @@ def _remux(exported: Path, original: Path, out: Path) -> None:
 
 def finalize_output(exported: Path, original: Path, dest_dir: Path, file_name: str, keep_original_audio: bool = True,
                     *, expected_short_side: int | None = None, expected_fps: float | None = None,
-                    capcut_videos_dir: Path | None = None, created_by_job: bool = False) -> FinalReport:
+                    capcut_videos_dir: Path | None = None, created_by_job: bool = False,
+                    expected_duration: float | None = None) -> FinalReport:
     exported, original, dest_dir = Path(exported), Path(original), Path(dest_dir)
     warnings: list[str] = []
     if not exported.is_file() or exported.stat().st_size == 0:
@@ -185,9 +186,10 @@ def finalize_output(exported: Path, original: Path, dest_dir: Path, file_name: s
     except CapCutError as exc:
         raise CapCutError("output_invalid", "O vídeo exportado pelo CapCut é inválido.", transient=True) from exc
     src = probe(original)
-    if abs(exp.duration - src.duration) > DURATION_TOLERANCE_S:
+    target = src.duration if expected_duration is None else expected_duration   # prévia: duração do trecho
+    if abs(exp.duration - target) > DURATION_TOLERANCE_S:
         raise CapCutError("output_invalid", f"Duração exportada ({exp.duration:.2f} s) difere da original "
-                                            f"({src.duration:.2f} s).", transient=True)
+                                            f"({target:.2f} s).", transient=True)
     if expected_short_side and min(exp.width, exp.height) != expected_short_side:
         warnings.append(f"Resolução exportada {exp.width}x{exp.height} diferente da pedida.")
     if expected_fps and exp.fps and abs(exp.fps - expected_fps) > 0.6:

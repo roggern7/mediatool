@@ -9,12 +9,23 @@ Erros do núcleo são reconhecidos pelo `code`/`transient` (`CapCutError`), sem 
 `waiting` por 30 s sem gastar tentativa; transitório => nova tentativa com espera (30 s, 2 min, 5 min) até
 `max_attempts`; o resto => `failed`. Cancelamento e encerramento chegam ao núcleo por um `threading.Event`; um job
 interrompido pelo encerramento volta para a fila (e `recover_capcut_jobs` cobre a queda do processo).
+
+Modo de exportação (`export_mode` das configurações, lido quando o job/prévia começa): `isolated` (padrão) ou
+`interactive`; o modo usado fica em `options.export_mode` do job (e em `export_mode` da prévia). Sem fallback: se o
+isolado não puder ser usado, o núcleo levanta `isolated_unavailable` (não transitório) e o job falha.
+
+Prévias do editor visual: ficam só em memória (fora do banco e da lista de jobs), passam na frente dos jobs comuns
+(mesmo com a fila pausada), rodam no mesmo executor (um CapCut por vez) e não mexem em tentativas nem em nada dos jobs.
+Uma prévia nova cancela as prévias ainda na fila (pendentes/em espera). CapCut ocupado/PC em uso => `waiting` com nova
+checagem; qualquer outro erro => `failed` (sem nova tentativa). Saída em `<data_dir>/capcut/previews/<id>.mp4`; ficam
+as 10 mais recentes.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -57,6 +68,10 @@ WAIT_CODES = {
 MSG_UNEXPECTED = "Erro inesperado ao legendar este vídeo. Os detalhes ficaram no log do Media Tool."
 MSG_SOURCE_MISSING = "O arquivo original deste vídeo não está mais na Biblioteca."
 MSG_RESUMED = "Retomado após interrupção"
+PREVIEW_SAMPLE_TEXT = "Exemplo de legenda no seu estilo"
+PREVIEW_KEEP_FILES = 10
+PREVIEW_KEEP_ENTRIES = 30
+PREVIEW_OPEN = ("pending", "waiting")
 
 
 def stage_percent(stage: str | None, fraction: float | None) -> int:
@@ -89,6 +104,8 @@ class CapCutRunner:
         self._lock = threading.Lock()
         self._current_id: int | None = None
         self._cancel = threading.Event()
+        self._previews: dict[str, dict[str, Any]] = {}
+        self._current_preview: str | None = None
 
     # ---- ciclo de vida -----------------------------------------------------------------------------------------
     def start(self) -> None:
@@ -134,7 +151,10 @@ class CapCutRunner:
 
     # ---- execução ----------------------------------------------------------------------------------------------
     def run_next(self) -> bool:
-        """Executa o próximo job vencido até o fim. False = fila vazia, pausada ou nada vencido."""
+        """Executa a próxima prévia vencida ou, sem prévia, o próximo job vencido até o fim. False = nada a fazer
+        (fila vazia, pausada ou nada vencido)."""
+        if self.run_next_preview():
+            return True
         if capcut_service.queue_paused(self.ctx):
             return False
         with self._lock:
@@ -176,8 +196,10 @@ class CapCutRunner:
             self._fail(job_id, "deps_missing", capcut_service.MSG_UNAVAILABLE)
             return
         spec_cls = getattr(core, "CapCutJobSpec", None) or SimpleNamespace
+        mode = capcut_service.export_mode(self.ctx)
         try:
-            spec = spec_cls(**self._spec_fields(job, video))
+            self.repo.update_job(job_id, options={**(job["options"] or {}), "export_mode": mode})
+            spec = spec_cls(**self._spec_fields(job, video), export_mode=mode)
             result = processor(spec, cancel=self._cancel, on_stage=self._stage_callback(job_id),
                                on_transcript=self._transcript_callback(job_id))
         except Exception as exc:  # noqa: BLE001 - classificado abaixo; a fila segue
@@ -298,6 +320,174 @@ class CapCutRunner:
                              stage_progress=None, detail=None, next_attempt_at=None, wait_reason=None,
                              finished_at=self._now())
         logger.warning("Legendas CapCut: job %s falhou (%s: %s)", job_id, code, message)
+
+    # ---- prévias ----------------------------------------------------------------------------------------------
+    def submit_preview(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Põe uma prévia na frente da fila; as prévias ainda não iniciadas são canceladas (só a última importa)."""
+        preview_id = uuid.uuid4().hex[:12]
+        entry = {"id": preview_id, "status": "pending", "stage": None, "progress": 0, "detail": None,
+                 "error_code": None, "error_message": None, "output_path": None, "warnings": [],
+                 "media_id": request.get("media_id"), "start_s": float(request.get("start_s") or 0.0),
+                 "seconds": float(request.get("seconds") or 6.0), "not_before": None, "cancel_requested": False,
+                 "export_mode": None, "request": dict(request)}
+        entry["warnings"] = [str(w) for w in (request.get("warnings") or [])]  # avisos do design
+        with self._lock:
+            for other in self._previews.values():
+                if other["status"] in PREVIEW_OPEN:
+                    other.update(status="cancelled", detail="Substituída por uma prévia mais nova.", not_before=None)
+            self._previews[preview_id] = entry
+            for old in [k for k, v in self._previews.items() if v["status"] not in ("pending", "waiting", "running")]:
+                if len(self._previews) <= PREVIEW_KEEP_ENTRIES:
+                    break
+                del self._previews[old]
+            out = self._preview_copy(entry)
+        self.wake()
+        return out
+
+    @staticmethod
+    def _preview_copy(entry: dict[str, Any]) -> dict[str, Any]:
+        return {k: (list(v) if isinstance(v, list) else v) for k, v in entry.items() if k != "request"}
+
+    def get_preview(self, preview_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            entry = self._previews.get(preview_id)
+            return self._preview_copy(entry) if entry is not None else None
+
+    def cancel_preview(self, preview_id: str) -> dict[str, Any] | None:
+        """Na fila: cancelada na hora; em execução: sinaliza o núcleo. None = prévia desconhecida."""
+        with self._lock:
+            entry = self._previews.get(preview_id)
+            if entry is None:
+                return None
+            if entry["status"] in PREVIEW_OPEN:
+                entry.update(status="cancelled", not_before=None, detail=None)
+            elif entry["status"] == "running":
+                entry["cancel_requested"] = True
+                if self._current_preview == preview_id:
+                    self._cancel.set()
+            return self._preview_copy(entry)
+
+    def run_next_preview(self) -> bool:
+        """Executa a prévia vencida mais antiga. False = nenhuma."""
+        now = self._clock()
+        with self._lock:
+            entry = next((e for e in self._previews.values() if e["status"] in PREVIEW_OPEN
+                          and (e["not_before"] is None or e["not_before"] <= now)), None)
+            if entry is None:
+                return False
+            entry.update(status="running", stage=None, progress=0, detail=None, not_before=None,
+                         export_mode=capcut_service.export_mode(self.ctx))
+            self._current_preview = entry["id"]
+            self._cancel = threading.Event()
+            if self._stop.is_set():
+                self._cancel.set()
+        try:
+            self._run_preview(entry)
+        finally:
+            with self._lock:
+                self._current_preview = None
+        return True
+
+    def _set_preview(self, entry: dict[str, Any], **fields: Any) -> None:
+        with self._lock:
+            entry.update(fields)
+
+    def _preview_spec(self, entry: dict[str, Any], video: Path) -> dict[str, Any]:
+        req = entry["request"]
+        data_dir = self.ctx.settings.data_dir
+        return {
+            "job_id": 0,
+            "video_path": video,
+            "draft_name": f"MT_preview_{entry['id']}",
+            "output_dir": capcut_service.previews_dir(self.ctx),
+            "output_name": entry["id"],
+            "work_dir": data_dir / "capcut" / "work" / f"preview_{entry['id']}",
+            "models_dir": data_dir / "models" / "whisper",
+            "style": req.get("style"),
+            "highlight": bool(req.get("highlight", True)),
+            "highlight_color": req.get("highlight_color"),
+            "max_words": int(req.get("max_words", 3)),
+            "max_chars": int(req.get("max_chars", 24)),
+            "whisper_model": req.get("whisper_model", "large-v3-turbo"),
+            "language": "pt",
+            "resolution": "720P",
+            "bitrate": "recommended",
+            # Mesmo fps das configurações (padrão 60, pedido do dono), não um valor fixo.
+            "fps": str(req.get("fps") or capcut_service.get_settings(self.ctx).get("fps") or "60"),
+            "keep_original_audio": False,   # sem remux do áudio original na prévia
+            "keep_draft": False,
+            "transcript": None,
+            "clip_start": entry["start_s"],
+            "clip_duration": entry["seconds"],
+            "sample_text": PREVIEW_SAMPLE_TEXT,
+        }
+
+    def _run_preview(self, entry: dict[str, Any]) -> None:
+        video = Path(entry["request"]["video_path"])
+        if not video.is_file():
+            self._set_preview(entry, status="failed", error_code="source_missing", error_message=MSG_SOURCE_MISSING)
+            return
+        try:
+            core = capcut_service.load_core()
+        except Exception:  # noqa: BLE001 - sem núcleo só um processador injetado (testes) consegue rodar
+            core = None
+        processor = self.ctx.capcut_processor or (core.process_video if core is not None else None)
+        if processor is None:
+            self._set_preview(entry, status="failed", error_code="deps_missing",
+                              error_message=capcut_service.MSG_UNAVAILABLE)
+            return
+        spec_cls = getattr(core, "CapCutJobSpec", None) or SimpleNamespace
+
+        def on_stage(stage: str, fraction: float | None, detail: str | None) -> None:
+            with self._lock:
+                entry.update(stage=stage, detail=detail,
+                             progress=max(int(entry["progress"] or 0), stage_percent(stage, fraction)))
+
+        try:
+            spec = spec_cls(**self._preview_spec(entry, video), export_mode=entry["export_mode"])
+            result = processor(spec, cancel=self._cancel, on_stage=on_stage, on_transcript=None)
+        except Exception as exc:  # noqa: BLE001 - classificado abaixo; a fila segue
+            self._preview_failure(entry, exc)
+            return
+        self._set_preview(entry, status="completed", stage=None, progress=100, detail=None, error_code=None,
+                          error_message=None, output_path=str(result.output_path),
+                          warnings=[str(w) for w in (entry["request"].get("warnings") or [])]
+                          + [str(w) for w in (result.warnings or [])])
+        self._prune_previews()
+        logger.info("Legendas CapCut: prévia %s concluída", entry["id"])
+
+    def _preview_failure(self, entry: dict[str, Any], exc: Exception) -> None:
+        code = getattr(exc, "code", None)
+        if self._stop.is_set() or entry.get("cancel_requested") or code == CANCELLED_CODE:
+            self._set_preview(entry, status="cancelled", stage=None, detail=None)
+            return
+        if code in WAIT_CODES:
+            delay, text = WAIT_CODES[code]
+            self._set_preview(entry, status="waiting", stage=None, progress=0, detail=text, error_code=None,
+                              not_before=self._clock() + timedelta(seconds=delay or BUSY_RETRY_SECONDS))
+            return
+        if not isinstance(code, str) or not code:
+            logger.error("Legendas CapCut: falha inesperada na prévia %s", entry["id"], exc_info=exc)
+            self._set_preview(entry, status="failed", stage=None, error_code="unexpected_error",
+                              error_message=MSG_UNEXPECTED)
+            return
+        self._set_preview(entry, status="failed", stage=None, error_code=code,
+                          error_message=str(getattr(exc, "message", None) or exc or "Erro no CapCut."))
+        logger.warning("Legendas CapCut: prévia %s falhou (%s)", entry["id"], code)
+
+    def _prune_previews(self) -> None:
+        """Ficam só os 10 vídeos de prévia mais recentes."""
+        folder = capcut_service.previews_dir(self.ctx)
+        try:
+            files = sorted((f for f in folder.glob("*.mp4") if f.is_file()), key=lambda f: f.stat().st_mtime,
+                           reverse=True)
+        except OSError:
+            return
+        for old in files[PREVIEW_KEEP_FILES:]:
+            try:
+                old.unlink()
+            except OSError:
+                logger.warning("Legendas CapCut: prévia antiga não pôde ser apagada: %s", old.name)
 
     def _finish_cancelled(self, job_id: int) -> None:
         self.repo.update_job(job_id, status="cancelled", stage=None, stage_progress=None, detail=None,

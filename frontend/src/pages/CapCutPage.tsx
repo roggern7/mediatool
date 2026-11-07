@@ -2,7 +2,9 @@ import { useState } from "react";
 import { api, capcutJobFileUrl, messageOf } from "../api/client";
 import type {
   CapCutBitrate,
+  CapCutDesign,
   CapCutDraft,
+  CapCutExportMode,
   CapCutFps,
   CapCutJob,
   CapCutJobStatus,
@@ -13,18 +15,24 @@ import type {
   CapCutWhisperModel,
 } from "../api/types";
 import { ConfirmDialog, Empty, ErrorLine, Field, Modal, Pill, ProgressBar, SkeletonRows, Spinner, Switch, Thumb } from "../components/ui";
+import { CaptionEditor } from "../components/capcut/CaptionEditor";
 import {
+  CAPCUT_EXPORT_MODES,
   CAPCUT_STATUS_LABEL,
   capcutPollMs,
   capcutSettingsPatch,
   capcutTone,
+  exportModeHelp,
+  exportModeStatusText,
   isCapcutActive,
+  jobExportModeText,
   jobNote,
   jobProgress,
   stageLabel,
   styleSummaryText,
   whisperModelText,
 } from "../lib/capcut";
+import { duplicateName, isEditableStyle, normalizeDesign, startingDesign } from "../lib/captionDesign";
 import { formatCount, formatDateTime } from "../lib/format";
 import { nextPollMs } from "../lib/polling";
 import { useQuery } from "../lib/useQuery";
@@ -89,7 +97,7 @@ export function CapCutPage() {
 
       <StatusSection status={status.data} error={status.error} onReload={status.reload} />
 
-      <StylesSection />
+      <StylesSection settings={settings.data} />
 
       <section className="section">
         <div className="section-head">
@@ -151,8 +159,9 @@ function StatusSection({
         <h2>Status</h2>
       </div>
       <p className="muted small" style={{ marginTop: 0 }}>
-        Durante a exportação o Media Tool traz o CapCut para a frente e usa o mouse por alguns segundos. Se outra janela
-        estiver na frente, ele tenta de novo.
+        {status?.export_mode === "interactive"
+          ? "Modo Interativo: durante a exportação o Media Tool traz o CapCut para a frente e usa o mouse por alguns segundos (precisa do PC livre). Se outra janela estiver na frente, ele tenta de novo."
+          : "Modo Isolado: o CapCut roda numa área de trabalho separada, que você não vê. Não usa mouse, teclado nem a tela; você pode usar o PC normalmente."}
       </p>
       {status === undefined ? (
         error ? (
@@ -186,6 +195,11 @@ function StatusSection({
               label="Skill (capcut-agent-skill)"
               ok={Boolean(status.skill.installed)}
               text={status.skill.installed ? `Instalada${status.skill.commit ? ` (${status.skill.commit.slice(0, 8)})` : ""}` : "Não instalada"}
+            />
+            <StatusItem
+              label="Modo de exportação"
+              ok={exportModeStatusText(status.export_mode, status.isolated).ok}
+              text={exportModeStatusText(status.export_mode, status.isolated).text}
             />
             <StatusItem
               label="Modelo de transcrição"
@@ -228,14 +242,33 @@ function StatusItem({ label, ok, text }: { label: string; ok: boolean; text: str
 
 /* ---------------- Modelos de legenda ---------------- */
 
-function StylesSection() {
+interface EditorTarget {
+  /** Reinicia o editor a cada abertura. */
+  seq: number;
+  /** Modelo editado; null = novo (inclusive "Duplicar"). */
+  style: CapCutStyle | null;
+  design: CapCutDesign;
+  name: string;
+}
+
+function StylesSection({ settings }: { settings: CapCutSettings | undefined }) {
   const toast = useToast();
   const styles = useQuery("capcut-styles", () => api.capcutStyles());
   const [list, setList] = useState<CapCutStyle[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [deleting, setDeleting] = useState<CapCutStyle | null>(null);
   const [busy, setBusy] = useState(false);
+  const [editor, setEditor] = useState<EditorTarget | null>(null);
   const items = list ?? styles.data ?? null;
+
+  function openEditor(style: CapCutStyle | null, design: CapCutDesign, name: string) {
+    setEditor((prev) => ({ seq: (prev?.seq ?? 0) + 1, style, design, name }));
+  }
+
+  async function reloadList() {
+    setList(await api.capcutStyles().catch(() => null));
+    styles.reload();
+  }
 
   async function makeDefault(style: CapCutStyle) {
     setBusy(true);
@@ -271,8 +304,12 @@ function StylesSection() {
           type="button"
           className="btn btn-sm"
           style={{ marginLeft: "auto" }}
-          onClick={() => setAdding(true)}
+          disabled={editor !== null}
+          onClick={() => openEditor(null, startingDesign(items), "")}
         >
+          Novo modelo
+        </button>
+        <button type="button" className="btn btn-sm" onClick={() => setAdding(true)}>
           Salvar modelo do CapCut
         </button>
       </div>
@@ -302,6 +339,27 @@ function StylesSection() {
                   <td className="muted small">{styleSummaryText(style.summary)}</td>
                   <td className="muted small">{style.builtin ? "Embutido" : (style.source_draft ?? "—")}</td>
                   <td className="nowrap" style={{ textAlign: "right" }}>
+                    {isEditableStyle(style) && style.design ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-ghost"
+                        disabled={busy || editor !== null}
+                        onClick={() => openEditor(style, normalizeDesign(style.design), style.name)}
+                      >
+                        Editar
+                      </button>
+                    ) : null}
+                    {style.design ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-ghost"
+                        disabled={busy || editor !== null}
+                        title="Abre o editor com uma cópia deste modelo."
+                        onClick={() => openEditor(null, normalizeDesign(style.design), duplicateName(style.name))}
+                      >
+                        Duplicar
+                      </button>
+                    ) : null}
                     {!style.is_default ? (
                       <button
                         type="button"
@@ -316,7 +374,7 @@ function StylesSection() {
                       <button
                         type="button"
                         className="btn btn-sm btn-ghost"
-                        disabled={busy}
+                        disabled={busy || editor?.style?.id === style.id}
                         onClick={() => setDeleting(style)}
                       >
                         Excluir
@@ -329,13 +387,29 @@ function StylesSection() {
           </table>
         </div>
       )}
+      {items !== null && !items.some((s) => s.design) ? (
+        <p className="muted small" style={{ marginBottom: 0 }}>
+          Modelos salvos de um projeto do CapCut não podem ser editados aqui; use "Novo modelo" para montar um no editor.
+        </p>
+      ) : null}
+      {editor ? (
+        <CaptionEditor
+          key={editor.seq}
+          style={editor.style}
+          initialDesign={editor.design}
+          initialName={editor.name}
+          maxWords={settings?.max_words}
+          maxChars={settings?.max_chars}
+          onClose={() => setEditor(null)}
+          onSaved={() => void reloadList()}
+        />
+      ) : null}
       {adding ? (
         <SaveStyleDialog
           onClose={() => setAdding(false)}
           onSaved={async () => {
             setAdding(false);
-            setList(await api.capcutStyles().catch(() => null));
-            styles.reload();
+            await reloadList();
           }}
         />
       ) : null}
@@ -546,6 +620,20 @@ function SettingsForm({
             ))}
           </select>
         </Field>
+        <Field label="Modo de exportação" htmlFor="cc-export-mode" hint={exportModeHelp(draft.export_mode)}>
+          <select
+            id="cc-export-mode"
+            className="select"
+            value={draft.export_mode}
+            onChange={(e) => set("export_mode", e.target.value as CapCutExportMode)}
+          >
+            {CAPCUT_EXPORT_MODES.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="Quadros por segundo" htmlFor="cc-fps">
           <select
             id="cc-fps"
@@ -737,6 +825,7 @@ function JobsSection({ onChanged }: { onChanged: () => void }) {
                 <tr>
                   <th>Vídeo</th>
                   <th>Status</th>
+                  <th>Modo</th>
                   <th>Etapa</th>
                   <th>Progresso</th>
                   <th>Tentativas</th>
@@ -810,6 +899,9 @@ function JobRow({
       </td>
       <td>
         <Pill tone={capcutTone(job.status)}>{CAPCUT_STATUS_LABEL[job.status]}</Pill>
+      </td>
+      <td className="muted small nowrap" title={job.export_mode ? exportModeHelp(job.export_mode) : "Ainda não exportado"}>
+        {jobExportModeText(job.export_mode)}
       </td>
       <td className="muted small">{job.status === "running" ? stageLabel(job.stage) : "—"}</td>
       <td style={{ minWidth: 120 }}>

@@ -117,7 +117,7 @@ def _full_crop() -> dict[str, float]:
 
 def _compose(content: dict[str, Any], *, video: Path, info: MediaProbe, chunks: list[Chunk], style: CaptionStyle,
              fps: float | None = None,
-             highlight: HighlightOptions | None) -> dict[str, Any]:
+             highlight: HighlightOptions | None, clip: tuple[float, float] | None = None) -> dict[str, Any]:
     d = copy.deepcopy(content)
     materials: dict[str, Any] = d.setdefault("materials", {})
     tracks = d.get("tracks") or []
@@ -145,9 +145,12 @@ def _compose(content: dict[str, Any], *, video: Path, info: MediaProbe, chunks: 
     if video_mat is None:
         raise CapCutError("draft_invalid", "O rascunho-base não tem o material do vídeo.")
     materials["videos"] = [video_mat]
-    dur = max(1, int(round(info.duration * 1_000_000)))
+    full = max(1, int(round(info.duration * 1_000_000)))
+    # Recorte (prévia): a linha do tempo mostra só o trecho [início, início + duração) do vídeo.
+    src_start = min(max(0, int(round(clip[0] * 1_000_000))), full - 1) if clip else 0
+    dur = max(1, min(int(round(clip[1] * 1_000_000)), full - src_start)) if clip else full
     vpath = Path(video).resolve()
-    video_mat.update(id=new_id(), path=vpath.as_posix(), duration=dur, width=info.width, height=info.height,
+    video_mat.update(id=new_id(), path=vpath.as_posix(), duration=full, width=info.width, height=info.height,
                      has_audio=info.has_audio, material_name=vpath.name, local_material_id="", media_path="",
                      crop=_full_crop(), type="video")
     new_refs = []
@@ -160,7 +163,7 @@ def _compose(content: dict[str, Any], *, video: Path, info: MediaProbe, chunks: 
             obj.update(speed=1.0, mode=0, curve_speed=None)
         new_refs.append(obj["id"])
     seg.update(id=new_id(), material_id=video_mat["id"], extra_material_refs=new_refs,
-               source_timerange={"start": 0, "duration": dur}, target_timerange={"start": 0, "duration": dur},
+               source_timerange={"start": src_start, "duration": dur}, target_timerange={"start": 0, "duration": dur},
                speed=1.0, reverse=False, is_loop=False, keyframe_refs=[], common_keyframes=[])
     clip = seg.setdefault("clip", {})
     clip.update(scale={"x": 1.0, "y": 1.0}, rotation=0.0, transform={"x": 0.0, "y": 0.0})
@@ -200,8 +203,10 @@ def _compose(content: dict[str, Any], *, video: Path, info: MediaProbe, chunks: 
 
 def build_draft(install: CapCutInstall, *, name: str, video: Path, chunks: list[Chunk], style: CaptionStyle,
                 highlight: HighlightOptions | None, base_draft: Path | None, info: MediaProbe | None = None,
-                running: RunningCheck | None = None, fps: float | None = None) -> Path:
-    """Cria o rascunho `name` (prefixo MT_) com o vídeo e as legendas; devolve a pasta. Não registra."""
+                running: RunningCheck | None = None, fps: float | None = None,
+                clip: tuple[float, float] | None = None) -> Path:
+    """Cria o rascunho `name` (prefixo MT_) com o vídeo e as legendas; devolve a pasta. Não registra.
+    `clip` = (início, duração) em segundos: só esse trecho do vídeo entra na linha do tempo (prévia)."""
     validate_name(name)
     _ensure_closed(running)
     base = Path(base_draft) if base_draft else ASSETS_BASE_DRAFT
@@ -222,7 +227,8 @@ def build_draft(install: CapCutInstall, *, name: str, video: Path, chunks: list[
         shutil.copytree(base, staging, ignore=shutil.ignore_patterns(*_TRANSIENT))
         content = read_json(staging / "draft_content.json")
         old_tl = content.get("id")
-        draft = _compose(content, video=video, info=info, chunks=chunks, style=style, highlight=highlight, fps=fps)
+        draft = _compose(content, video=video, info=info, chunks=chunks, style=style, highlight=highlight, fps=fps,
+                         clip=clip)
         new_tl = draft["id"]
 
         tl_root = staging / "Timelines"

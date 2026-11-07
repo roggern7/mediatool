@@ -134,6 +134,98 @@ Material de texto (`materials.texts[]`, ~127 chaves no 9.7): `content` é JSON e
   último, `loop` em todos; tempos das animações ajustados à duração de cada pedaço. É texto rico nativo do CapCut,
   não FFmpeg.
 
+## Editor visual (design -> estilo)
+
+O editor da tela grava um `design` (JSON versionado, `version: 1`; contrato em `docs/CONTRACTS.md` 8.9) e o backend o
+transforma num `CaptionStyle` comum (`integrations/capcut/design.py`, `style_from_design`), que segue pelo mesmo motor
+dos modelos extraídos (`apply_style`/`build_draft`). Ponto de partida: o design equivalente ao embutido
+(`default_design`: `en.ttf` embutida, tamanho 7, escala 1,919, y -0,70, branco, negrito, contorno preto 30, destaque
+`#FFD400`), devolvido em `GET /api/capcut/styles` no item id 0. Modelos do editor ficam em `capcut_styles` com
+`source_draft = NULL`, `design` (migration 0030) e `style` = o estilo gerado (é ele que vai para o job).
+
+Formatos gerados (verificados no CapCut 9.7.1 em 2026-11-07 com rascunho por arquivo + exportação, salvo indicação):
+
+- Material de texto = o nativo do capcut-agent-skill, alterado. `check_flag` = 7 + 8 (contorno) + 16 (fundo) + 32
+  (sombra).
+- Fonte do catálogo do CapCut só pelo id: `content.styles[i].font = {"id": "<resource_id>", "path": ""}` e no material
+  `font_id`/`font_resource_id` = id, `font_title`/`font_name` = nome, `font_path` = "". O CapCut baixa a fonte ao
+  abrir o rascunho. Fonte do Windows ou embutida por caminho: `font = {"id": "", "path": "C:/..."}` e `font_path`
+  igual (embutida: mesmo formato, não verificado à parte; o embutido antigo só usava `font_path`).
+- Tamanho `styles.size`; cor `fill.content.solid.color` (`alpha` = opacidade) + `text_color`/`text_alpha`; negrito
+  `styles.bold`; itálico/sublinhado `styles.italic`/`styles.underline` (+ `underline` no material; NÃO verificado no
+  CapCut real).
+- Contorno: `styles.strokes = [{alpha: 1, content: {render_type: solid, solid: {alpha: 1, color}}, width}]`, `width` =
+  valor/100 x 0,2 (30 -> 0,06, o do skill); desligado: `strokes = []` sem o bit 8.
+- Sombra: `styles.shadows = [{diffuse: blur/100/6, alpha, distance, angle, content: {solid: {color}}}]` + material
+  `has_shadow`, `shadow_color`, `shadow_alpha`, `shadow_distance`, `shadow_angle`, `shadow_smoothing` = blur/100.
+- Caixa de fundo: `background_style = 1`, `background_color`, `background_alpha`, `background_round_radius` (0..1),
+  `background_height`/`background_width` 0,14, deslocamentos 0.
+- Alinhamento `alignment` 0/1/2 (esquerda/centro/direita), `letter_spacing` = valor x 0,05, `line_spacing` = 0,02 +
+  valor x 0,05, `line_max_width` (unidades do pyCapCut; não verificados um a um no CapCut real).
+- Segmento: o padrão do motor com `clip.scale` x = y = `scale` e `clip.transform` = `position`.
+- Animações (só pelo id; o CapCut baixa ao abrir): um material em `materials.material_animations`
+  `{id, type: "sticker_animation", multi_language_current: "none", animations: [...]}` referenciado em
+  `extra_material_refs`, cada animação `{id, type: in|out|loop, start, duration (µs), path: "", platform: "all",
+  resource_id, third_resource_id, source_platform: 1, name, category_id: ruchang|chuchang|xunhuan, category_name:
+  Entrada|Saída|Loop, panel: "", material_type: "sticker", anim_adjust_params: null, request_id: ""}`. Com destaque por
+  palavra, `apply_style` põe a entrada só no 1º pedaço do bloco e a saída só no último (início = duração do pedaço -
+  duração da animação). Verificado no real: entrada (Fade-in). Saída e loop: mesmo formato, não exportados no real.
+- `uppercase`: o texto (e `words`) de cada bloco vai em maiúsculas (`CaptionStyle.uppercase`).
+- Destaque: o mecanismo atual (`HighlightOptions`) com a cor do design (`CaptionStyle.highlight_color`); destaque
+  desligado no design (`CaptionStyle.highlight_enabled = False`) desliga o destaque mesmo com a configuração ligada.
+
+Validação: o schema (pydantic) confere formato e faixas (cores `#RRGGBB`, `size` 2..30, `scale` 0,3..4, opacidades e
+raio 0..1, contorno/desfoque/distância 0..100, ângulo -180..180, posição -1..1, `max_line_width` 0,1..1, espaçamentos
+-20..100, animação 100..10000 ms); o núcleo (`validate_design`) confere a fonte (`windows`: arquivo .ttf/.otf existente
+dentro das pastas de fontes do Windows; `bundled`: dentro de `Resources\Font` do CapCut; `capcut`: id presente no
+catálogo local) e as animações (id presente no catálogo com o tipo pedido). Falha -> 422 `invalid_design`.
+
+### Catálogo local (`integrations/capcut/catalog.py`, sem rede)
+
+- Fontes embutidas: `Apps\<versão>\Resources\Font\SystemFont\*.ttf|otf` (`key` `bundled:<arquivo>`).
+- Fontes do Windows: registro HKLM e HKCU `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts` (nome sem
+  "(TrueType)"/"(OpenType)"), arquivo relativo a `%WINDIR%\Fonts` ou absoluto; só .ttf/.otf que existam dentro de
+  `%WINDIR%\Fonts` ou `%LOCALAPPDATA%\Microsoft\Windows\Fonts` (`key` `windows:<arquivo>`). Coleções `.ttc` ficam
+  fora (o navegador não as usa no @font-face).
+- Catálogo do CapCut: cada `User Data\Cache\ressdk_db\<hash>\rp.db` é COPIADO (com `-wal`/`-shm`) para uma pasta
+  temporária e lido de lá (o original nunca é aberto); só as respostas `get_panel_info` da tabela `http_cache` (texto
+  ou zlib). Fontes: itens `common_attr.effect_type == 10` (`key` `capcut:<id>`). Animações: itens `effect_type == 18`
+  dentro de `data.category_resources[<categoria>].effect_item_list`, classificados pela chave da categoria do painel
+  (`ruchang` = entrada, `chuchang` = saída, `xunhuan` = loop) e só quando todas as categorias do item apontam um único
+  tipo e o `text_animation.animation_type` dele (se houver) concorda. Ficam FORA: `caption_animation` ("Legenda") e
+  `text_animation` (tipo `caption`) e itens com sinais conflitantes. Nos bancos desta máquina (2026-11-07): 6.705
+  fontes (3.342 Pro), 2.226 animações únicas, 1.727 classificadas (in 618, out 584, loop 525) e 499 fora.
+- Pro: `business_info.json_str` com `is_vip` ou `paid_type` diferente de `free` (senão `extra.is_vip`). A API esconde
+  Pro por padrão (`include_pro=1` mostra). Duração padrão: `text_animation.duration` (ms), senão
+  `sdk_extra.setting.animation_duration` (s), senão 500 ms. Baixado: existe `Cache\effect\<id>\<md5>\` (pasta que
+  não termina em `_tmp`, com arquivos); fonte baixada = primeiro .ttf/.otf dentro dela. `cover_url` não é usado.
+- Cache: em memória e em `<data_dir>/capcut/catalog_cache.json`, por banco, invalidado pelo mtime/tamanho do `rp.db`
+  e do `-wal`; só os bancos que mudaram são copiados de novo (a 1ª leitura dos bancos desta máquina, ~550 MB, levou
+  ~4,5 s). Banco ilegível/em gravação: fica a leitura anterior (ou vazio) até o arquivo mudar.
+- `GET /fonts/file?key=` só serve arquivos de `%WINDIR%\Fonts`, `%LOCALAPPDATA%\Microsoft\Windows\Fonts`,
+  `Resources\Font` do CapCut e `Cache\effect\<id>` já baixado: a chave tem só um nome de arquivo (sem separadores,
+  `..`, `:` ou NUL), o caminho é resolvido (links seguidos) e precisa ficar dentro da pasta permitida; senão 404.
+
+### Prévia real
+
+`POST /api/capcut/previews` põe uma prévia na MESMA fila/executor dos jobs (um CapCut por vez), em memória (fora do
+banco e da lista de jobs; some ao reiniciar o app), com prioridade sobre os jobs comuns (roda mesmo com a fila pausada)
+e sem mexer em tentativas. Uma prévia nova cancela as prévias ainda na fila. Mídia padrão: o vídeo original mais recente
+da Biblioteca. O executor monta um `CapCutJobSpec` com `clip_start`/`clip_duration` (trecho `start_s .. start_s +
+seconds`, 3..12 s; início além do fim = os últimos segundos), `sample_text` "Exemplo de legenda no seu estilo",
+`resolution` 720P, `fps` 30, `keep_original_audio=False` (sem remux), rascunho `MT_preview_<id>` e saída
+`<data_dir>/capcut/previews/<id>.mp4` (ficam os 10 vídeos mais recentes). O pipeline é o mesmo dos jobs (espera de PC
+livre, trava de clique, fechamento seguro, limpeza do rascunho); com recorte:
+
+- `build_draft(..., clip=(início, duração))`: o segmento de vídeo usa `source_timerange = {start: início, duration:
+  duração}` e `target_timerange = {0, duração}`; a duração do rascunho é a do trecho; o material continua sendo o
+  arquivo inteiro.
+- Transcrição só do trecho: FFmpeg separa o áudio do trecho (`clip.wav` mono 16 kHz na pasta de trabalho, apagado logo
+  depois) e o whisper transcreve só ele (tempos já relativos ao trecho). Sem fala: o texto de exemplo distribuído no
+  trecho com tempos sintéticos, em blocos pelas mesmas regras.
+- Conferência da exportação e `finalize_output(..., expected_duration=duração do trecho)`.
+- CapCut ocupado / PC em uso -> `waiting` (nova checagem em 30 s / 60 s); outro erro -> `failed` sem nova tentativa.
+
 ## Transcrição e blocos
 
 FFmpeg decodifica para PCM float32 16 kHz mono (o decodificador PyAV do faster-whisper falha com o av 19:
@@ -198,9 +290,10 @@ ausente na lista vira aviso e o CapCut usa o que estiver selecionado.
 `bitrate` low/recommended/high -> Abaixar/Recomendado/Superior; `fps='original'` = item mais próximo do fps da origem;
 codec H.264 e formato mp4 sempre.
 
-### Cliques com trava
+### Cliques com trava (modo interativo)
 
-O dono usa o PC ao mesmo tempo. Todo clique real (`_safe_click`): traz a janela alvo para a frente
+Vale só para o modo `interactive` (no modo isolado, padrão, os cliques são mensagens; ver "Modo de exportação
+isolado"). O dono usa o PC ao mesmo tempo. Todo clique real (`_safe_click`): traz a janela alvo para a frente
 (`SetForegroundWindow`; a partir da 3ª tentativa com um toque de Alt antes, como na prova de conceito, porque o
 Windows só libera o primeiro plano depois de uma entrada), confirma que ela é a janela em primeiro plano e que
 `GetAncestor(WindowFromPoint(centro), GA_ROOT)` é a própria janela; senão `ForegroundLost` (transitório) SEM clicar.
@@ -235,6 +328,60 @@ usa `WM_CLOSE` (sem mouse).
 - Pasta de trabalho `<data_dir>/capcut/work/<job>`: removida ao concluir e ao excluir o job; em falha só fica se houver
   o `exports.json`.
 
+## Modo de exportação isolado
+
+Configuração `export_mode` (Legendas CapCut > Configurações): `isolated` (padrão) ou `interactive` (a automação de
+"Cliques com trava", preservada como alternativa). O modo é lido quando o job/prévia COMEÇA (não entra no instantâneo
+do job, para que trocar o modo valha na nova tentativa) e o modo usado fica gravado no job (`options.export_mode`,
+`export_mode` na API) e na prévia (`export_mode`). Código em `integrations/capcut/isolated.py`.
+
+Como funciona:
+- Área de trabalho própria `MediaToolCapCut` (`win32service.CreateDesktop("MediaToolCapCut", 0, GENERIC_ALL, None)`;
+  se já existir, é aberta). O dono não a vê e ela não troca a tela dele.
+- O CapCut é aberto com `win32process.CreateProcess(lançador, ..., STARTUPINFO(lpDesktop="WinSta0\MediaToolCapCut"))`;
+  os processos filhos (o `Apps\<versão>\CapCut.exe`) herdam a área. A árvore de processos é a mesma do modo
+  interativo (PID + horário de criação).
+- Todas as operações do controlador rodam numa thread dedicada (`DesktopThread`) que chama `SetThreadDesktop` ANTES de
+  qualquer janela/COM e depois `pythoncom.CoInitialize()`; o objeto IUIAutomation do `uiautomation` (um por processo)
+  é zerado ao entrar e ao sair dessa thread, para nascer no apartamento COM dela. O runner chama de outra thread por um
+  proxy (`IsolatedControllerProxy`) que encaminha cada chamada; o andamento (`progress`) volta para a thread do runner.
+- O controlador isolado (`IsolatedCapCutController`) é uma subclasse do `CapCutController` e reaproveita tudo: escolha
+  das opções de exportação, conferência do MP4, fechamento seguro com o aviso "Confirmar saída" (nunca confirma, nunca
+  força), árvore de processos. Muda só: janelas listadas por `EnumDesktopWindows` da área; clique =
+  `PostMessage(hwnd, WM_MOUSEMOVE / WM_LBUTTONDOWN(MK_LBUTTON) / WM_LBUTTONUP, lParam = coordenadas da área CLIENTE)`;
+  rolagem = `PostMessage(hwnd, WM_MOUSEWHEEL, (delta & 0xFFFF) << 16, coordenadas de TELA)`; maximizar =
+  `ShowWindow(SW_MAXIMIZE)` (na área isolada não afeta o dono). Nada de `SetCursorPos`, `mouse_event`,
+  `keybd_event`, `SetForegroundWindow` nem espera de PC livre (`ensure_desktop_free` não se aplica; não existe
+  `desktop_busy` neste modo). Sem captura de tela de diagnóstico (ela mostraria a tela do dono).
+- Ao final: `shutdown()` (fechamento seguro), a thread é encerrada e a área é fechada (`CloseDesktop`). Pastas
+  temporárias e intermediários seguem a limpeza de sempre.
+- Sem fallback: se a área não puder ser criada, a thread não puder ser presa a ela, a UI Automation não responder nela
+  ou a interface do CapCut não ficar acessível nela, o job FALHA com `isolated_unavailable` (não transitório; a
+  mensagem sugere trocar o modo para "Interativo" nas configurações). Nunca cai sozinho para o interativo.
+- Sobra de queda do Media Tool: antes de conferir se o CapCut está aberto, se houver `CapCut.exe` rodando, a área
+  `MediaToolCapCut` existir (`OpenDesktop`) e TODAS as janelas desses processos estiverem nela (nenhuma na área normal
+  `Default` do dono), o CapCut é tratado como nosso e fechado com o fechamento seguro, numa thread presa à área (vale
+  nos dois modos). Se ele não fechar (tarefa em andamento), `capcut_busy` (espera). CapCut com janela na área normal
+  (aberto pelo dono) continua sendo `capcut_busy` e nunca é tocado.
+- Status (`GET /api/capcut/status`): `export_mode` e `isolated: {available, reason}` = pré-requisitos presentes
+  (Windows + pywin32 + pythoncom + uiautomation). Não cria a área: a prova real acontece no job.
+
+Evidências (2026-11-07, Windows 11 Home, CapCut 9.7.1, protótipo com as mesmas chamadas, nesta máquina): pipeline
+inteiro nesse modo (abrir o rascunho, Exportar, combos de resolução/taxa/codec/formato/60 fps, `ExportOkBtn`,
+conferência do MP4, fechamento seguro e limpeza). Resultado: MP4 1080x1920, 60/1 fps, duração certa, áudio idêntico
+ao original (hash dos pacotes), legendas com destaque. Um monitor do primeiro plano da sessão do dono registrou 0 de
+436 amostras com o CapCut na frente. Mais duas exportações de diagnóstico rodaram nesse modo sem problema. A tela
+inicial na área isolada expôs 23 controles por UI Automation.
+
+Limitações:
+- O CapCut é de instância única. Se o dono abrir o CapCut enquanto a automação usa o dela na área oculta, o CapCut do
+  dono pode não aparecer (o pedido pode ir para a instância que está na área isolada). O que fazer: esperar o
+  job/prévia terminar (o Media Tool fecha o CapCut dele no fim) ou pausar a fila e cancelar o job em andamento; depois
+  abrir o CapCut de novo. Se o dono precisa usar o CapCut com frequência durante a fila, o modo "Interativo" evita
+  isso (mas usa a tela e precisa do PC livre).
+- Só Windows. O código de produção deste modo foi testado só com fakes; o comportamento real verificado é o do
+  protótipo acima.
+
 ## Finalização
 
 ffprobe no exportado: precisa ter vídeo e duração dentro de ±0,5 s da origem (`output_invalid`, transitório);
@@ -251,7 +398,9 @@ falhar, fica o áudio do CapCut com aviso. Saída em `output_dir` com nome segur
 | `capcut_not_installed` | não | sem lançador |
 | `capcut_busy` | sim (espera sem gastar tentativa) | CapCut aberto por outro |
 | `accessibility_unavailable` | não | sem árvore de UI Automation |
-| `desktop_busy` | sim (espera de 1 min sem gastar tentativa, sem limite) | o dono usou teclado/mouse nos últimos 15 s antes de abrir o CapCut, ou tomou o foco durante a automação (entrada que não é nossa depois da nossa última entrada sintética) |
+| `isolated_unavailable` | não | modo isolado não pôde ser usado (área de trabalho, thread presa a ela, UI Automation ou interface do CapCut inacessível nela); sem fallback, a mensagem sugere trocar o modo para "Interativo" |
+| `invalid_export_mode` | não | `export_mode` desconhecido na especificação do job |
+| `desktop_busy` | sim (espera de 1 min sem gastar tentativa, sem limite) | só no modo interativo: o dono usou teclado/mouse nos últimos 15 s antes de abrir o CapCut, ou tomou o foco durante a automação (entrada que não é nossa depois da nossa última entrada sintética) |
 | `foreground_lost` | sim | outra janela na frente na hora do clique com o PC parado (a classe da janela que bloqueou vai na mensagem; nunca o título). Balões/dicas do PRÓPRIO CapCut que abrimos (fora editor, exportação, tela inicial e listas) são fechados com WM_CLOSE e o clique é refeito |
 | `ui_timeout` | sim | janela/controle não apareceu a tempo |
 | `export_failed` | sim | caminho ilegível, janela fechou antes de concluir |
@@ -276,13 +425,38 @@ PYTHONDONTWRITEBYTECODE=1 ../.venv/Scripts/python.exe -m pytest -p no:cacheprovi
 Sem rede, sem CapCut real, sem whisper real: instalação falsa em `tmp_path` (`MEDIA_TOOL_CAPCUT_ROOT`), rascunho-base
 da fixture, vídeo sintético do FFmpeg (`testsrc` + `sine`), controlador e transcritor falsos.
 
+Editor visual: `tests/test_capcut_editor_core.py` (catálogo a partir de um `rp.db` sintético mínimo, design ->
+material, validação), `tests/test_capcut_editor_api.py` (API, prévias com processador falso, migração 0030) e
+`tests/test_capcut_editor_preview.py` (pipeline da prévia com recorte); fakes em `tests/capcut_editor_fakes.py`
+(registro e pastas de fontes do Windows também falsos).
+
+Modo isolado: `tests/test_capcut_isolated.py` (controlador isolado com janelas/UI Automation falsas: só `PostMessage`
+e `ShowWindow`; `SetCursorPos`, `mouse_event`, `keybd_event`, `SetForegroundWindow`, `EnumWindows` etc. falham o
+teste se chamados; tudo na thread presa à área; recuperação de sobra; escolha do modo e ausência de fallback no
+pipeline) e `tests/test_capcut_export_mode.py` (configuração, status, registro do modo no job/prévia, avisos do
+design na API).
+
 ## Limitações conhecidas
 
 - Formato e nomes de interface verificados só no CapCut 9.7.1.4203 em português; outra versão/idioma pode quebrar a
   automação (os rótulos `Abaixar`/`Recomendado`/`Superior` são do português).
 - Abrir o rascunho depende do cartão estar visível na tela inicial (o rascunho novo fica no topo da lista).
-- Durante a exportação o CapCut vem para a frente e o mouse é usado por alguns segundos.
+- Modo interativo: durante a exportação o CapCut vem para a frente e o mouse é usado por alguns segundos (o modo
+  isolado, padrão, não faz isso; ver "Modo de exportação isolado").
 - Segmentos de texto que usam modelos de texto (`text_templates`) não entram na lista de modelos: só textos comuns
   (`materials.texts`).
 - Keyframes do texto do modelo não são copiados.
 - Rascunhos cifrados (versões que cifram `draft_content.json`) não são suportados.
+- Editor visual: alinhamento, espaçamento entre linhas, largura máxima de linha, fonte embutida pelo caminho e
+  entrada + saída + loop juntas não foram exportados no CapCut real (só o formato). Itálico, sublinhado, espaçamento
+  entre letras e as animações de saída e de loop foram conferidos em vídeo em 2026-11-07 (ver o item abaixo).
+  Recurso Pro pode fazer a exportação ser bloqueada nesta conta (`capcut_export_blocked`).
+- Editor visual, caixa de fundo + animação de ENTRADA/SAÍDA (verificado em vídeo no CapCut 9.7.1, 2026-11-07): a
+  animação atua só no texto e a caixa de fundo aparece vazia por alguns instantes. O loop não tem esse efeito. Não é
+  bloqueado: `design_warnings` (backend, `integrations/capcut/design.py`) e `designWarnings` (frontend,
+  `lib/captionDesign.ts`), mesma regra e mesmo texto, geram o aviso mostrado no editor e devolvido em `warnings` no
+  POST/PUT de modelos e na prévia. Conferidos em vídeo e corretos no gerador de estilo: Impact + itálico, amarelo com
+  fundo, sublinhado, espaçamento, destaque, saída e loop.
+- O catálogo do CapCut é o que o próprio CapCut já guardou em `ressdk_db` (painéis abertos alguma vez); fonte/animação
+  que nunca apareceu num painel não aparece. Animações "Legenda" (`caption`) não entram na lista.
+- Prévias ficam só em memória: reiniciar o app perde o estado (os arquivos em `previews/` ficam até a limpeza).

@@ -20,15 +20,19 @@ from app.integrations.capcut.errors import (
     DesktopBusy,
     ExportFailed,
     ForegroundLost,
+    IsolatedUnavailable,
     UiTimeout,
 )
 from app.integrations.capcut.jobspec import STAGES, CapCutJobSpec, CapCutResult
 
 __all__ = [
     "STAGES", "CapCutError", "CapCutBusy", "CapCutCancelled", "CapCutNotInstalled", "AccessibilityUnavailable", "DesktopBusy",
-    "ForegroundLost", "UiTimeout", "ExportFailed", "CapCutJobSpec", "CapCutResult", "process_video", "status",
-    "list_caption_drafts", "extract_style", "default_style", "style_summary", "discard_job_work",
+    "ForegroundLost", "IsolatedUnavailable", "UiTimeout", "ExportFailed", "CapCutJobSpec", "CapCutResult", "process_video", "status",
+    "list_caption_drafts", "extract_style", "default_style", "style_summary", "discard_job_work", "catalog_fonts",
+    "catalog_animations", "font_file", "default_design", "compile_design", "design_warnings", "EXPORT_MODES",
 ]
+
+EXPORT_MODES = ("isolated", "interactive")  # igual a isolated.EXPORT_MODES (este pacote não importa o pywin32)
 
 
 def process_video(spec: CapCutJobSpec, *, cancel: threading.Event,
@@ -63,7 +67,7 @@ def _has(module: str) -> bool:
 def status(data_dir: Path) -> dict[str, Any]:
     """Situação do CapCut, das dependências, do skill e dos modelos (só leitura, sem abrir o CapCut)."""
     from app.integrations.capcut import install as install_mod
-    from app.integrations.capcut import skill
+    from app.integrations.capcut import isolated, skill
     from app.integrations.capcut.transcribe import MODELS, model_downloaded
 
     inst = install_mod.detect()
@@ -80,6 +84,7 @@ def status(data_dir: Path) -> dict[str, Any]:
         "deps": {"faster_whisper": _has("faster_whisper"), "uiautomation": _has("uiautomation"),
                  "pywin32": _has("win32gui") and _has("win32api")},
         "skill": skill.info(),
+        "isolated": isolated.availability(),
         "models": {size: model_downloaded(models_dir, size) for size in MODELS},
     }
 
@@ -118,3 +123,66 @@ def style_summary(style: dict[str, Any]) -> dict[str, Any]:
     from app.integrations.capcut import style as style_mod
 
     return style_mod.style_summary(style)
+
+
+# --------------------------------------------------------------------------------------------- editor visual
+
+def _catalog_paths() -> Any:
+    from app.integrations.capcut import catalog
+    from app.integrations.capcut import install as install_mod
+
+    return catalog.paths_for(install_mod.detect())
+
+
+def _catalog_cache(data_dir: Path) -> Path:
+    return Path(data_dir) / "capcut" / "catalog_cache.json"
+
+
+def catalog_fonts(data_dir: Path, *, q: str | None = None, source: str | None = None, include_pro: bool = False,
+                  limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """Fontes embutidas do CapCut, do Windows e do catálogo local do CapCut: `{items, total}`."""
+    from app.integrations.capcut import catalog
+
+    items, total = catalog.list_fonts(_catalog_paths(), q=q, source=source, include_pro=include_pro, limit=limit,
+                                      offset=offset, cache_file=_catalog_cache(data_dir))
+    return {"items": items, "total": total}
+
+
+def catalog_animations(data_dir: Path, *, type: str | None = None, q: str | None = None,  # noqa: A002
+                       include_pro: bool = False, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """Animações de texto classificadas (entrada/saída/loop) do catálogo local: `{items, total}`."""
+    from app.integrations.capcut import catalog
+
+    items, total = catalog.list_animations(_catalog_paths(), type=type, q=q, include_pro=include_pro, limit=limit,
+                                           offset=offset, cache_file=_catalog_cache(data_dir))
+    return {"items": items, "total": total}
+
+
+def font_file(key: str) -> Path | None:
+    """Arquivo local da fonte (só das pastas permitidas) ou None."""
+    from app.integrations.capcut import catalog
+
+    return catalog.font_file(_catalog_paths(), key)
+
+
+def default_design() -> dict[str, Any]:
+    from app.integrations.capcut import design
+    from app.integrations.capcut import install as install_mod
+
+    return design.default_design(install_mod.detect())
+
+
+def compile_design(data_dir: Path, design_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(design normalizado, estilo serializado) de um design já validado no formato; CapCutError `invalid_design`
+    se a fonte ou uma animação não for permitida."""
+    from app.integrations.capcut import design
+
+    normalized = design.validate_design(design_data, _catalog_paths(), _catalog_cache(data_dir))
+    return normalized, design.style_from_design(normalized).to_dict()
+
+
+def design_warnings(design_data: dict[str, Any]) -> list[str]:
+    """Avisos (não bloqueiam) de combinações do design que o CapCut não renderiza como o editor mostra."""
+    from app.integrations.capcut import design
+
+    return design.design_warnings(design_data)

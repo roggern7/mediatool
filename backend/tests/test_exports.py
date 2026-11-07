@@ -923,7 +923,7 @@ def test_migration_0013_backfills_batch_media_over_schema_0012_with_data(tmp_pat
                 " updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)", (batch_id, media_id, kind, status, f"J{index}", now, now))
         before = [dict(row) for row in db.fetchall("SELECT * FROM jobs ORDER BY id")]
 
-        assert apply_migrations(db) == [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]   # 0014/0016-0020: colunas/tabela; 0015: preset
+        assert apply_migrations(db) == [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]   # 0014/0016-0020: colunas/tabela; 0015: preset
         pairs = [(row["batch_id"], row["media_id"]) for row in db.fetchall(
             "SELECT batch_id, media_id FROM batch_media ORDER BY batch_id, media_id")]
         assert pairs == [(1, 1), (1, 2), (2, 2)]

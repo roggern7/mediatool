@@ -44,7 +44,11 @@ DEFAULTS: dict[str, Any] = {
     "auto_after_download": False,
     "max_attempts": 3,
     "default_style_id": None,     # None = estilo embutido
+    # 'isolated' = área de trabalho separada (sem mouse/teclado/tela); 'interactive' = usa a tela e precisa do PC livre.
+    # Lido na hora em que o job/prévia começa (não entra no instantâneo do job) e gravado em `options.export_mode`.
+    "export_mode": "isolated",
 }
+EXPORT_MODES = ("isolated", "interactive")
 # Campos copiados para o job na criação (instantâneo: mudar as configurações depois não altera o job).
 OPTION_KEYS = ("output_dir", "resolution", "bitrate", "fps", "highlight", "highlight_color", "max_words", "max_chars",
                "whisper_model", "keep_original_audio", "keep_draft")
@@ -54,6 +58,7 @@ _UNAVAILABLE_STATUS: dict[str, Any] = {
     "deps": {"faster_whisper": False, "uiautomation": False, "pywin32": False},
     "skill": {"installed": False, "path": "", "commit": None},
     "models": {"small": False, "medium": False, "large-v3-turbo": False},
+    "isolated": {"available": False, "reason": None},
 }
 _OPEN_ERROR_STATUS = {"not_found": 404, "not_allowed": 403, "invalid_target": 422, "unsupported": 501}
 MSG_UNAVAILABLE = ("Os componentes das Legendas CapCut não estão instalados neste computador"
@@ -112,6 +117,8 @@ def core_status(ctx: AppContext) -> dict[str, Any]:
             info["deps"] = {str(k): bool(v) for k, v in dict(info["deps"] or {}).items()}
             info["models"] = {str(k): bool(v) for k, v in dict(info["models"] or {}).items()}
             info["skill"] = dict(info["skill"] or {})
+            isolated = dict(info["isolated"] or {})
+            info["isolated"] = {"available": bool(isolated.get("available")), "reason": isolated.get("reason")}
             info["running_pids"] = [int(pid) for pid in info["running_pids"] or []]
             info["installed"] = bool(info["installed"])
             available = True
@@ -123,8 +130,9 @@ def core_status(ctx: AppContext) -> dict[str, Any]:
     counts = repo(ctx).counts()
     queue = {**{key: counts[key] for key in ("pending", "running", "waiting", "failed", "completed", "cancelled")},
              "paused": queue_paused(ctx)}
+    settings = get_settings(ctx)
     return {**info, "available": available, "reason": None if available else reason, "queue": queue,
-            "settings": get_settings(ctx)}
+            "settings": settings, "export_mode": settings["export_mode"]}
 
 
 def list_drafts() -> list[dict[str, Any]]:
@@ -150,7 +158,13 @@ def _stored(ctx: AppContext) -> dict[str, Any]:
 def get_settings(ctx: AppContext) -> dict[str, Any]:
     values = _stored(ctx)
     return {**values, "output_dir": values["output_dir"] or str(default_output_dir(ctx)),
-            "output_dir_is_default": not values["output_dir"]}
+            "output_dir_is_default": not values["output_dir"], "export_mode": export_mode(ctx)}
+
+
+def export_mode(ctx: AppContext) -> str:
+    """Modo de exportação configurado (valor desconhecido gravado no banco: o padrão, isolado)."""
+    mode = _stored(ctx)["export_mode"]
+    return mode if mode in EXPORT_MODES else DEFAULTS["export_mode"]
 
 
 def validate_output_dir(raw: str) -> Path:
@@ -231,12 +245,26 @@ def _builtin_summary() -> dict[str, Any] | None:
         return None
 
 
+def _builtin_design() -> dict[str, Any] | None:
+    """Design equivalente ao embutido (ponto de partida do editor); None sem o núcleo."""
+    core, _ = _core_or_reason()
+    getter = getattr(core, "default_design", None) if core is not None else None
+    if getter is None:
+        return None
+    try:
+        return dict(getter())
+    except Exception:  # noqa: BLE001 - só o ponto de partida do editor
+        logger.warning("Legendas CapCut: falha ao montar o design do estilo embutido", exc_info=True)
+        return None
+
+
 def list_styles(ctx: AppContext) -> list[dict[str, Any]]:
     default_id = _stored(ctx)["default_style_id"]
     builtin = {"id": BUILTIN_STYLE_ID, "name": BUILTIN_STYLE_NAME, "builtin": True, "is_default": default_id is None,
-               "source_draft": None, "summary": _builtin_summary(), "created_at": None}
+               "source_draft": None, "summary": _builtin_summary(), "created_at": None, "design": _builtin_design()}
     saved = [{"id": style["id"], "name": style["name"], "builtin": False, "is_default": style["id"] == default_id,
-              "source_draft": style["source_draft"], "summary": style["summary"], "created_at": style["created_at"]}
+              "source_draft": style["source_draft"], "summary": style["summary"], "created_at": style["created_at"],
+              "design": style.get("design")}
              for style in repo(ctx).list_styles()]
     return [builtin, *saved]
 
@@ -256,6 +284,191 @@ def create_style(ctx: AppContext, name: str, draft_name: str, segment_index: int
         summary = None
     style_id = repo(ctx).create_style(name=name, source_draft=draft_name, style=style, summary=summary)
     return next(item for item in list_styles(ctx) if item["id"] == style_id)
+
+
+def _compile_design(ctx: AppContext, design: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(design normalizado, estilo serializado). Fonte/animação não permitida: 422 `invalid_design`."""
+    core = _require_core()
+    try:
+        return core.compile_design(ctx.settings.data_dir, design)
+    except Exception as exc:  # noqa: BLE001 - convertido em erro da API
+        if getattr(exc, "code", None) == "invalid_design":
+            raise AppError(422, "invalid_design", str(getattr(exc, "message", None) or exc)) from exc
+        raise _core_error(exc, "montar o estilo do editor") from exc
+
+
+def _summary_of(core: ModuleType, style: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        return dict(core.style_summary(style))
+    except Exception:  # noqa: BLE001 - o modelo vale sem o resumo
+        logger.warning("Legendas CapCut: falha ao resumir o modelo salvo", exc_info=True)
+        return None
+
+
+def design_warnings(design: dict[str, Any] | None) -> list[str]:
+    """Avisos do design (não bloqueiam); vazio sem design ou sem o núcleo."""
+    if not design:
+        return []
+    core, _ = _core_or_reason()
+    getter = getattr(core, "design_warnings", None) if core is not None else None
+    if getter is None:
+        return []
+    try:
+        return [str(w) for w in getter(design)]
+    except Exception:  # noqa: BLE001 - aviso é informativo
+        logger.warning("Legendas CapCut: falha ao conferir os avisos do design", exc_info=True)
+        return []
+
+
+def create_design_style(ctx: AppContext, name: str, design: dict[str, Any]) -> dict[str, Any]:
+    """Modelo novo criado pelo editor visual (com os avisos do design em `warnings`)."""
+    if name.casefold() == BUILTIN_STYLE_NAME.casefold() or repo(ctx).style_name_taken(name):
+        raise AppError(409, "style_name_taken", "Já existe um modelo com este nome.")
+    normalized, style = _compile_design(ctx, design)
+    style_id = repo(ctx).create_style(name=name, source_draft=None, style=style,
+                                      summary=_summary_of(_require_core(), style), design=normalized)
+    item = next(item for item in list_styles(ctx) if item["id"] == style_id)
+    return {**item, "warnings": design_warnings(normalized)}
+
+
+def update_design_style(ctx: AppContext, style_id: int, name: str | None, design: dict[str, Any]) -> dict[str, Any]:
+    """Atualiza um modelo do editor; os copiados de rascunho não mudam (409 `style_not_editable`)."""
+    current = repo(ctx).get_style(style_id)
+    if current is None:
+        raise not_found("Modelo de legenda", "style_not_found")
+    if current.get("design") is None:
+        raise AppError(409, "style_not_editable", "Só modelos criados no editor podem ser alterados.")
+    new_name = name or current["name"]
+    if new_name.casefold() == BUILTIN_STYLE_NAME.casefold() or repo(ctx).style_name_taken_by_other(new_name, style_id):
+        raise AppError(409, "style_name_taken", "Já existe um modelo com este nome.")
+    normalized, style = _compile_design(ctx, design)
+    if not repo(ctx).update_design_style(style_id, name=new_name, style=style,
+                                         summary=_summary_of(_require_core(), style), design=normalized):
+        raise not_found("Modelo de legenda", "style_not_found")
+    item = next(item for item in list_styles(ctx) if item["id"] == style_id)
+    return {**item, "warnings": design_warnings(normalized)}
+
+
+# ---- catálogo do editor ---------------------------------------------------------------------------------------------
+def catalog_fonts(ctx: AppContext, **query: Any) -> dict[str, Any]:
+    core = _require_core()
+    try:
+        return core.catalog_fonts(ctx.settings.data_dir, **query)
+    except Exception as exc:  # noqa: BLE001 - convertido em erro da API
+        raise _core_error(exc, "ler as fontes") from exc
+
+
+def catalog_animations(ctx: AppContext, **query: Any) -> dict[str, Any]:
+    core = _require_core()
+    try:
+        return core.catalog_animations(ctx.settings.data_dir, **query)
+    except Exception as exc:  # noqa: BLE001 - convertido em erro da API
+        raise _core_error(exc, "ler as animações") from exc
+
+
+def font_file(key: str) -> Path:
+    """Arquivo da fonte (só pastas permitidas); 404 se não houver arquivo local."""
+    core = _require_core()
+    try:
+        path = core.font_file(key)
+    except Exception as exc:  # noqa: BLE001 - convertido em erro da API
+        raise _core_error(exc, "ler a fonte") from exc
+    if path is None or not Path(path).is_file():
+        raise AppError(404, "font_not_found", "Fonte sem arquivo local.")
+    return Path(path)
+
+
+# ---- prévias --------------------------------------------------------------------------------------------------------
+def previews_dir(ctx: AppContext) -> Path:
+    return ctx.settings.data_dir / "capcut" / "previews"
+
+
+def _runner(ctx: AppContext) -> Any:
+    if ctx.capcut_runner is None:
+        raise AppError(409, "capcut_unavailable", MSG_UNAVAILABLE)
+    return ctx.capcut_runner
+
+
+def _preview_media(ctx: AppContext, media_id: int | None) -> dict[str, Any]:
+    if media_id is None:
+        row = ctx.db.fetchone("SELECT id FROM media WHERE media_type = 'video' AND role = 'original'"
+                              " ORDER BY id DESC LIMIT 1")
+        if row is None:
+            raise AppError(409, "preview_no_media", "A Biblioteca não tem nenhum vídeo para a prévia.")
+        media_id = int(row["id"])
+    media = ctx.media.get(media_id)
+    if media is None:
+        raise not_found("Mídia", "media_not_found", feminine=True)
+    if media["media_type"] != "video" or (media.get("role") or "original") == "cover":
+        raise AppError(422, "not_video", "A prévia precisa de um vídeo original.")
+    return media
+
+
+def create_preview(ctx: AppContext, *, design: dict[str, Any] | None, style_id: int | None, media_id: int | None,
+                   start_s: float, seconds: float) -> dict[str, Any]:
+    """Prévia real no CapCut (mesma fila/executor, com prioridade e fora da lista de jobs)."""
+    runner = _runner(ctx)
+    settings = get_settings(ctx)
+    if design is not None:
+        normalized, style = _compile_design(ctx, design)
+        highlight, highlight_color = bool(design["highlight"]["enabled"]), design["highlight"]["color"]
+        warnings = design_warnings(normalized)
+    else:
+        stored = repo(ctx).get_style(style_id) if style_id else None
+        if style_id and stored is None:
+            raise not_found("Modelo de legenda", "style_not_found")
+        style = stored["style"] if stored else None
+        highlight, highlight_color = bool(settings["highlight"]), settings["highlight_color"]
+        warnings = design_warnings(stored.get("design") if stored else None)
+    media = _preview_media(ctx, media_id)
+    try:
+        video = ctx.storage.resolve(media["original_path"])
+    except Exception:  # noqa: BLE001 - caminho inválido no banco
+        video = None
+    if video is None or not video.is_file():
+        raise AppError(409, "source_missing", "O arquivo original deste vídeo não está mais na Biblioteca.")
+    preview = runner.submit_preview({
+        "media_id": media["id"], "video_path": str(video), "style": style, "highlight": highlight,
+        "highlight_color": highlight_color, "start_s": float(start_s), "seconds": float(seconds),
+        "max_words": int(settings["max_words"]), "max_chars": int(settings["max_chars"]),
+        "whisper_model": settings["whisper_model"], "warnings": warnings})
+    return {"id": preview["id"], "status": preview["status"], "warnings": warnings}
+
+
+def preview_out(preview: dict[str, Any]) -> dict[str, Any]:
+    done = preview["status"] == "completed" and preview.get("output_path") and Path(preview["output_path"]).is_file()
+    return {**{key: preview.get(key) for key in ("id", "status", "stage", "detail", "error_code", "error_message",
+                                                  "media_id", "start_s", "seconds", "export_mode")},
+            "progress": int(preview.get("progress") or 0), "warnings": list(preview.get("warnings") or []),
+            "file_url": f"/api/capcut/previews/{preview['id']}/file" if done else None}
+
+
+def get_preview(ctx: AppContext, preview_id: str) -> dict[str, Any]:
+    preview = _runner(ctx).get_preview(preview_id)
+    if preview is None:
+        raise not_found("Prévia", "preview_not_found", feminine=True)
+    return preview_out(preview)
+
+
+def cancel_preview(ctx: AppContext, preview_id: str) -> dict[str, Any]:
+    if _runner(ctx).cancel_preview(preview_id) is None:
+        raise not_found("Prévia", "preview_not_found", feminine=True)
+    return get_preview(ctx, preview_id)
+
+
+def preview_file(ctx: AppContext, preview_id: str) -> Path:
+    preview = _runner(ctx).get_preview(preview_id)
+    if preview is None:
+        raise not_found("Prévia", "preview_not_found", feminine=True)
+    if preview["status"] != "completed" or not preview.get("output_path"):
+        raise AppError(404, "preview_file_not_found", "A prévia ainda não tem vídeo.")
+    try:
+        resolved = ensure_within(Path(preview["output_path"]), [previews_dir(ctx)])
+    except UnsafePathError:
+        raise AppError(403, "not_allowed", "Arquivo fora da pasta de prévias.") from None
+    if not resolved.is_file():
+        raise AppError(404, "preview_file_not_found", "O vídeo da prévia não existe mais.")
+    return resolved
 
 
 def delete_style(ctx: AppContext, style_id: int) -> None:
@@ -350,6 +563,7 @@ def job_out(job: dict[str, Any]) -> dict[str, Any]:
         "cancel_requested": bool(job["cancel_requested"]),
         "style_id": options.get("style_id"),
         "style_name": options.get("style_name"),
+        "export_mode": options.get("export_mode"),
         "options": options,
         "has_transcript": bool(job["has_transcript"]),
         "output_name": Path(output_path).name if output_path else None,

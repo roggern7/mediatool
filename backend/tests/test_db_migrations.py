@@ -387,8 +387,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
 
-    assert apply_migrations(db) == [v for v in (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29) if v > applied_until]
-    assert schema_version(db) == 29
+    assert apply_migrations(db) == [v for v in (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30) if v > applied_until]
+    assert schema_version(db) == 30
     added = {"import_groups": ("posted_within_days", "posted_after", "history_hidden_at"),
              "batches": ("posted_within_days", "posted_after", "listing_period_end", "history_hidden_at")}
     if applied_until < 17:
@@ -416,8 +416,8 @@ def test_posted_period_migration_is_additive_over_existing_rows(tmp_path, db, ap
 
 
 def test_new_database_gets_17_18_and_19(db):
-    assert apply_migrations(db)[-13:] == [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
-    assert schema_version(db) == 29
+    assert apply_migrations(db)[-14:] == [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+    assert schema_version(db) == 30
     columns = {row["name"] for row in db.fetchall("PRAGMA table_info(batches)")}
     assert {"min_views", "history_hidden_at", "posted_after", "posted_within_days", "listing_period_end"} <= columns
 
@@ -432,7 +432,7 @@ def test_batch_media_params_migration_is_additive(tmp_path, db):
     db.execute("INSERT INTO batch_media (batch_id, media_id) VALUES (1, 7)")
     before = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert before
-    assert apply_migrations(db) == [20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+    assert apply_migrations(db) == [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
     rows = [dict(row) for row in db.fetchall("SELECT * FROM batch_media ORDER BY 1, 2")]
     assert all(row.pop("params") is None for row in rows) and rows == before
     db.execute("UPDATE batch_media SET params = '{\"speed\": 1.0}'")
@@ -449,8 +449,8 @@ def test_media_set_auto_export_migration_is_additive_over_a_bank_at_0022(tmp_pat
     _bank_with_rows(db)
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
-    assert apply_migrations(db) == [23, 24, 25, 26, 27, 28, 29]
-    assert schema_version(db) == 29
+    assert apply_migrations(db) == [23, 24, 25, 26, 27, 28, 29, 30]
+    assert schema_version(db) == 30
     for table in tables:
         rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
         info = {row["name"]: row for row in db.fetchall(f"PRAGMA table_info({table})")}
@@ -483,8 +483,8 @@ def test_import_requests_migration_is_additive_over_a_bank_at_0023(tmp_path, db)
     _bank_with_rows(db)
     tables = ("import_groups", "batches", "jobs", "media")
     before = {table: [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")] for table in tables}
-    assert apply_migrations(db) == [24, 25, 26, 27, 28, 29]
-    assert schema_version(db) == 29
+    assert apply_migrations(db) == [24, 25, 26, 27, 28, 29, 30]
+    assert schema_version(db) == 30
     for table in tables:
         rows = [dict(row) for row in db.fetchall(f"SELECT * FROM {table} ORDER BY 1")]
         if table in ("batches", "import_groups"):

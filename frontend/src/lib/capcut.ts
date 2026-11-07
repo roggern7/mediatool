@@ -1,6 +1,7 @@
 // Legendas CapCut: rótulos, progresso, polling e patch das configurações (funções puras, testadas em capcut.test.ts).
 
 import type {
+  CapCutExportMode,
   CapCutJob,
   CapCutJobStatus,
   CapCutJobsCreated,
@@ -112,6 +113,7 @@ const SETTINGS_FIELDS = [
   "keep_draft",
   "auto_after_download",
   "max_attempts",
+  "export_mode",
 ] as const;
 
 /**
@@ -190,4 +192,43 @@ export function jobNote(job: Pick<CapCutJob, "status" | "error_message" | "detai
   if (job.status === "failed") return job.error_message ?? "Falhou.";
   if (job.status === "pending" && job.error_message) return `Última tentativa: ${job.error_message}`;
   return job.detail ?? "";
+}
+
+/** Modos de exportação (configurações): rótulo e ajuda curta. */
+export const CAPCUT_EXPORT_MODES: { value: CapCutExportMode; label: string; help: string }[] = [
+  {
+    value: "isolated",
+    label: "Isolado (recomendado)",
+    help: "Não usa mouse, teclado nem a tela; você pode usar o PC normalmente.",
+  },
+  { value: "interactive", label: "Interativo", help: "Usa a tela e precisa do PC livre." },
+];
+
+export function exportModeLabel(mode: CapCutExportMode | null | undefined): string {
+  return CAPCUT_EXPORT_MODES.find((m) => m.value === mode)?.label ?? "Desconhecido";
+}
+
+/** Modo usado pelo job na lista: "Isolado" | "Interativo" | "—" (ainda não rodou). */
+export function jobExportModeText(mode: CapCutExportMode | null | undefined): string {
+  if (mode === "isolated") return "Isolado";
+  if (mode === "interactive") return "Interativo";
+  return "—";
+}
+
+export function exportModeHelp(mode: CapCutExportMode | null | undefined): string {
+  return CAPCUT_EXPORT_MODES.find((m) => m.value === mode)?.help ?? "";
+}
+
+/** Texto do status do modo configurado; o isolado sem os pré-requisitos mostra o motivo. */
+export function exportModeStatusText(
+  mode: CapCutExportMode,
+  isolated: { available: boolean; reason: string | null } | undefined,
+): { ok: boolean; text: string } {
+  if (mode === "isolated" && isolated && !isolated.available) {
+    return {
+      ok: false,
+      text: `${exportModeLabel(mode)}: indisponível${isolated.reason ? ` (${isolated.reason})` : ""}. Troque para Interativo nas configurações.`,
+    };
+  }
+  return { ok: true, text: `${exportModeLabel(mode)}: ${exportModeHelp(mode)}` };
 }

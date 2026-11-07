@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.integrations.capcut import install as install_mod
+from app.integrations.capcut import isolated
 from app.integrations.capcut.controller import CapCutController, ExportOptions
 from app.integrations.capcut.draft import build_draft, delete_draft, register_draft
 from app.integrations.capcut.errors import CapCutBusy, CapCutCancelled, CapCutError, CapCutNotInstalled
@@ -29,7 +30,7 @@ from app.integrations.capcut.finalize import (
 )
 from app.integrations.capcut.install import CapCutInstall
 from app.integrations.capcut.jobspec import CapCutJobSpec, CapCutResult
-from app.integrations.capcut.media import probe
+from app.integrations.capcut.media import probe, run_tool, tool_path
 from app.integrations.capcut.style import (
     DEFAULT_HIGHLIGHT,
     CaptionStyle,
@@ -37,7 +38,7 @@ from app.integrations.capcut.style import (
     default_style,
     find_draft_dir,
 )
-from app.integrations.capcut.transcribe import Word, chunk_words, transcribe_file
+from app.integrations.capcut.transcribe import Chunk, Word, chunk_words, transcribe_file
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,41 @@ def _prune_work_dir(work_dir: Path) -> None:
         work_dir.rmdir()
     except OSError:
         pass
+
+
+def clip_range(spec: CapCutJobSpec, duration: float) -> tuple[float, float] | None:
+    """(início, duração) do trecho da prévia dentro do vídeo; None = vídeo inteiro. Início além do fim: os últimos
+    segundos do vídeo."""
+    if spec.clip_duration is None:
+        return None
+    length = float(spec.clip_duration)
+    start = max(0.0, float(spec.clip_start or 0.0))
+    if start + 0.5 > duration:
+        start = max(0.0, duration - length)
+    length = min(length, duration - start)
+    if length < 0.5:
+        raise CapCutError("preview_out_of_range", "O trecho pedido para a prévia está fora do vídeo.")
+    return start, length
+
+
+def _clip_audio(video: Path, clip: tuple[float, float], out: Path) -> Path:
+    """Só o áudio do trecho (WAV), para transcrever apenas ele (tempos relativos ao início do trecho)."""
+    result = run_tool([tool_path("ffmpeg"), "-nostdin", "-v", "error", "-y", "-ss", f"{clip[0]:.3f}", "-t",
+                       f"{clip[1]:.3f}", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(out)], timeout=300)
+    if result.returncode != 0 or not out.is_file():
+        out.unlink(missing_ok=True)
+        raise CapCutError("transcription_failed", "Não foi possível separar o áudio do trecho da prévia.")
+    return out
+
+
+def sample_chunks(text: str, duration: float, *, max_words: int, max_chars: int) -> list[Chunk]:
+    """Sem fala na prévia: o texto de exemplo distribuído no trecho com tempos sintéticos."""
+    parts = text.split()
+    if not parts or duration <= 0.6:
+        return []
+    step = (duration - 0.6) / len(parts)
+    words = [Word(0.3 + i * step, 0.3 + (i + 1) * step - 0.02, w) for i, w in enumerate(parts)]
+    return chunk_words(words, max_words=max_words, max_chars=max_chars)
 
 
 def wait_export_complete(path: Path, *, expected_duration: float, cancel: threading.Event,
@@ -110,7 +146,15 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
     if controller_factory is None and not _deps_ui_ok():
         raise CapCutError("deps_missing", "uiautomation/pywin32 não estão instalados.")
     running = running or install_mod.is_running
+    # Modo de exportação: `isolated` (padrão: área de trabalho separada, sem mouse/teclado/tela) ou `interactive`.
+    # Se o isolado não puder ser usado, o job falha com `isolated_unavailable` (nunca cai para o interativo).
+    export_mode = str(getattr(spec, "export_mode", None) or isolated.DEFAULT_EXPORT_MODE)
+    if export_mode not in isolated.EXPORT_MODES:
+        raise CapCutError("invalid_export_mode", "Modo de exportação desconhecido. Escolha \"Isolado\" ou "
+                          "\"Interativo\" nas configurações das Legendas CapCut.")
     warnings: list[str] = []
+    clip = clip_range(spec, info.duration)
+    expected_duration = clip[1] if clip else info.duration
 
     # 1. transcrição (reaproveitada nas retentativas)
     if spec.transcript is not None:
@@ -119,9 +163,17 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
     else:
         stage("transcribing", 0.0, f"Transcrevendo (modelo {spec.whisper_model})")
         if info.has_audio:
-            words = (transcriber or transcribe_file)(
-                video, model=spec.whisper_model, language=spec.language, models_dir=Path(spec.models_dir),
-                cancel=cancel, progress=lambda p: stage("transcribing", p, None))
+            source = video
+            if clip is not None:
+                Path(spec.work_dir).mkdir(parents=True, exist_ok=True)
+                source = _clip_audio(video, clip, Path(spec.work_dir) / "clip.wav")
+            try:
+                words = (transcriber or transcribe_file)(
+                    source, model=spec.whisper_model, language=spec.language, models_dir=Path(spec.models_dir),
+                    cancel=cancel, progress=lambda p: stage("transcribing", p, None))
+            finally:
+                if source != video:
+                    source.unlink(missing_ok=True)
         else:
             words = []
         stage("transcribing", 1.0, f"{len(words)} palavras")
@@ -131,6 +183,10 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
     check()
 
     chunks = chunk_words(words, max_words=spec.max_words, max_chars=spec.max_chars)
+    if not chunks and spec.sample_text:
+        chunks = sample_chunks(spec.sample_text, expected_duration, max_words=spec.max_words, max_chars=spec.max_chars)
+        if chunks:
+            warnings.append("Sem fala no trecho: usado o texto de exemplo.")
     output_dir = Path(spec.output_dir)
     work_dir = Path(spec.work_dir)
     if not chunks:
@@ -147,7 +203,16 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
         return CapCutResult(output_path=final, draft_name=spec.draft_name, draft_kept=False, words=word_dicts,
                             chunks=0, probe=probe_dict(probe(final)), warnings=warnings)
 
-    # 2. rascunho (só com o CapCut fechado)
+    # 2. rascunho (só com o CapCut fechado). Antes: CapCut que sobrou na área isolada (queda do Media Tool) é nosso e
+    # é fechado com o fechamento seguro; um CapCut com janela na área normal do dono continua sendo `capcut_busy`.
+    if controller_factory is None:
+        try:
+            warnings.extend(isolated.recover_leftover(
+                install, state_dir=Path(spec.work_dir).parent.parent, cancel=cancel, running=running,
+                progress=lambda d: stage(current["stage"], None, d)))
+        except CapCutError:
+            stage("waiting_capcut", None, "CapCut em uso")
+            raise
     if running():
         stage("waiting_capcut", None, "CapCut em uso")
         raise CapCutBusy()
@@ -157,7 +222,7 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
     if style.source_draft and base_draft is None:
         warnings.append("O rascunho do modelo não existe mais; usado o rascunho-base padrão.")
     highlight = (HighlightOptions(color=spec.highlight_color or style.highlight_color or DEFAULT_HIGHLIGHT)
-                 if spec.highlight else None)
+                 if spec.highlight and style.highlight_enabled is not False else None)
     work_dir.mkdir(parents=True, exist_ok=True)
     state_dir = work_dir.parent.parent  # <data_dir>/capcut
     # Exportados de uma tentativa anterior deste job (falhou depois de exportar): apagados antes de exportar de novo.
@@ -168,7 +233,12 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
     controller: Any = None
     success = False
     try:
-        factory = controller_factory or CapCutController
+        if controller_factory is not None:
+            factory = controller_factory
+        elif export_mode == "isolated":
+            factory = isolated.open_controller
+        else:
+            factory = CapCutController
         controller = factory(install, state_dir=state_dir, progress=lambda d: stage(current["stage"], None, d),
                              cancel=cancel)
         # O PC precisa estar livre (sem teclado/mouse do dono há alguns segundos) antes de mexer no CapCut;
@@ -184,7 +254,7 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
                                 source_width=info.width, source_height=info.height, source_fps=info.fps)
         draft_dir = build_draft(install, name=spec.draft_name, video=video, chunks=chunks, style=style,
                                 highlight=highlight, base_draft=base_draft, info=info, running=running,
-                                fps=options.fps_value())
+                                fps=options.fps_value(), clip=clip)
         register_draft(install, draft_dir, template_name=style.source_draft, running=running)
         stage("drafting", 1.0, None)
         check()
@@ -200,7 +270,7 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
         created = bool(getattr(controller, "last_export_created", False))
         # Só fecha o projeto/CapCut depois de o MP4 estar FINALIZADO e íntegro (o CapCut pode ainda estar gravando).
         stage("exporting", None, "Conferindo se o MP4 foi finalizado")
-        wait_export_complete(exported, expected_duration=info.duration, cancel=cancel)
+        wait_export_complete(exported, expected_duration=expected_duration, cancel=cancel)
         controller.close_project()
         controller.shutdown()
         stage("exporting", 1.0, None)
@@ -208,7 +278,8 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
         stage("finalizing", 0.0, "Conferindo o vídeo exportado")
         report = finalize_output(exported, video, output_dir, spec.output_name, spec.keep_original_audio,
                                  expected_short_side=options.expected_short_side(), expected_fps=options.fps_value(),
-                                 capcut_videos_dir=install.default_videos_dir, created_by_job=created)
+                                 capcut_videos_dir=install.default_videos_dir, created_by_job=created,
+                                 expected_duration=clip[1] if clip else None)
         warnings.extend(report.warnings)
         stage("finalizing", 1.0, None)
         success = True
@@ -218,6 +289,12 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
                 controller.shutdown()
             except Exception:  # noqa: BLE001 - limpeza não pode esconder o erro original
                 logger.warning("Job CapCut %s: falha ao fechar o CapCut", spec.job_id, exc_info=True)
+            close_session = getattr(controller, "close_session", None)
+            if callable(close_session):
+                try:
+                    close_session()  # modo isolado: encerra a thread presa à área e fecha a área de trabalho
+                except Exception:  # noqa: BLE001
+                    logger.warning("Job CapCut %s: falha ao fechar a área isolada", spec.job_id, exc_info=True)
             target = getattr(controller, "export_target", None)
             if not success and target:
                 try:

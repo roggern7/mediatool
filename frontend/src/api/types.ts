@@ -1041,6 +1041,8 @@ export type CapCutResolution = "original" | "480P" | "720P" | "1080P" | "2K" | "
 export type CapCutBitrate = "low" | "recommended" | "high";
 export type CapCutFps = "original" | "24" | "25" | "30" | "50" | "60";
 export type CapCutWhisperModel = "small" | "medium" | "large-v3-turbo";
+/** isolated = área de trabalho separada (sem mouse/teclado/tela); interactive = usa a tela e precisa do PC livre. */
+export type CapCutExportMode = "isolated" | "interactive";
 export type CapCutJobStatus = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
 export type CapCutStage =
   | "transcribing"
@@ -1068,6 +1070,7 @@ export interface CapCutSettings {
   auto_after_download: boolean;
   max_attempts: number;
   default_style_id: number | null;
+  export_mode: CapCutExportMode;
 }
 
 /** Só os campos enviados mudam; `null` volta ao padrão (pasta de saída, cor do destaque). */
@@ -1097,6 +1100,9 @@ export interface CapCutStatus {
   models: Record<string, boolean>;
   queue: CapCutQueueCounts;
   settings: CapCutSettings;
+  export_mode: CapCutExportMode;
+  /** Pré-requisitos do modo isolado neste computador (a prova real acontece no job). */
+  isolated: { available: boolean; reason: string | null };
 }
 
 export interface CapCutDraft {
@@ -1125,6 +1131,105 @@ export interface CapCutStyle {
   source_draft: string | null;
   summary: CapCutStyleSummary | null;
   created_at: string | null;
+  /** Modelo do editor visual; null para modelos extraídos de rascunho (e, às vezes, para o embutido). */
+  design?: CapCutDesign | null;
+  /** Avisos do design (não bloqueiam), na resposta de criar/alterar. */
+  warnings?: string[];
+}
+
+/* Editor visual de modelos de legenda (contrato do editor: `design` versionado). */
+
+export type CapCutFontSource = "bundled" | "capcut" | "windows";
+export type CapCutAnimationType = "in" | "out" | "loop";
+export type CapCutAlign = "center" | "left" | "right";
+
+export interface CapCutDesignFont {
+  source: CapCutFontSource;
+  /** resource_id do catálogo do CapCut (fonte `capcut`). */
+  id: string | null;
+  /** Arquivo da fonte (fontes `windows` e `bundled`). */
+  path: string | null;
+  name: string;
+}
+
+export interface CapCutDesignAnimation {
+  id: string;
+  name: string;
+  duration_ms: number;
+}
+
+export interface CapCutDesign {
+  version: 1;
+  font: CapCutDesignFont;
+  /** styles.size do CapCut (2..30). */
+  size: number;
+  /** clip.scale x=y (0,3..4), relativa à largura 1080. */
+  scale: number;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  uppercase: boolean;
+  color: string;
+  opacity: number;
+  stroke: { enabled: boolean; color: string; width: number };
+  shadow: { enabled: boolean; color: string; opacity: number; blur: number; distance: number; angle: number };
+  background: { enabled: boolean; color: string; opacity: number; radius: number };
+  align: CapCutAlign;
+  letter_spacing: number;
+  line_spacing: number;
+  /** clip.transform, -1..1 (y de baixo para cima). */
+  position: { x: number; y: number };
+  max_line_width: number;
+  highlight: { enabled: boolean; color: string };
+  animation: Record<CapCutAnimationType, CapCutDesignAnimation | null>;
+}
+
+export interface CapCutFontItem {
+  key: string;
+  name: string;
+  source: CapCutFontSource;
+  id: string | null;
+  path: string | null;
+  is_pro: boolean;
+  downloaded: boolean;
+  previewable: boolean;
+}
+
+export interface CapCutAnimationItem {
+  id: string;
+  name: string;
+  type: CapCutAnimationType;
+  is_pro: boolean;
+  downloaded: boolean;
+  default_duration_ms: number;
+}
+
+export interface CapCutCatalogPage<T> {
+  items: T[];
+  total: number;
+}
+
+export type CapCutPreviewStatus = CapCutJobStatus;
+
+export interface CapCutPreview {
+  id: string | number;
+  status: CapCutPreviewStatus;
+  stage: string | null;
+  progress: number;
+  detail: string | null;
+  error_message: string | null;
+  file_url: string | null;
+  warnings?: string[];
+  /** Modo de exportação usado (null enquanto não começou). */
+  export_mode?: CapCutExportMode | null;
+}
+
+export interface CapCutPreviewRequest {
+  design?: CapCutDesign;
+  style_id?: number;
+  media_id?: number;
+  start_s?: number;
+  seconds?: number;
 }
 
 export interface CapCutJob {
@@ -1148,6 +1253,8 @@ export interface CapCutJob {
   cancel_requested: boolean;
   style_id: number | null;
   style_name: string | null;
+  /** Modo de exportação usado na última execução (null = ainda não rodou). */
+  export_mode: CapCutExportMode | null;
   options: Record<string, unknown>;
   has_transcript: boolean;
   chunks: number | null;
