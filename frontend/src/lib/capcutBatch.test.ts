@@ -3,6 +3,7 @@ import type { CapCutBatch, CapCutBatchCounts, CapCutSettings, PresetParams } fro
 import {
   BATCH_MODE_LABEL,
   hiddenText,
+  zipLabel,
   BATCH_MODE_OPTIONS,
   DEFAULT_BATCH_EDIT,
   EMPTY_SELECTION,
@@ -489,5 +490,13 @@ describe("histórico de lotes", () => {
     expect(hiddenText(1, 0)).toBe("1 lote removido do histórico.");
     expect(hiddenText(3, 1)).toBe("3 lotes removidos do histórico (1 em andamento ficou).");
     expect(hiddenText(0, 2)).toBe("Nenhum lote removido (2 em andamento ficaram).");
+  });
+});
+
+describe("botão do ZIP", () => {
+  const counts = { total: 3, pending: 0, running: 0, waiting: 0, held: 0, completed: 3, failed: 0, cancelled: 0 };
+  it("lote terminado baixa todos; em andamento, só os concluídos", () => {
+    expect(zipLabel({ counts })).toBe("Baixar todos (ZIP)");
+    expect(zipLabel({ counts: { ...counts, completed: 2, pending: 1 } })).toBe("Baixar 2 concluídos (ZIP)");
   });
 });

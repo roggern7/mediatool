@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { Download } from "lucide-react";
 import { api } from "../../api/client";
 import type { CapCutBatchMode, CapCutBatchStatus } from "../../api/types";
-import { messageOf } from "../../api/client";
+import { capcutBatchZipUrl, messageOf } from "../../api/client";
 import {
   BATCH_MODE_LABEL,
   BATCH_MODE_OPTIONS,
@@ -232,6 +233,17 @@ export function BatchHistory({
                     </td>
                     <td className="muted small col-opt">{batchSummaryText(b)}</td>
                     <td className="nowrap" style={{ textAlign: "right" }}>
+                      {b.counts.completed > 0 ? (
+                        <a
+                          className="btn btn-sm btn-ghost"
+                          href={capcutBatchZipUrl(b.id)}
+                          download={`lote-${b.id}.zip`}
+                          title={`Baixar os ${formatCount(b.counts.completed)} vídeos prontos deste lote em ZIP`}
+                        >
+                          <Download size={14} strokeWidth={2} aria-hidden="true" />
+                          ZIP
+                        </a>
+                      ) : null}
                       <button
                         type="button"
                         className="btn btn-sm btn-ghost"

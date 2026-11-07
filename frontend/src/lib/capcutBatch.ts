@@ -554,6 +554,12 @@ export function hiddenText(hidden: number, active: number): string {
   return `${main} (${formatCount(active)} em andamento ${active === 1 ? "ficou" : "ficaram"}).`;
 }
 
+/** Botão do ZIP: "Baixar todos (ZIP)" com o lote terminado; enquanto processa, só os concluídos até agora. */
+export function zipLabel(batch: Pick<CapCutBatch, "counts">): string {
+  const n = formatCount(batch.counts.completed);
+  return isBatchOpen(batch) ? `Baixar ${n} concluídos (ZIP)` : `Baixar todos (ZIP)`;
+}
+
 /** Lote com job aberto (em andamento ou pausado): não sai do histórico. */
 export function isBatchOpen(batch: Pick<CapCutBatch, "counts">): boolean {
   return openCount(batch.counts) > 0;
