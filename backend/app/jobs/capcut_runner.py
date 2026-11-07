@@ -204,8 +204,10 @@ class CapCutRunner:
                                on_transcript=self._transcript_callback(job_id))
         except Exception as exc:  # noqa: BLE001 - classificado abaixo; a fila segue
             self._handle_failure(job, exc)
+            self._pause_if_user_wants_capcut(None, exc)
             return
         self._complete(job_id, result)
+        self._pause_if_user_wants_capcut(result, None)
 
     def _spec_fields(self, job: dict[str, Any], video: Path) -> dict[str, Any]:
         options = job["options"] or {}
@@ -256,6 +258,17 @@ class CapCutRunner:
             self.repo.update_job(job_id, transcript=list(words))
 
         return on_transcript
+
+    def _pause_if_user_wants_capcut(self, result: Any, exc: BaseException | None) -> None:
+        """Alguém tentou abrir o CapCut durante a exportação isolada (aviso marcado do núcleo): pausa a fila com o
+        motivo, para o próximo job não reabrir o CapCut oculto e o dono conseguir usar o dele."""
+        from app.integrations.capcut.jobspec import USER_CAPCUT_NOTICE
+
+        hit = bool(exc is not None and getattr(exc, "user_capcut_attempt", False) is True)
+        hit = hit or (result is not None and USER_CAPCUT_NOTICE in [str(w) for w in (getattr(result, "warnings", None) or [])])
+        if hit and not capcut_service.queue_paused(self.ctx):
+            capcut_service.set_queue_paused(self.ctx, True, USER_CAPCUT_NOTICE)
+            logger.info("Legendas CapCut: fila pausada porque o dono tentou abrir o CapCut durante a exportação")
 
     def _complete(self, job_id: int, result: Any) -> None:
         fields: dict[str, Any] = {
@@ -448,12 +461,14 @@ class CapCutRunner:
             result = processor(spec, cancel=self._cancel, on_stage=on_stage, on_transcript=None)
         except Exception as exc:  # noqa: BLE001 - classificado abaixo; a fila segue
             self._preview_failure(entry, exc)
+            self._pause_if_user_wants_capcut(None, exc)
             return
         self._set_preview(entry, status="completed", stage=None, progress=100, detail=None, error_code=None,
                           error_message=None, output_path=str(result.output_path),
                           warnings=[str(w) for w in (entry["request"].get("warnings") or [])]
                           + [str(w) for w in (result.warnings or [])])
         self._prune_previews()
+        self._pause_if_user_wants_capcut(result, None)
         logger.info("Legendas CapCut: prévia %s concluída", entry["id"])
 
     def _preview_failure(self, entry: dict[str, Any], exc: Exception) -> None:

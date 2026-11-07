@@ -1086,6 +1086,8 @@ export interface CapCutQueueCounts {
   completed: number;
   cancelled: number;
   paused: boolean;
+  /** Motivo de uma pausa automática (ex.: o dono tentou abrir o CapCut durante a exportação isolada). */
+  pause_reason?: string | null;
 }
 
 export interface CapCutStatus {

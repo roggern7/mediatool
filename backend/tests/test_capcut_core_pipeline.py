@@ -305,7 +305,9 @@ def test_work_dir_removed_on_success(env):
     assert not Path(spec.work_dir).exists()
 
 
-def test_failure_after_export_records_intermediate_and_next_attempt_cleans_it(env):
+def test_failure_after_export_removes_intermediate_once_capcut_closed(env):
+    """Falhou depois de exportar: com o CapCut fechado, o intermediário deste job é apagado já na falha (antes ficava
+    até a próxima tentativa; um job cancelado e nunca retomado deixava a sobra para sempre)."""
     inst, video, tmp = env
     spec = make_spec(tmp, video)
     intermediate = inst.default_videos_dir / "MT_7_m3.mp4"
@@ -315,10 +317,8 @@ def test_failure_after_export_records_intermediate_and_next_attempt_cleans_it(en
                       controller_factory=lambda install, **kw: TargetController(install, **kw,
                                                                                 fail_on="close_project"),
                       transcriber=fake_transcriber([]), running=lambda: [])
-    assert intermediate.is_file(), "falhou depois de exportar: o intermediário ficou"
-    record = json.loads((Path(spec.work_dir) / "exports.json").read_text(encoding="utf-8"))
-    assert record == {"draft_name": "MT_7_m3", "exports": [str(intermediate)]}
-    assert [p.name for p in Path(spec.work_dir).iterdir()] == ["exports.json"], "em falha só fica o registro"
+    assert not intermediate.exists(), "intermediário apagado logo após a falha"
+    assert not Path(spec.work_dir).exists(), "sem registro pendente: nada sobrou"
     process_video(spec, cancel=threading.Event(), on_stage=lambda *a: None, install=inst,
                   controller_factory=lambda install, **kw: TargetController(install, **kw),
                   transcriber=fake_transcriber([]), running=lambda: [])

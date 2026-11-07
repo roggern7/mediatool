@@ -455,9 +455,44 @@ def test_leftover_that_does_not_close_is_capcut_busy(tmp_path):
 
     with pytest.raises(CapCutBusy):
         isolated.recover_leftover(None, state_dir=tmp_path, running=lambda: [500],
+                                  processes=lambda: list(world.table),
                                   desktop_factory=lambda: FakeDesktop(world), default_windows=lambda: [],
                                   window_pid=lambda h: world.windows[h][0], com_init=lambda: None,
                                   controller_cls=Stubborn)
+
+
+def test_leftover_is_not_touched_when_another_capcut_outside_the_tree_runs(tmp_path, no_real_input):
+    """Sobra na área isolada + OUTRO CapCut (ex. do dono) fora da árvore dela, mesmo sem janela na área normal: nada é
+    adotado nem fechado; quem chama segue para capcut_busy."""
+    inst = fake_install(tmp_path)
+    world = leftover_world(tmp_path)
+    world.table.append(P(700, 4, "CapCut.exe", 3000))  # CapCut de outra pessoa/área, filho do explorer
+    created: list = []
+
+    class Spy:
+        def __init__(self, *_a, **_k):
+            created.append(1)
+
+    warnings = isolated.recover_leftover(
+        inst, state_dir=tmp_path / "s", running=lambda: [500, 700], processes=lambda: list(world.table),
+        desktop_factory=lambda: FakeDesktop(world), default_windows=lambda: [], window_pid=lambda h: world.windows[h][0],
+        com_init=lambda: None, controller_cls=Spy)
+    assert warnings == [] and created == [], "nenhum controlador criado: nada foi fechado"
+    assert not any(m == ctl.WM_CLOSE for _h, m, _w, _l in world.posted)
+
+
+def test_discard_job_exports_removes_only_this_job_files(tmp_path):
+    """Exportação terminada por um CapCut órfão depois da queda: apagada no começo da tentativa seguinte do MESMO job;
+    arquivos de outros jobs e do dono ficam."""
+    from app.integrations.capcut.finalize import discard_job_exports
+
+    videos = tmp_path / "Videos"
+    videos.mkdir()
+    for name in ("MT_17_m2.mp4", "MT_17_m2(1).mp4", "MT_17_m21.mp4", "MT_18_m2.mp4", "0713.mp4", "c1b0d8f7.mp4"):
+        (videos / name).write_bytes(b"x")
+    assert discard_job_exports(videos, "MT_17_m2") == []
+    assert sorted(x.name for x in videos.iterdir()) == ["0713.mp4", "MT_17_m21.mp4", "MT_18_m2.mp4", "c1b0d8f7.mp4"]
+    assert discard_job_exports(videos, "0713") == [] and (videos / "0713.mp4").exists(), "só nomes MT_"
 
 
 # --------------------------------------------------------------------------------------------- escolha do modo

@@ -240,6 +240,7 @@ class CapCutController:
         self.export_target: Path | None = None
         self.warnings: list[str] = []
         self._libs: Any = None
+        self._closing = False  # fechando (close_project/shutdown): o cancelamento não interrompe
         self._last_injected_tick = 0  # GetTickCount da última entrada sintética nossa (0 = nenhuma ainda)
         # Espera máxima por uma tarefa que o CapCut diz estar em andamento ao fechar (nunca forçamos).
         self.task_timeout = EXIT_TASK_TIMEOUT
@@ -253,10 +254,16 @@ class CapCutController:
         return self._libs
 
     def _check_cancel(self) -> None:
-        if self.cancel.is_set():
+        # Durante o fechamento o cancelamento NÃO interrompe: fechar com segurança é justamente o que o cancelamento
+        # pede (verificado no real: antes, cancelar no meio da exportação abortava o fechamento e deixava o CapCut
+        # aberto, com rascunho e vídeo intermediário sobrando).
+        if self.cancel.is_set() and not self._closing:
             raise CapCutCancelled()
 
     def _sleep(self, seconds: float) -> None:
+        if self._closing:
+            time.sleep(seconds)
+            return
         if self.cancel.wait(seconds):
             raise CapCutCancelled()
 
@@ -821,6 +828,14 @@ class CapCutController:
             time.sleep(1.0)
 
     def close_project(self, timeout: float = 30) -> None:
+        """Ver `_close_project_impl`; roda com o cancelamento desligado (o fechamento seguro sempre vai até o fim)."""
+        previous, self._closing = self._closing, True
+        try:
+            self._close_project_impl(timeout)
+        finally:
+            self._closing = previous
+
+    def _close_project_impl(self, timeout: float = 30) -> None:
         editor = self._find_window(CLS_EDITOR)
         if not editor:
             return
@@ -840,6 +855,14 @@ class CapCutController:
             raise UiTimeout("O CapCut não respondeu a tempo (fechar o projeto).")
 
     def shutdown(self, timeout: float = 40) -> None:
+        """Ver `_shutdown_impl`; roda com o cancelamento desligado (o fechamento seguro sempre vai até o fim)."""
+        previous, self._closing = self._closing, True
+        try:
+            self._shutdown_impl(timeout)
+        finally:
+            self._closing = previous
+
+    def _shutdown_impl(self, timeout: float = 40) -> None:
         """Fecha o CapCut que NÓS abrimos: só processos da árvore do lançador que iniciamos (PID pai + horário de
         criação), com WM_CLOSE nas janelas desses PIDs. NUNCA força (sem taskkill): se o CapCut avisar que há tarefa
         em andamento, espera ela terminar (até `task_timeout`) e, se não terminar, deixa o CapCut aberto com aviso. Um

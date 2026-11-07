@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from app.integrations.capcut.draft import build_draft, delete_draft, register_dr
 from app.integrations.capcut.errors import CapCutBusy, CapCutCancelled, CapCutError, CapCutNotInstalled
 from app.integrations.capcut.finalize import (
     MSG_OUTPUT_WRITE,
+    discard_job_exports,
     discard_recorded_exports,
     export_problems,
     finalize_output,
@@ -29,7 +31,7 @@ from app.integrations.capcut.finalize import (
     unique_path,
 )
 from app.integrations.capcut.install import CapCutInstall
-from app.integrations.capcut.jobspec import CapCutJobSpec, CapCutResult
+from app.integrations.capcut.jobspec import USER_CAPCUT_NOTICE, CapCutJobSpec, CapCutResult
 from app.integrations.capcut.media import probe, run_tool, tool_path
 from app.integrations.capcut.style import (
     DEFAULT_HIGHLIGHT,
@@ -228,6 +230,9 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
     # Exportados de uma tentativa anterior deste job (falhou depois de exportar): apagados antes de exportar de novo.
     if discard_recorded_exports(work_dir, install.default_videos_dir):
         warnings.append("Um arquivo intermediário de uma tentativa anterior não pôde ser apagado.")
+    # Exportação que um CapCut órfão terminou depois de uma queda (não anotada): também é deste job (mesmo MT_...).
+    if discard_job_exports(install.default_videos_dir, spec.draft_name):
+        warnings.append("Um arquivo intermediário de uma tentativa anterior não pôde ser apagado.")
 
     draft_dir: Path | None = None
     controller: Any = None
@@ -295,6 +300,14 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
                     close_session()  # modo isolado: encerra a thread presa à área e fecha a área de trabalho
                 except Exception:  # noqa: BLE001
                     logger.warning("Job CapCut %s: falha ao fechar a área isolada", spec.job_id, exc_info=True)
+            if getattr(controller, "user_capcut_attempt", False) is True:
+                warnings.append(USER_CAPCUT_NOTICE)
+                pending = sys.exc_info()[1]
+                if pending is not None:
+                    try:
+                        pending.user_capcut_attempt = True  # o runner pausa a fila também em falha/cancelamento
+                    except Exception:  # noqa: BLE001
+                        pass
             target = getattr(controller, "export_target", None)
             if not success and target:
                 try:
@@ -302,6 +315,14 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
                 except Exception:  # noqa: BLE001
                     logger.warning("Job CapCut %s: falha ao anotar o exportado", spec.job_id, exc_info=True)
         if not success:
+            # Cancelado/falhou: com o CapCut já fechado, o vídeo intermediário deste job (MT_...) é apagado agora,
+            # não só na próxima tentativa (um job cancelado e nunca retomado deixaria a sobra para sempre). Se ainda
+            # estiver preso, fica anotado em exports.json para a próxima tentativa.
+            try:
+                if not discard_job_exports(install.default_videos_dir, spec.draft_name):
+                    discard_recorded_exports(work_dir, install.default_videos_dir)
+            except Exception:  # noqa: BLE001 - limpeza não pode esconder o erro original
+                logger.warning("Job CapCut %s: falha ao apagar o intermediário", spec.job_id, exc_info=True)
             _prune_work_dir(work_dir)
         if draft_dir is not None and (not success or not spec.keep_draft):
             if success:

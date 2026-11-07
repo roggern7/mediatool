@@ -68,6 +68,22 @@ def _is_job_file(name: str, draft_name: str) -> bool:
             and name[len(draft_name):len(draft_name) + 1] in (".", "("))
 
 
+def discard_job_exports(videos_dir: Path | None, draft_name: str) -> list[str]:
+    """Apaga da pasta de vídeos do CapCut os arquivos exportados por tentativas ANTERIORES deste job (nome do rascunho
+    `MT_...` seguido de `.` ou `(`), ex. a exportação que um CapCut órfão terminou depois de uma queda do Media Tool.
+    Só arquivos diretos da pasta; nada fora do padrão do job é tocado. Devolve os que não puderam ser apagados."""
+    if not videos_dir or not Path(videos_dir).is_dir() or not draft_name.startswith("MT_"):
+        return []
+    left: list[str] = []
+    for item in Path(videos_dir).iterdir():
+        if item.is_file() and _is_job_file(item.name, draft_name):
+            try:
+                item.unlink()
+            except OSError:
+                left.append(item.name)
+    return left
+
+
 def record_export(work_dir: Path, draft_name: str, path: Path) -> None:
     """Anota em `<work_dir>/exports.json` um arquivo exportado pelo CapCut para este job (limpo depois)."""
     record = Path(work_dir) / EXPORTS_RECORD

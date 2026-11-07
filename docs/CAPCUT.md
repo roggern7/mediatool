@@ -436,6 +436,25 @@ teste se chamados; tudo na thread presa à área; recuperação de sobra; escolh
 pipeline) e `tests/test_capcut_export_mode.py` (configuração, status, registro do modo no job/prévia, avisos do
 design na API).
 
+## Queda, cancelamento e uso simultâneo (validado no real em 2026-11-07, instância de teste)
+
+- **Queda do Media Tool durante a exportação isolada:** o job volta para a fila sem gastar tentativa; na tentativa
+  seguinte, `isolated.recover_leftover` fecha com o fechamento seguro o CapCut órfão — só a ÁRVORE de processos de quem
+  tem janela na área `MediaToolCapCut`; se houver qualquer outro CapCut fora dessa árvore (ex. o do dono), nada é tocado
+  e o job espera (`capcut_busy`). Depois, `finalize.discard_job_exports` apaga da pasta de vídeos do CapCut só os
+  arquivos `MT_<job>...` desse job (ex. a exportação que o órfão terminou antes de fechar). Real: concluiu sem sobras.
+- **Cancelamento durante a exportação:** o fechamento seguro roda com o cancelamento desligado (`_closing`): se o
+  CapCut avisar "tarefa em andamento", espera a exportação terminar e fecha, sem forçar; em seguida o rascunho e o
+  vídeo intermediário do job são apagados (antes o cancelamento abortava o fechamento e deixava CapCut, rascunho e
+  vídeo sobrando). Real: cancelado em ~60 s com tudo limpo; "Tentar de novo" concluiu.
+- **CapCut do dono aberto antes:** jobs ficam em `waiting` (`capcut_busy`) sem gastar tentativa e sem tocar nele;
+  quando ele fecha, a fila roda um job por vez (real: 2 jobs em sequência).
+- **Dono abre o CapCut durante a exportação isolada:** o CapCut só abre uma vez; o pedido do dono vai para a
+  instância oculta da automação e NADA aparece para ele (verificado). A sessão isolada vigia processos `CapCut.exe`
+  fora da sua árvore criados depois do launch; ao detectar, o vídeo atual termina normalmente e a fila é PAUSADA com
+  o motivo (`queue.pause_reason`, mostrado na página), liberando o CapCut para o dono; ele retoma a fila quando
+  terminar. Limitação: a tentativa do dono durante aquele vídeo (até ~1–2 min) não abre nada; precisa abrir de novo.
+
 ## Limitações conhecidas
 
 - Formato e nomes de interface verificados só no CapCut 9.7.1.4203 em português; outra versão/idioma pode quebrar a

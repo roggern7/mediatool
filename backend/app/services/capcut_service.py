@@ -27,6 +27,7 @@ logger = logging.getLogger("media_tool.capcut")
 
 SETTINGS_KEY = "capcut"
 PAUSE_STATE_KEY = "capcut_queue_paused"
+PAUSE_REASON_KEY = "capcut_queue_pause_reason"
 BUILTIN_STYLE_ID = 0
 BUILTIN_STYLE_NAME = "Padrão (capcut-agent-skill)"
 DEFAULTS: dict[str, Any] = {
@@ -129,7 +130,7 @@ def core_status(ctx: AppContext) -> dict[str, Any]:
             reason = "Não foi possível ler o estado do CapCut."
     counts = repo(ctx).counts()
     queue = {**{key: counts[key] for key in ("pending", "running", "waiting", "failed", "completed", "cancelled")},
-             "paused": queue_paused(ctx)}
+             "paused": queue_paused(ctx), "pause_reason": ctx.app_settings.get_state(PAUSE_REASON_KEY)}
     settings = get_settings(ctx)
     return {**info, "available": available, "reason": None if available else reason, "queue": queue,
             "settings": settings, "export_mode": settings["export_mode"]}
@@ -226,8 +227,9 @@ def queue_paused(ctx: AppContext) -> bool:
     return ctx.app_settings.get_state(PAUSE_STATE_KEY) == "1"
 
 
-def set_queue_paused(ctx: AppContext, paused: bool) -> dict[str, bool]:
+def set_queue_paused(ctx: AppContext, paused: bool, reason: str | None = None) -> dict[str, bool]:
     ctx.app_settings.set_state(PAUSE_STATE_KEY, "1" if paused else None)
+    ctx.app_settings.set_state(PAUSE_REASON_KEY, reason if paused else None)
     if not paused:
         _wake(ctx)
     return {"paused": paused}
