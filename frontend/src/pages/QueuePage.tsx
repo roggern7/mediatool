@@ -1,10 +1,11 @@
 import { Fragment, useState } from "react";
+import { CalendarRange, ListOrdered } from "lucide-react";
 import { api, messageOf } from "../api/client";
 import { describeErrorCode } from "../api/errors";
 import type { Batch, Job, JobStatus, JobsPage } from "../api/types";
 import { BatchNotice } from "../components/BatchNotice";
 import { listingDroppedSuffix } from "../lib/batchState";
-import { Empty, ErrorLine, Pill, ProgressBar, SkeletonRows, Spinner, Thumb } from "../components/ui";
+import { Empty, ErrorLine, PageHeader, Pill, ProgressBar, SkeletonRows, Spinner, Thumb } from "../components/ui";
 import { formatCount, formatDateTime, formatDuration, formatPercent } from "../lib/format";
 import {
   ACTIVE_BATCH,
@@ -179,13 +180,15 @@ export function QueuePage() {
 
   return (
     <div className="page">
-      <div className="page-head">
-        <h1>Fila</h1>
-        <div className="row">
-          {jobs.loading && jobs.data ? <Spinner /> : null}
-          {jobs.data ? <span className="muted small">{formatCount(total)} jobs</span> : null}
-        </div>
-      </div>
+      <PageHeader
+        title="Fila"
+        subtitle={
+          <span className="row" style={{ gap: 8 }}>
+            {jobs.data ? `${formatCount(total)} jobs` : "Downloads e processamentos em andamento."}
+            {jobs.loading && jobs.data ? <Spinner /> : null}
+          </span>
+        }
+      />
 
       {batchId !== null ? (
         <BatchHeader
@@ -197,7 +200,7 @@ export function QueuePage() {
         />
       ) : null}
 
-      <div className="row" style={{ marginBottom: 10 }}>
+      <div className="row" style={{ marginBottom: 12 }}>
         <div className="seg" role="group" aria-label="Período">
           {PERIODS.map((p) => (
             <button
@@ -235,7 +238,7 @@ export function QueuePage() {
         ) : null}
       </div>
 
-      <div className="tabs" role="tablist">
+      <div className="tabs" role="tablist" aria-label="Status">
         {FILTERS.map((f) => (
           <button
             key={f.id}
@@ -264,183 +267,190 @@ export function QueuePage() {
         ))}
       </div>
 
-      {!range.ok ? (
-        <Empty title={range.message} />
-      ) : jobs.data === undefined ? (
-        jobs.error ? (
-          <ErrorLine message={jobs.error} onRetry={jobs.reload} />
+      <div className="section flush">
+        {!range.ok ? (
+          <Empty title={range.message} icon={CalendarRange} />
+        ) : jobs.data === undefined ? (
+          jobs.error ? (
+            <ErrorLine message={jobs.error} onRetry={jobs.reload} />
+          ) : (
+            <SkeletonRows rows={6} />
+          )
+        ) : items.length === 0 ? (
+          <Empty
+            title={
+              filter !== "all"
+                ? "Nenhum job neste filtro"
+                : period.period !== "all"
+                  ? "Nenhum job neste período"
+                  : batchId !== null
+                  ? "Nenhum job nesta importação"
+                  : "Fila vazia"
+            }
+            icon={ListOrdered}
+          >
+            {filter === "all" && period.period === "all" && batchId === null ? (
+              <span>Importações e processamentos aparecem aqui enquanto rodam.</span>
+            ) : null}
+          </Empty>
         ) : (
-          <SkeletonRows rows={6} />
-        )
-      ) : items.length === 0 ? (
-        <Empty
-          title={
-            filter !== "all"
-              ? "Nenhum job neste filtro"
-              : period.period !== "all"
-                ? "Nenhum job neste período"
-                : batchId !== null
-                ? "Nenhum job nesta importação"
-                : "Fila vazia"
-          }
-        />
-      ) : (
-        <>
-          {jobs.error ? <ErrorLine message={jobs.error} onRetry={jobs.reload} /> : null}
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th />
-                  <th>Origem</th>
-                  {downloadOnly ? null : <th>Preset</th>}
-                  <th>Status</th>
-                  <th>Etapa</th>
-                  <th>Progresso</th>
-                  <th>Tempo</th>
-                  <th>Tentativas</th>
-                  <th>Erro</th>
-                  <th className="actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {groupByDay(items, now).map((day) => (
-                  <Fragment key={`${day.key}:${day.items[0]?.id}`}>
-                    <tr className="day-row">
-                      <td colSpan={columns}>{day.label}</td>
-                    </tr>
-                    {day.items.map((job) => {
-                      const terminal = TERMINAL_JOB.has(job.status);
-                      const canRetry = job.status === "failed" || job.status === "cancelled";
-                      return (
-                        <tr key={job.id}>
-                          <td>
-                            <Thumb src={job.thumbnail_url} mediaType={job.media_type} size={34} />
-                          </td>
-                          <td className="cell-trunc" title={origin(job)}>
-                            <div className="truncate">{origin(job)}</div>
-                            <div className="dim small truncate">
-                              {jobKindLabel(job.kind)} · {formatDateTime(job.created_at)}
-                            </div>
-                          </td>
-                          {downloadOnly ? null : (
-                            <td
-                              className="muted cell-trunc"
-                              style={{ maxWidth: 140 }}
-                              title={job.preset_name ?? undefined}
-                            >
-                              {job.preset_name ?? "-"}
+          <>
+            {jobs.error ? <ErrorLine message={jobs.error} onRetry={jobs.reload} /> : null}
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th />
+                    <th>Origem</th>
+                    {downloadOnly ? null : <th>Preset</th>}
+                    <th>Status</th>
+                    <th>Etapa</th>
+                    <th>Progresso</th>
+                    <th>Tempo</th>
+                    <th>Tentativas</th>
+                    <th>Erro</th>
+                    <th className="actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupByDay(items, now).map((day) => (
+                    <Fragment key={`${day.key}:${day.items[0]?.id}`}>
+                      <tr className="day-row">
+                        <td colSpan={columns}>{day.label}</td>
+                      </tr>
+                      {day.items.map((job) => {
+                        const terminal = TERMINAL_JOB.has(job.status);
+                        const canRetry = job.status === "failed" || job.status === "cancelled";
+                        return (
+                          <tr key={job.id}>
+                            <td>
+                              <Thumb src={job.thumbnail_url} mediaType={job.media_type} size={34} />
                             </td>
-                          )}
-                          <td>
-                            <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
-                              <Pill tone={jobTone(job.status)}>{JOB_STATUS_LABEL[job.status]}</Pill>
-                              {showDuplicate(job) ? (
-                                <span
-                                  className="tag"
-                                  title={
-                                    job.duplicate_reason === "sha256"
-                                      ? "Arquivo idêntico já existe na biblioteca"
-                                      : "Mídia já importada antes"
-                                  }
-                                >
-                                  Já baixado antes
-                                </span>
+                            <td className="cell-trunc" title={origin(job)}>
+                              <div className="truncate">{origin(job)}</div>
+                              <div className="dim small truncate">
+                                {jobKindLabel(job.kind)} · {formatDateTime(job.created_at)}
+                              </div>
+                            </td>
+                            {downloadOnly ? null : (
+                              <td
+                                className="muted cell-trunc"
+                                style={{ maxWidth: 140 }}
+                                title={job.preset_name ?? undefined}
+                              >
+                                {job.preset_name ?? "-"}
+                              </td>
+                            )}
+                            <td>
+                              <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                                <Pill tone={jobTone(job.status)}>{JOB_STATUS_LABEL[job.status]}</Pill>
+                                {showDuplicate(job) ? (
+                                  <span
+                                    className="tag"
+                                    title={
+                                      job.duplicate_reason === "sha256"
+                                        ? "Arquivo idêntico já existe na biblioteca"
+                                        : "Mídia já importada antes"
+                                    }
+                                  >
+                                    Já baixado antes
+                                  </span>
+                                ) : null}
+                              </div>
+                            </td>
+                            <td className="muted nowrap">
+                              {job.stage ? JOB_STAGE_LABEL[job.stage] : "-"}
+                              {job.stage === "waiting_retry" && job.next_attempt_at ? (
+                                <div className="dim small">às {formatDateTime(job.next_attempt_at)}</div>
                               ) : null}
-                            </div>
-                          </td>
-                          <td className="muted nowrap">
-                            {job.stage ? JOB_STAGE_LABEL[job.stage] : "-"}
-                            {job.stage === "waiting_retry" && job.next_attempt_at ? (
-                              <div className="dim small">às {formatDateTime(job.next_attempt_at)}</div>
-                            ) : null}
-                          </td>
-                          <td className="nowrap">
-                            {job.progress !== null && !terminal ? (
-                              <>
-                                <ProgressBar value={job.progress} inline />
-                                <span className="muted small">{formatPercent(job.progress)}</span>
-                              </>
-                            ) : (
-                              <span className="dim">-</span>
-                            )}
-                          </td>
-                          <td className="muted nowrap">{formatDuration(job.elapsed_seconds)}</td>
-                          <td className="muted">
-                            {job.attempts}/{job.max_attempts}
-                          </td>
-                          <td className="cell-trunc">
-                            {job.error_code || job.error_message ? (
-                              <span
-                                className="tone-err small"
-                                title={describeErrorCode(job.error_code, job.error_message)}
-                              >
-                                {describeErrorCode(job.error_code, job.error_message)}
-                              </span>
-                            ) : (
-                              <span className="dim">-</span>
-                            )}
-                          </td>
-                          <td className="actions">
-                            {!terminal ? (
-                              <button
-                                type="button"
-                                className="btn btn-sm btn-ghost"
-                                disabled={busyId === job.id}
-                                onClick={() => void act(job, "cancel")}
-                              >
-                                Cancelar
-                              </button>
-                            ) : null}
-                            {canRetry ? (
-                              <button
-                                type="button"
-                                className="btn btn-sm"
-                                disabled={busyId === job.id}
-                                onClick={() => void act(job, "retry")}
-                              >
-                                Tentar novamente
-                              </button>
-                            ) : null}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {stack.length > 1 || next !== null ? (
-            <div className="row" style={{ marginTop: 10, justifyContent: "flex-end" }}>
-              <span className="muted small">
-                {formatCount(start + 1)} a {formatCount(start + items.length)} de {formatCount(total)}
-              </span>
-              {stack.length > 2 ? (
-                <button type="button" className="btn btn-sm btn-ghost" onClick={() => goTo(FIRST_PAGE)}>
-                  Primeira página
-                </button>
-              ) : null}
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={stack.length <= 1}
-                onClick={() => goTo(popPage(stack))}
-              >
-                Anterior
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={next === null}
-                onClick={() => goTo(pushPage(stack, next))}
-              >
-                Próxima
-              </button>
+                            </td>
+                            <td className="nowrap">
+                              {job.progress !== null && !terminal ? (
+                                <>
+                                  <ProgressBar value={job.progress} inline />
+                                  <span className="muted small">{formatPercent(job.progress)}</span>
+                                </>
+                              ) : (
+                                <span className="dim">-</span>
+                              )}
+                            </td>
+                            <td className="muted nowrap">{formatDuration(job.elapsed_seconds)}</td>
+                            <td className="muted">
+                              {job.attempts}/{job.max_attempts}
+                            </td>
+                            <td className="cell-trunc">
+                              {job.error_code || job.error_message ? (
+                                <span
+                                  className="tone-err small"
+                                  title={describeErrorCode(job.error_code, job.error_message)}
+                                >
+                                  {describeErrorCode(job.error_code, job.error_message)}
+                                </span>
+                              ) : (
+                                <span className="dim">-</span>
+                              )}
+                            </td>
+                            <td className="actions">
+                              {!terminal ? (
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-ghost"
+                                  disabled={busyId === job.id}
+                                  onClick={() => void act(job, "cancel")}
+                                >
+                                  Cancelar
+                                </button>
+                              ) : null}
+                              {canRetry ? (
+                                <button
+                                  type="button"
+                                  className="btn btn-sm"
+                                  disabled={busyId === job.id}
+                                  onClick={() => void act(job, "retry")}
+                                >
+                                  Tentar novamente
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          ) : null}
-        </>
-      )}
+            {stack.length > 1 || next !== null ? (
+              <div className="row" style={{ marginTop: 10, justifyContent: "flex-end" }}>
+                <span className="muted small">
+                  {formatCount(start + 1)} a {formatCount(start + items.length)} de {formatCount(total)}
+                </span>
+                {stack.length > 2 ? (
+                  <button type="button" className="btn btn-sm btn-ghost" onClick={() => goTo(FIRST_PAGE)}>
+                    Primeira página
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={stack.length <= 1}
+                  onClick={() => goTo(popPage(stack))}
+                >
+                  Anterior
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={next === null}
+                  onClick={() => goTo(pushPage(stack, next))}
+                >
+                  Próxima
+                </button>
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -467,10 +477,10 @@ function BatchHeader({
   onClear: () => void;
 }) {
   return (
-    <div className="panel" style={{ marginBottom: 14 }}>
+    <div className="panel" style={{ marginBottom: 16 }}>
       <div className="row between">
         <div className="row">
-          <strong style={{ fontSize: 14 }}>{batch ? batchTitle(batch) : `Importação ${batchId}`}</strong>
+          <strong style={{ fontSize: 15 }}>{batch ? batchTitle(batch) : `Importação ${batchId}`}</strong>
           {batch ? <Pill tone={batchToneOf(batch)}>{batchLabel(batch)}</Pill> : null}
           {batch && ACTIVE_BATCH.has(batch.status) && !isQueuedInGroup(batch) ? <Spinner /> : null}
         </div>

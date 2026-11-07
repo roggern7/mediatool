@@ -1,8 +1,8 @@
-# Legendas CapCut — núcleo técnico
+# Edição CapCut: núcleo técnico
 
 Este documento descreve o pacote `backend/app/integrations/capcut/` (o "núcleo"): como um vídeo vira um rascunho do
 CapCut Desktop com legendas, como o Media Tool exporta esse rascunho pela interface do CapCut e quais são os limites.
-A fila, a API e a tela ficam em outros módulos (ver `docs/CONTRACTS.md`, seção "Legendas CapCut").
+A fila, a API e a tela ficam em outros módulos (ver `docs/CONTRACTS.md`, seção 8.9 "Edição CapCut").
 
 Verificado nesta máquina com o **CapCut Desktop 9.7.1.4203 (Windows 11, interface em português)** em 2026-11-07.
 Outras versões podem mudar o formato do rascunho ou os nomes da interface.
@@ -231,7 +231,7 @@ livre, trava de clique, fechamento seguro, limpeza do rascunho); com recorte:
 FFmpeg decodifica para PCM float32 16 kHz mono (o decodificador PyAV do faster-whisper falha com o av 19:
 `open() got an unexpected keyword argument 'metadata_errors'`). faster-whisper com `language='pt'`,
 `word_timestamps=True`, `vad_filter=True`, `condition_on_previous_text=False`, `beam_size=5`, CPU `int8`. Modelos
-`small`, `medium`, `large-v3-turbo` (padrão), baixados no 1º uso para `<data_dir>/models/whisper` (cache do
+`large-v3` (padrão), `large-v3-turbo`, `medium`, `small` (ver "Fidelidade das legendas"), baixados no 1º uso para `<data_dir>/models/whisper` (cache do
 Hugging Face); um modelo carregado por tamanho fica em memória (`release_models()` libera). Cancelamento entre
 segmentos. Sem fala: o job termina com cópia do original, sem legendas, e um aviso.
 
@@ -239,7 +239,50 @@ segmentos. Sem fala: o job termina com cópia do original, sem legendas, e um av
 >= 180 ms e depois de `.`, `!`, `?`, `…`; ao estourar o limite, prefere quebrar depois de `,`/`;`/`:` e não deixa
 preposição/artigo curto (de, da, do, das, dos, a, o, as, os, e, em, no, na, com, pra, para, que, um, uma) sozinho no
 fim do bloco; fim = última palavra + 50 ms, nunca além de (próximo - 20 ms); duração mínima 300 ms sem invadir o
-próximo; texto com espaços simples.
+próximo; texto com espaços simples. Bloco com menos de 350 ms de fala pisca na tela (verificado: "Ei," ficava 0,07 s): o corte na vírgula não deixa para trás bloco tão curto, e um bloco curto se junta ao vizinho quando cabe nos limites configurados (palavras e caracteres), sem atravessar fim de frase nem pausa longa.
+
+## Fidelidade das legendas
+
+**Causa verificada** (2026-11-07, Reel com diálogo rápido, duas vozes e ruído): as legendas saíam diferentes do que
+é falado. Na janela de 30 s o Whisper completa o que ouve com o contexto: inventou "Esse é o meu laranjinha" (repetição
+de uma frase posterior) espremido em 0,36 s, com 4 palavras de duração zero, e trocou palavras ("Gerson" por "mesmo").
+Os tempos das palavras ficam presos ao fim do segmento (palavras amontoadas no mesmo instante). Retranscrever o trecho
+sozinho consertou uns erros e criou outros: nenhuma configuração automática é confiável nesse tipo de áudio. Por isso
+o trecho duvidoso não é reescrito às cegas; ele vai marcado para o dono revisar.
+
+**Alinhamento forçado** (`integrations/capcut/align.py`): wav2vec2 XLSR-53 em português (CTC, licença Apache-2.0)
+exportado para ONNX e rodado com `onnxruntime` na CPU, em `<data_dir>/models/aligner/wav2vec2-xlsr-53-pt`
+(`model.onnx` + `vocab.json`). Dado o texto, acha onde cada palavra está no áudio (Viterbi sobre as letras). Na
+transcrição, o tempo de cada palavra vem do alinhador quando a nota acústica é boa; senão fica o do Whisper,
+consertado (ordem crescente, sem duração zero, amontoadas redistribuídas pelas sílabas). Sem o modelo instalado, só o
+conserto; o status (`GET /api/capcut/status`) informa `aligner`.
+
+**Marcações de dúvida** (`transcribe.mark_doubts`): cada palavra leva `seg` (a frase do Whisper, unidade da revisão)
+e `doubt`. A frase inteira fica duvidosa quando tem 2+ palavras de duração ~0, ritmo impossível (mais de 9 sílabas por
+segundo) ou confiança média abaixo de 0,60; fora isso, só a palavra com confiança abaixo de 0,6. Transcrições antigas
+(sem `seg`/`doubt`) continuam válidas: tudo na frase 0, sem dúvidas.
+
+**Revisão e realinhamento**: configuração `review_mode` (`doubtful` padrão, "Só quando houver trechos duvidosos";
+`always`, "Sempre"; `never`, "Nunca, exportar direto"), no instantâneo do job e sobrescrevível no lote; job antigo sem
+a chave = `never`. Num job com legenda (`caption`/`edit_caption`) ainda não aprovado, o executor primeiro só transcreve
+(`transcribe_only`, sem CapCut). Com `always`, ou `doubtful` e alguma palavra com `doubt`, o job para em
+`waiting`/`wait_reason='review'` ("Aguardando revisão das legendas") sem gastar a tentativa e o executor não o pega
+até a aprovação; sem necessidade, segue direto para o CapCut com a transcrição já pronta. A revisão é etapa do dono,
+não falha: não conta tentativa nem dispara nova tentativa; sobrevive ao reinício; cancelar funciona como em qualquer
+job na fila. Na tela "Revisar legendas" o dono ouve cada frase (▶ toca só o trecho, do arquivo exato que foi
+transcrito), corrige o texto e aprova. Cada frase alterada é separada em palavras e realinhada no áudio dentro da
+janela [início da frase - 0,15 s (nunca antes do fim da frase anterior), início da próxima frase (a última: fim + 0,6
+s, limitado à duração)] por `align_text`: alinhamento forçado quando o modelo existe; senão as palavras são repartidas
+pelas sílabas. Texto vazio remove a frase. Todas as dúvidas são limpas, `options.review = {approved, at, edited}` é
+gravado e o job volta para a fila.
+
+**Fonte da transcrição**: ao gravar a transcrição, `options.transcript_source = {path, size, mtime_ns}` do arquivo
+transcrito (original da mídia ou rendition da edição). Ao rodar, se a fonte atual for outra (edição refeita, arquivo
+trocado), a transcrição e a aprovação são descartadas e o vídeo é transcrito de novo: legenda de um arquivo nunca vai
+para outro.
+
+**Modelos**: `large-v3` é o padrão ("Máxima precisão", ~3 GB, mais lento); `large-v3-turbo` ("Rápido", ~1,6 GB),
+`medium` ("Equilibrado") e `small` ("Mais rápido") continuam como opção nas configurações.
 
 ## Automação da interface (UI Automation)
 
@@ -330,7 +373,7 @@ usa `WM_CLOSE` (sem mouse).
 
 ## Modo de exportação isolado
 
-Configuração `export_mode` (Legendas CapCut > Configurações): `isolated` (padrão) ou `interactive` (a automação de
+Configuração `export_mode` (Edição CapCut > Configurações avançadas): `isolated` (padrão) ou `interactive` (a automação de
 "Cliques com trava", preservada como alternativa). O modo é lido quando o job/prévia COMEÇA (não entra no instantâneo
 do job, para que trocar o modo valha na nova tentativa) e o modo usado fica gravado no job (`options.export_mode`,
 `export_mode` na API) e na prévia (`export_mode`). Código em `integrations/capcut/isolated.py`.
@@ -457,14 +500,16 @@ design na API).
 
 ## Lotes
 
-Pedido em massa da página Legendas CapCut (migration 0031; contrato em `docs/CONTRACTS.md` 8.9). Código:
+Pedido em massa da página Edição CapCut (`/edicao-capcut`; `/legendas` redireciona; migration 0031; contrato em
+`docs/CONTRACTS.md` 8.9). Código:
 `services/capcut_batch_service.py` (criação, apresentação, ações, ZIP, seletor), `db/repositories/capcut.py` (tabela
 `capcut_batches`, contagens e status derivado em SQL), `jobs/capcut_runner.py` (fonte editada e modo só edição). Não
 há fila paralela: o lote é um `capcut_batches` com um `capcut_jobs` por vídeo, na MESMA fila e no MESMO executor dos
 jobs avulsos (um por vez, ordem por id, então os jobs de um lote ficam contíguos). Jobs antigos e os criados por
 `POST /jobs`, "Legendar no CapCut" da Biblioteca e o automático após o download continuam `mode = caption`, sem lote.
 
-Modos (`mode` do lote e de cada job):
+Modos (`mode` do lote e de cada job; na página: Legendar = `caption`, Editar = `edit`, Editar e legendar =
+`edit_caption`):
 
 - `caption`: só legendas, fonte = original da mídia (igual ao job avulso).
 - `edit_caption`: na criação, UM lote `batches` de edição (mesma forma do `edit_service.start`: `source = library`,
@@ -548,7 +593,24 @@ Recuperação: o lote, o instantâneo e o vínculo `edit_job_id` estão no banco
 gravado, jobs ainda abertos): no startup os jobs abertos desse lote terminam `cancelled` (no startup nada está
 rodando, então isso vale também para o que estava `running`); "Reprocessar falhas" limpa o cancelamento do lote.
 
-Testes: `tests/test_capcut_batches.py` (processador do CapCut falso e worker com o processor falso) e
+Lista do seletor ("Limpar lista", sem migração): a visão fica em `app_state`, chave `capcut_library_view`, JSON
+`{"cleared_before_id": int|null, "hidden": [ids], "shown": [ids]}`. Um vídeo é visível quando (`cleared_before_id`
+é null OU `id > cleared_before_id` OU id em `shown`) E id fora de `hidden`. Vale para `GET /library` (itens e
+`total`) e para o `filter` do lote ("todos os filtrados"); `media_ids` explícitos NÃO passam pela visão. `POST
+/library/clear` sem `media_ids` grava `cleared_before_id` = maior id de mídia existente e zera as listas (os novos
+downloads e envios têm id maior e continuam aparecendo); com ids, eles entram em `hidden` e saem de `shown`. `POST
+/library/show` faz o contrário (entram em `shown`, saem de `hidden`): a página chama para o envio do computador que
+volta como duplicata de um vídeo antigo que saiu da lista. `POST /library/restore` apaga a chave (tudo volta). As
+listas não repetem ids e guardam no máximo 20.000 (acima disso ficam os mais recentes); a consulta usa `json_each`
+(sem um parâmetro por id). Valor ausente ou inválido = visão vazia. Nada disso apaga mídia: a caixa "Também apagar
+os arquivos da biblioteca" da confirmação usa a exclusão comum (`POST /api/media/delete`, até 500 ids por pedido,
+então a página manda em blocos). Antes de limpar, a página lê a lista visível inteira (para "Limpar lista" apagar só
+o que estava visível e para saber quem tem job do CapCut aberto); vídeos com job do CapCut aberto não são enviados
+para exclusão. A exclusão comum só pula mídia com job do worker em andamento ou exportação aberta (não olha os jobs do
+CapCut), por isso o filtro fica na página.
+
+Testes: `tests/test_capcut_library_view.py` (visão da lista do seletor), `tests/test_capcut_batches.py` (processador
+do CapCut falso e worker com o processor falso) e
 `tests/test_capcut_batches_real.py` (modo só edição com FFmpeg real e vídeo sintético: duração com corte no início,
 velocidade e limite).
 

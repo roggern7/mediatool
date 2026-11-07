@@ -39,9 +39,12 @@ DEFAULTS: dict[str, Any] = {
     "highlight_color": None,      # None = cor do modelo ou amarelo
     "max_words": 3,
     "max_chars": 24,
-    "whisper_model": "large-v3-turbo",
+    "whisper_model": "large-v3",  # máxima precisão (docs/CAPCUT.md, "Fidelidade das legendas"); turbo é opção
     "keep_original_audio": True,
     "keep_draft": False,
+    # Revisão das legendas antes de exportar: 'doubtful' (só com trechos duvidosos), 'always' ou 'never'. Vai no
+    # instantâneo do job; job antigo sem a chave = 'never'.
+    "review_mode": "doubtful",
     "auto_after_download": False,
     "max_attempts": 3,
     "default_style_id": None,     # None = estilo embutido
@@ -52,17 +55,18 @@ DEFAULTS: dict[str, Any] = {
 EXPORT_MODES = ("isolated", "interactive")
 # Campos copiados para o job na criação (instantâneo: mudar as configurações depois não altera o job).
 OPTION_KEYS = ("output_dir", "resolution", "bitrate", "fps", "highlight", "highlight_color", "max_words", "max_chars",
-               "whisper_model", "keep_original_audio", "keep_draft")
+               "whisper_model", "keep_original_audio", "keep_draft", "review_mode")
 _NULLABLE = frozenset({"output_dir", "highlight_color", "default_style_id"})
 _UNAVAILABLE_STATUS: dict[str, Any] = {
     "installed": False, "version": None, "drafts_dir": None, "running_pids": [],
     "deps": {"faster_whisper": False, "uiautomation": False, "pywin32": False},
     "skill": {"installed": False, "path": "", "commit": None},
-    "models": {"small": False, "medium": False, "large-v3-turbo": False},
+    "models": {"small": False, "medium": False, "large-v3-turbo": False, "large-v3": False},
+    "aligner": False,
     "isolated": {"available": False, "reason": None},
 }
 _OPEN_ERROR_STATUS = {"not_found": 404, "not_allowed": 403, "invalid_target": 422, "unsupported": 501}
-MSG_UNAVAILABLE = ("Os componentes das Legendas CapCut não estão instalados neste computador"
+MSG_UNAVAILABLE = ("Os componentes da Edição CapCut não estão instalados neste computador"
                    " (veja docs/CAPCUT.md).")
 # Serializa "conferir job aberto da mídia -> criar" entre requisições e o enfileiramento automático.
 _create_lock = threading.Lock()
@@ -122,6 +126,7 @@ def core_status(ctx: AppContext) -> dict[str, Any]:
             info["isolated"] = {"available": bool(isolated.get("available")), "reason": isolated.get("reason")}
             info["running_pids"] = [int(pid) for pid in info["running_pids"] or []]
             info["installed"] = bool(info["installed"])
+            info["aligner"] = bool(info["aligner"])
             available = True
         except Exception:  # noqa: BLE001 - status é só leitura; uma falha não derruba a tela
             logger.warning("Legendas CapCut: falha ao ler o status do núcleo", exc_info=True)
@@ -129,7 +134,8 @@ def core_status(ctx: AppContext) -> dict[str, Any]:
                     for key, value in _UNAVAILABLE_STATUS.items()}
             reason = "Não foi possível ler o estado do CapCut."
     counts = repo(ctx).counts()
-    queue = {**{key: counts[key] for key in ("pending", "running", "waiting", "failed", "completed", "cancelled")},
+    queue = {**{key: counts[key] for key in ("pending", "running", "waiting", "failed", "completed", "cancelled",
+                                             "review")},
              "paused": queue_paused(ctx), "pause_reason": ctx.app_settings.get_state(PAUSE_REASON_KEY),
              "held": repo(ctx).held_count()}
     settings = get_settings(ctx)
@@ -552,6 +558,7 @@ def enqueue_after_download(ctx: AppContext, media_id: int, batch_id: int | None)
 
 
 EDIT_DONE_STATUSES = ("completed", "failed", "cancelled")   # estados finais da tabela `jobs`
+REVIEW_WAIT_REASON = "review"   # job parado na revisão das legendas (docs/CAPCUT.md, "Fidelidade das legendas")
 MSG_EDITING = "Editando"
 
 
@@ -589,6 +596,8 @@ def job_out(job: dict[str, Any]) -> dict[str, Any]:
         "edit_job_id": job.get("edit_job_id"),
         "edit_status": edit_status,
         "edit_progress": edit_progress,
+        "needs_review": job["status"] == "waiting" and job["wait_reason"] == REVIEW_WAIT_REASON,
+        "doubt_count": int(job.get("doubt_count") or 0),
     }
 
 

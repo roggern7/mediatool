@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../../api/client";
+import { api, messageOf } from "../../api/client";
 import type { CapCutBatchFilter, CapCutCaptioned, CapCutLibraryItem } from "../../api/types";
 import {
   type BatchSelection,
@@ -20,7 +20,16 @@ import { mediaName } from "../../lib/editSettings";
 import { formatCount, formatDate, formatDuration } from "../../lib/format";
 import { useDebounced } from "../../lib/useDebounced";
 import { useQuery } from "../../lib/useQuery";
-import { Empty, ErrorLine, Pill, SkeletonRows } from "../ui";
+import {
+  CLEAR_CONFIRM_TEXT,
+  DELETE_FILES_LABEL,
+  type ClearTarget,
+  clearLibrary,
+  clearSummary,
+  clearTone,
+  viewHasHidden,
+} from "../../lib/capcutLibraryView";
+import { ConfirmDialog, Empty, ErrorLine, Pill, SkeletonRows } from "../ui";
 import { VideoThumb } from "../edit/VideoThumb";
 
 const PAGE_SIZE = 50;
@@ -28,7 +37,8 @@ const PAGE_SIZE = 50;
 /**
  * Vídeos originais da biblioteca (GET /api/capcut/library) com busca, perfil, pasta do Editar e "Já legendados".
  * Lista ou grade com miniatura; "Legendado (n)" nos já processados. Marca um a um, a página inteira ou "todos os N
- * filtrados" (vai como `filter` no pedido). Mudar um filtro desfaz o "todos os filtrados".
+ * filtrados" (vai como `filter` no pedido). Mudar um filtro desfaz o "todos os filtrados". "Limpar lista" e "Tirar
+ * selecionados da lista" mudam só a visão desta lista (nada é apagado, a menos que a caixa de apagar seja marcada).
  */
 export function BatchVideoPicker({
   selection,
@@ -53,8 +63,16 @@ export function BatchVideoPicker({
   const stack = pages.scope === filterKey ? pages.stack : [null];
   const cursor = stack[stack.length - 1] ?? null;
 
-  const folders = useQuery(`edit-folders:${version}`, () => api.listEditFolders());
-  const list = useQuery(`capcut-library:${filterKey}:${cursor ?? ""}:${version}`, () =>
+  // Sobe quando a visão da lista muda ("Limpar lista", "Tirar selecionados", "Mostrar todos de novo").
+  const [viewVersion, setViewVersion] = useState(0);
+  const [confirm, setConfirm] = useState<ClearTarget | null>(null);
+  const [deleteFiles, setDeleteFiles] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [notice, setNotice] = useState<{ text: string; tone: "ok" | "warn" | "err" } | null>(null);
+
+  const folders = useQuery(`edit-folders:${version}:${viewVersion}`, () => api.listEditFolders());
+  const libraryView = useQuery(`capcut-library-view:${version}:${viewVersion}`, () => api.capcutLibraryView());
+  const list = useQuery(`capcut-library:${filterKey}:${cursor ?? ""}:${version}:${viewVersion}`, () =>
     api.capcutLibrary({ ...filter, limit: PAGE_SIZE, before_id: cursor ?? undefined }),
   );
   const items = list.data?.items ?? [];
@@ -79,6 +97,42 @@ export function BatchVideoPicker({
   function toggle(item: CapCutLibraryItem) {
     onChange(toggleOne(selection, item.id));
   }
+
+  function askClear(target: ClearTarget) {
+    setDeleteFiles(false);
+    setConfirm(target);
+  }
+
+  async function runClear() {
+    if (!confirm || clearing) return;
+    setClearing(true);
+    try {
+      const outcome = await clearLibrary(api, confirm, deleteFiles);
+      setNotice({ text: clearSummary(outcome), tone: clearTone(outcome) });
+      onChange(EMPTY_SELECTION);
+      setPages({ scope: "", stack: [null] });
+      setConfirm(null);
+    } catch (err) {
+      setNotice({ text: err instanceof Error ? err.message : messageOf(err), tone: "err" });
+      setConfirm(null);
+    } finally {
+      setClearing(false);
+      setViewVersion((v) => v + 1);
+    }
+  }
+
+  async function restoreView() {
+    try {
+      await api.restoreCapcutLibrary();
+      setNotice({ text: "Todos os vídeos voltaram para a lista.", tone: "ok" });
+    } catch (err) {
+      setNotice({ text: messageOf(err), tone: "err" });
+    } finally {
+      setViewVersion((v) => v + 1);
+    }
+  }
+
+  const selectedCount = selectionCount(selection);
 
   return (
     <div>
@@ -163,15 +217,75 @@ export function BatchVideoPicker({
           </button>
         ) : null}
         <span className="grow" />
+        {selectedCount > 0 ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={() => askClear({ kind: "selection", selection })}
+          >
+            Tirar selecionados da lista
+          </button>
+        ) : null}
         <button
           type="button"
-          className="btn btn-sm btn-ghost"
-          disabled={selectionCount(selection) === 0}
-          onClick={() => onChange(EMPTY_SELECTION)}
+          className="btn btn-sm"
+          disabled={list.data === undefined || (total === 0 && Object.keys(filter).length === 0)}
+          onClick={() => askClear({ kind: "all" })}
         >
-          Limpar seleção
+          Limpar lista
         </button>
       </div>
+
+      {viewHasHidden(libraryView.data) ? (
+        <p className="cc-view-line muted small">
+          <span>Vídeos antigos estão fora desta lista.</span>
+          <button type="button" className="link-btn" onClick={() => void restoreView()}>
+            Mostrar todos de novo
+          </button>
+        </p>
+      ) : null}
+      <div aria-live="polite">
+        {notice ? (
+          <div className={`alert${notice.tone === "ok" ? "" : ` ${notice.tone}`}`} style={{ marginBottom: 8 }}>
+            <span className="grow">{notice.text}</span>
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => setNotice(null)}>
+              Fechar
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {confirm ? (
+        <ConfirmDialog
+          title={confirm.kind === "all" ? "Limpar a lista?" : `Tirar ${videoCountText(selectedCount)} da lista?`}
+          confirmLabel={deleteFiles ? "Tirar e apagar" : confirm.kind === "all" ? "Limpar lista" : "Tirar da lista"}
+          danger={deleteFiles}
+          focusCancel={deleteFiles}
+          busy={clearing}
+          onConfirm={() => void runClear()}
+          onCancel={() => setConfirm(null)}
+        >
+          <p style={{ marginTop: 0 }}>
+            {confirm.kind === "all"
+              ? CLEAR_CONFIRM_TEXT
+              : "Os vídeos selecionados saem desta lista. Nada é apagado; novos downloads e envios continuam aparecendo."}
+          </p>
+          <label className="row" style={{ gap: 8, alignItems: "flex-start", color: "var(--text)" }}>
+            <input
+              type="checkbox"
+              checked={deleteFiles}
+              disabled={clearing}
+              onChange={(e) => setDeleteFiles(e.target.checked)}
+            />
+            <span>{DELETE_FILES_LABEL}</span>
+          </label>
+          {deleteFiles ? (
+            <p className="small" style={{ marginBottom: 0 }}>
+              Vídeos com job do CapCut aberto não são apagados.
+            </p>
+          ) : null}
+        </ConfirmDialog>
+      ) : null}
 
       {list.data === undefined ? (
         list.error ? (
@@ -180,7 +294,19 @@ export function BatchVideoPicker({
           <SkeletonRows rows={4} />
         )
       ) : items.length === 0 ? (
-        <Empty title={Object.keys(filter).length > 0 ? "Nenhum vídeo encontrado" : "Nenhum vídeo na biblioteca"} />
+        <Empty
+          title={
+            Object.keys(filter).length > 0
+              ? "Nenhum vídeo encontrado"
+              : viewHasHidden(libraryView.data)
+                ? "Lista limpa"
+                : "Nenhum vídeo na biblioteca"
+          }
+        >
+          {Object.keys(filter).length === 0 && viewHasHidden(libraryView.data) ? (
+            <span className="muted small">Novos downloads e envios do computador aparecem aqui.</span>
+          ) : null}
+        </Empty>
       ) : (
         <>
           {list.error ? <ErrorLine message={list.error} onRetry={list.reload} /> : null}

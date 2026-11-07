@@ -331,7 +331,7 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET | /api/health | | `{status:"ok", version, time}` |
 | GET | /api/diagnostics | | `Diagnostics` |
 | POST/GET | /api/profile-analyses | seção 8.8 | Análise de Perfis |
-| GET/PUT/POST/DELETE | /api/capcut/* | seção 8.9 | Legendas CapCut |
+| GET/PUT/POST/DELETE | /api/capcut/* | seção 8.9 | Edição CapCut |
 | GET | /api/presets | | `Preset[]` |
 | POST | /api/presets | `{name, params}` | `Preset` 201 |
 | GET/PUT/DELETE | /api/presets/{id} | PUT `{name?, params?}` | `Preset` / 204 (409 builtin) |
@@ -1760,7 +1760,7 @@ consultado (interrompida). Indisponível: Posts, Posts exato, Views, Reels somad
 com Data e Horário reais. Cancelado e Não consultado: no CSV/XLSX, "Não consultado" por coluna e Data/Horário vazios; no
 HTML, uma célula `colspan=4`, a pill de Status e uma célula `colspan=2`, todas com texto.
 
-### 8.9 Legendas CapCut
+### 8.9 Edição CapCut
 
 Migration **0029** (estritamente aditiva; reversão manual por `app.db.migrate.revert_migration` com
 `migrations/down/0029_capcut.down.sql`, nunca no startup). Rotas em `app/api/capcut.py`, regras em
@@ -1794,8 +1794,9 @@ Configurações: chave JSON `capcut` na tabela `settings` (rota própria, fora d
 (`null` = `<storage>/capcut`; caminho absoluto em disco local, sem UNC/rede, sem `..`, fora da raiz da unidade; criada ao
 salvar), `resolution` `original`|`480P`|`720P`|`1080P`|`2K`|`4K`, `bitrate` `low`|`recommended`|`high`, `fps`
 `60` (padrão)|`50`|`30`|`25`|`24`|`original`, `highlight` (true), `highlight_color` `#RRGGBB`|null, `max_words` 1..10 (3),
-`max_chars` 8..80 (24), `whisper_model` `small`|`medium`|`large-v3-turbo` (padrão), `keep_original_audio` (true),
-`keep_draft` (false), `auto_after_download` (false), `max_attempts` 1..10 (3), `default_style_id` (null = embutido),
+`max_chars` 8..80 (24), `whisper_model` `large-v3` (padrão)|`large-v3-turbo`|`medium`|`small`, `keep_original_audio`
+(true), `keep_draft` (false), `review_mode` `doubtful` (padrão)|`always`|`never` (revisão das legendas antes de
+exportar; vai no instantâneo do job e no `overrides` de jobs e lotes; job sem a chave = `never`), `auto_after_download` (false), `max_attempts` 1..10 (3), `default_style_id` (null = embutido),
 `export_mode` `isolated` (padrão: o CapCut roda numa área de trabalho separada, sem mouse/teclado/tela) |
 `interactive` (usa a tela e precisa do PC livre). `export_mode` NÃO entra no instantâneo do job: é lido quando o job
 ou a prévia começa (trocar o modo vale na nova tentativa) e o modo usado é gravado em `options.export_mode` do job
@@ -1804,7 +1805,8 @@ termina `failed` `isolated_unavailable` (não transitório). Detalhes em `docs/C
 Pausa da fila: `app_state.capcut_queue_paused = "1"`.
 
 Estados do job: `pending` (na fila; `next_attempt_at` = quando pode rodar) -> `running` -> `completed` | `failed` |
-`cancelled`; `waiting` = CapCut ocupado (`wait_reason: capcut_busy`) ou PC em uso (`wait_reason: desktop_busy`, só no modo `interactive`: teclado/mouse do dono nos últimos 15 s antes de abrir o CapCut, ou foco tomado pelo dono durante a automação; nova checagem a cada 60 s, sem gastar tentativa). Etapas (`stage`): `transcribing` (0-35%),
+`cancelled`; `waiting` = aguardando a revisão das legendas (`wait_reason: review`, `next_attempt_at` null; o executor
+nunca pega; não conta tentativa; sai só pela aprovação ou pelo cancelamento), CapCut ocupado (`wait_reason: capcut_busy`) ou PC em uso (`wait_reason: desktop_busy`, só no modo `interactive`: teclado/mouse do dono nos últimos 15 s antes de abrir o CapCut, ou foco tomado pelo dono durante a automação; nova checagem a cada 60 s, sem gastar tentativa). Etapas (`stage`): `transcribing` (0-35%),
 `drafting` (35-40), `waiting_capcut`/`launching`/`opening` (40-50), `exporting` (50-90), `finalizing` (90-98),
 `cleaning` (98-100); `progress` é o agregado 0..100.
 
@@ -1834,19 +1836,27 @@ em `docs/CAPCUT.md`, "Lotes"; serviço `app/services/capcut_batch_service.py`): 
 (`ON DELETE SET NULL`; `batch_id` continua sendo o lote de download do automático), `mode` (padrão `caption`),
 `edit_job_id` (jobs.id da edição) e `held` (pausa individual). Jobs existentes: `caption`, sem lote, sem pausa. O
 executor só pega job sem `held`, de lote não pausado e sem cancelamento pedido, e com a edição em estado final. Status
-derivado do lote: `running`|`paused`|`completed`|`completed_with_errors`|`cancelled`.
+derivado do lote: `running`|`paused`|`review` (nenhum job em andamento nem na fila, algum aguardando revisão; não conta
+como concluído)|`completed`|`completed_with_errors`|`cancelled`.
 
 `Batch` = `{id, name, mode, status, paused, cancel_requested, created_at, finished_at, output_dir, output_exists,
-counts: {total, pending, running, waiting, held, completed, failed, cancelled} (pending/waiting sem os `held`),
+counts: {total, pending, running, waiting, held, completed, failed, cancelled, review} (pending/waiting sem os `held`;
+`review` = aguardando a revisão das legendas, fora de `waiting`/`held`),
 progress 0..100 (média dos jobs, concluído = 100), per_video_seconds, eta_seconds, elapsed_seconds (desde a criação até
 o fim ou agora), current_job: Job|null (o job em execução), summary: {style_name, edit, resolution, fps, bitrate,
 keep_audio, highlight} (campos de legenda/exportação null no modo `edit`; `edit` ex.: "Meu preset · 30 s · 1,2x ·
 nitidez · início em 5 s"), options}`. `Job` ganha `capcut_batch_id`, `mode`, `held`, `edit_job_id`, `edit_status`
 (status do job de edição na tabela `jobs`) e `edit_progress` (0..100); enquanto espera a edição, `detail` = "Editando".
 
+Revisão das legendas (`docs/CAPCUT.md`, "Fidelidade das legendas"): `Job` ganha `needs_review` (status `waiting` com
+`wait_reason: review`) e `doubt_count` (frases com trecho duvidoso; calculado só no job em revisão, 0 nos demais).
+Palavras da transcrição: `{start, end, text, probability, seg, doubt}` (`seg`/`doubt` ausentes em transcrições antigas =
+0/false). `options.transcript_source = {path, size, mtime_ns}` identifica o arquivo transcrito; fonte diferente na
+hora de rodar descarta a transcrição e `options.review`.
+
 | Método | Caminho | Corpo / query | Resposta |
 |---|---|---|---|
-| GET | /api/capcut/status | | `{available, reason, installed, version, drafts_dir, running_pids, deps, skill, models, queue: {pending, running, waiting, failed, completed, cancelled, paused, pause_reason, held}, settings, export_mode, isolated: {available, reason}}` (`isolated` = pré-requisitos do modo isolado presentes; não cria a área de trabalho); sem o núcleo: 200 com `available: false` |
+| GET | /api/capcut/status | | `{available, reason, installed, version, drafts_dir, running_pids, deps, skill, models (inclui `large-v3`), aligner: bool (modelo do alinhamento forçado instalado), queue: {pending, running, waiting, failed, completed, cancelled, paused, pause_reason, held, review}, settings, export_mode, isolated: {available, reason}}` (`queue.waiting` sem os em revisão) (`isolated` = pré-requisitos do modo isolado presentes; não cria a área de trabalho); sem o núcleo: 200 com `available: false` |
 | GET/PUT | /api/capcut/settings | PUT: campos parciais (`null` = padrão; `export_mode` só `isolated`\|`interactive`) | `CapCutSettings` (+ `output_dir_is_default`, `export_mode`); 422 `invalid_output_dir`\|`validation_error`; 404 `style_not_found` |
 | GET | /api/capcut/drafts | | `[{name, modified_at, text_segments, preview}]`; 409 `capcut_unavailable` ou o `code` do núcleo |
 | GET | /api/capcut/styles | | `[{id, name, builtin, is_default, source_draft, summary, created_at, design}]` (id 0 = embutido, sempre primeiro, com o `design` equivalente como ponto de partida do editor; `design` null nos copiados de rascunho) |
@@ -1861,17 +1871,24 @@ nitidez · início em 5 s"), options}`. `Job` ganha `capcut_batch_id`, `mode`, `
 | GET | /api/capcut/previews/{id}/file | | o MP4 720P da prévia; 404 `preview_not_found`\|`preview_file_not_found` |
 | POST | /api/capcut/previews/{id}/cancel | | `Preview` (na fila: cancelada na hora; em execução: o núcleo é sinalizado) |
 | POST | /api/capcut/styles/{id}/default | id 0 = embutido | `Style[]`; 404 `style_not_found` |
-| GET | /api/capcut/jobs | `status?`, `media_id?`, `limit` 1..200 (50), `offset` | `{items: Job[], total, counts}` (id DESC; nome do arquivo e miniatura da mídia) |
+| GET | /api/capcut/jobs | `status?`, `media_id?`, `limit` 1..200 (50), `offset` | `{items: Job[], total, counts}` (id DESC; nome do arquivo e miniatura da mídia; `counts.review` = em revisão, fora de `counts.waiting`) |
 | POST | /api/capcut/jobs | `{media_ids: id[] (1..500), style_id?: int (0 = embutido), overrides?: {resolution, bitrate, fps, highlight, highlight_color, max_words, max_chars, whisper_model, keep_original_audio, keep_draft, output_dir}}` | 202 `{created: Job[], skipped: [{media_id, reason: media_not_found\|not_video\|cover\|already_queued}]}`; `origin` `manual` com `X-Media-Tool-Client: panel`, senão `api`; 404 `style_not_found`; 422 `invalid_output_dir` |
 | GET | /api/capcut/jobs/{id} | | `Job`; 404 `capcut_job_not_found` |
 | DELETE | /api/capcut/jobs/{id} | | 204 (só encerrado; o arquivo de saída fica; a pasta de trabalho `<data_dir>/capcut/work/<id>` e os intermediários anotados do job são apagados); 409 `capcut_job_active` |
 | POST | /api/capcut/jobs/{id}/cancel | | `Job` |
 | POST | /api/capcut/jobs/{id}/retry | | `Job` (`failed`/`cancelled` -> `pending`, `attempts = 0`, transcrição mantida); 409 `capcut_job_not_retryable` |
+| GET | /api/capcut/jobs/{id}/review | | `{job: Job, duration, source_url, aligner, segments: [{index, start, end, text, doubt, words: [{text, start, end, doubt, probability}]}]}` (frases agrupadas por `seg`, na ordem); 404 `capcut_job_not_found`/`capcut_source_not_found`; 409 `capcut_no_transcript` |
+| GET | /api/capcut/jobs/{id}/source | | o arquivo exato que foi transcrito (`options.transcript_source.path`: original da mídia ou rendition da edição), para o player da revisão; só dentro do storage: 403 `not_allowed`; 404 `capcut_source_not_found` |
+| POST | /api/capcut/jobs/{id}/review | `{segments: [{index, text}]}` (só as frases alteradas; vazio = aprovar como está; texto vazio remove a frase) | `Job` (`pending`, `wait_reason` null; o executor é acordado). Cada frase alterada é realinhada no áudio da fonte dentro de [início - 0,15 s (não antes do fim da anterior), início da próxima (a última: fim + 0,6 s, limitado à duração)]; todas as palavras ficam com `doubt=false`; grava `options.review = {approved: true, at, edited}`. 409 `capcut_job_not_in_review` (fora de `waiting`/`review`), 409 `capcut_source_no_audio`; 422 `invalid_review_segment`. Exige `X-Media-Tool-Client` |
 | GET | /api/capcut/jobs/{id}/file | | o vídeo legendado (download); só arquivo dentro do `output_dir` do job: 403 `not_allowed`; 404 `capcut_output_not_found` |
 | POST | /api/capcut/jobs/{id}/reveal | | `{ok: true}`: abre o Explorer com o arquivo selecionado; mesmos erros do `file` e os de abrir no sistema |
 | POST | /api/capcut/queue/pause, /api/capcut/queue/resume | | `{paused}`; pausar não interrompe o job em andamento. `GET /status` traz `queue.pause_reason` quando a pausa foi automática (o dono tentou abrir o CapCut durante a exportação isolada); retomar limpa o motivo |
 | POST | /api/capcut/jobs/{id}/hold, /api/capcut/jobs/{id}/release | | `Job` (pausa individual; só `pending`/`waiting`); 409 `capcut_job_not_holdable` |
-| GET | /api/capcut/library | `q?`, `profile?`, `folder?` (chave de pasta do Editar), `captioned` `any`\|`yes`\|`no`, `limit` 1..200 (60), `before_id?` | `{items: [Media + capcut: {done, last_output_name, open}], total, next_before_id}`: só vídeos originais (sem capas), id DESC, keyset; `done`/`captioned` = jobs concluídos com legenda (`caption`/`edit_caption`); `open` = job aberto em qualquer modo |
+| GET | /api/capcut/library | `q?`, `profile?`, `folder?` (chave de pasta do Editar), `captioned` `any`\|`yes`\|`no`, `limit` 1..200 (60), `before_id?` | `{items: [Media + capcut: {done, last_output_name, open}], total, next_before_id}`: só vídeos originais (sem capas) visíveis na visão da lista (abaixo), id DESC, keyset; `done`/`captioned` = jobs concluídos com legenda (`caption`/`edit_caption`); `open` = job aberto em qualquer modo |
+| GET | /api/capcut/library/view | | `{cleared: bool, hidden_count: int}` (`cleared` = houve "Limpar lista"; `hidden_count` = vídeos tirados um a um) |
+| POST | /api/capcut/library/clear | `{media_ids?: id[] (1..20000)}` (corpo vazio ou `{}` = todos) | `{cleared, hidden_count}`. Sem ids: `cleared_before_id` = maior id de mídia existente, `hidden` e `shown` zerados (novos downloads e envios continuam aparecendo). Com ids: entram em `hidden` e saem de `shown`. Nada é apagado |
+| POST | /api/capcut/library/show | `{media_ids: id[] (1..20000)}` | `{cleared, hidden_count}`: os ids entram em `shown` e saem de `hidden` (envio do computador que voltou como duplicata de um vídeo que saiu da lista) |
+| POST | /api/capcut/library/restore | | `{cleared: false, hidden_count: 0}`: a visão zera e tudo volta |
 | GET | /api/capcut/estimate | `mode`, `count` (1) | `{per_video_seconds, total_seconds, samples}` (média dos últimos 20 concluídos do modo; sem histórico, null) |
 | POST | /api/capcut/batches | `{name?, mode, media_ids? (até 1000) \| filter? {q, profile, folder, captioned}, include_done? (false), caption?: {style_id?, overrides?: as do POST /jobs}, edit?: {preset_id?, duration_mode original\|15\|30\|60\|custom, custom_seconds?, start_seconds? 0..86400, speed 0,5..2, sharpen}}` (um de `media_ids`/`filter`) | 202 `{batch: Batch, skipped: [{media_id, reason: media_not_found\|not_video\|cover\|already_queued\|already_done}]}`; 404 `style_not_found`\|`preset_not_found`; 422 `edit_required`\|`edit_no_changes`\|`batch_empty` (nada gravado)\|`batch_too_large` (com a contagem)\|`invalid_output_dir`\|`validation_error` |
 | GET | /api/capcut/batches | `status?`, `mode?`, `q?` (nome), `limit` 1..200 (20), `offset` | `{items: Batch[], total}` (sem os removidos, id DESC) |
@@ -1883,6 +1900,8 @@ nitidez · início em 5 s"), options}`. `Job` ganha `capcut_batch_id`, `mode`, `
 | POST | /api/capcut/batches/{id}/reveal | | `{ok: true}`: abre a pasta do lote no Explorer; 404 `batch_folder_not_found` (nenhum vídeo terminou) e os erros de abrir no sistema |
 | GET | /api/capcut/batches/{id}/zip | | `lote-<id>.zip` (sem compressão) com os MP4 concluídos que existem (temporário em `<data_dir>/tmp/capcut-lote-*.zip`, apagado depois do envio, na falha e no startup); 404 `batch_no_results`; 507 `export_no_space` (mesma conta de espaço do ZIP da exportação) |
 | DELETE | /api/capcut/batches/{id} | | 204: some do histórico (os arquivos ficam); 409 `capcut_batch_active` com vídeo na fila ou em andamento |
+
+Visão da lista do seletor ("Limpar lista", sem migração): `app_state` `capcut_library_view` = JSON `{"cleared_before_id": int|null, "hidden": [ids], "shown": [ids]}`. Visível = (`cleared_before_id` null OU `id > cleared_before_id` OU id em `shown`) E id fora de `hidden`. Aplicada em `GET /library` (itens e `total`) e no `filter` do `POST /batches` ("todos os filtrados"); `media_ids` explícitos não passam pela visão. Listas sem ids repetidos, até 20.000 cada (acima disso ficam os mais recentes); valor ausente ou inválido = visão vazia. As mutações exigem `X-Media-Tool-Client` como as outras. Detalhes em `docs/CAPCUT.md`, "Lotes".
 
 ## 9. Processor (`media_processor`)
 

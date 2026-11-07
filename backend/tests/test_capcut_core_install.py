@@ -73,7 +73,8 @@ def test_status_shape_without_heavy_imports(tmp_path, monkeypatch):
     assert st["running_pids"] == []
     assert set(st["deps"]) == {"faster_whisper", "uiautomation", "pywin32"}
     assert st["skill"]["installed"] is True and st["skill"]["commit"] == "bd8b88f912ba1e6c4c17776881559c7151fd63ba"
-    assert st["models"] == {"small": True, "medium": False, "large-v3-turbo": False}
+    assert st["models"] == {"small": True, "medium": False, "large-v3-turbo": False,
+                           "large-v3": False}
     monkeypatch.setenv("MEDIA_TOOL_CAPCUT_ROOT", str(tmp_path / "nada"))
     st = capcut.status(tmp_path / "data")
     assert st["installed"] is False and st["version"] is None

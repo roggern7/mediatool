@@ -9,6 +9,7 @@ import type {
   CapCutJobsCreated,
   CapCutQueueCounts,
   CapCutResolution,
+  CapCutReviewMode,
   CapCutSettings,
   CapCutSettingsUpdate,
   CapCutStage,
@@ -54,9 +55,10 @@ export const CAPCUT_STAGE_RANGES: Record<CapCutStage, [number, number]> = {
 export const CAPCUT_ACTIVE: ReadonlySet<CapCutJobStatus> = new Set<CapCutJobStatus>(["pending", "running", "waiting"]);
 
 export const WHISPER_MODEL_SIZE: Record<CapCutWhisperModel, string> = {
-  small: "~500 MB",
-  medium: "~1,5 GB",
+  "large-v3": "~3 GB",
   "large-v3-turbo": "~1,6 GB",
+  medium: "~1,5 GB",
+  small: "~500 MB",
 };
 
 export function capcutTone(status: CapCutJobStatus): Tone {
@@ -103,8 +105,16 @@ export function isHeldJob(job: Pick<CapCutJob, "status" | "held">): boolean {
   return Boolean(job.held) && (job.status === "pending" || job.status === "waiting");
 }
 
-/** Status do job na lista: "Na fila · pausado" com pausa individual; senão o rótulo do status. */
-export function jobStatusText(job: Pick<CapCutJob, "status" | "held">): string {
+export const REVIEW_STATUS_LABEL = "Aguardando revisão";
+
+/** Job parado na revisão das legendas (waiting + wait_reason review). */
+export function needsReview(job: Pick<CapCutJob, "status" | "needs_review">): boolean {
+  return Boolean(job.needs_review) && job.status === "waiting";
+}
+
+/** Status do job na lista: "Aguardando revisão", "Na fila · pausado" com pausa individual ou o rótulo do status. */
+export function jobStatusText(job: Pick<CapCutJob, "status" | "held" | "needs_review">): string {
+  if (needsReview(job)) return REVIEW_STATUS_LABEL;
   const label = CAPCUT_STATUS_LABEL[job.status];
   return isHeldJob(job) ? `${label} · pausado` : label;
 }
@@ -116,9 +126,11 @@ export function jobStatusText(job: Pick<CapCutJob, "status" | "held">): string {
 export function queueSummaryText(q: CapCutQueueCounts): string {
   const held = q.held ?? 0;
   const pausedPart = held > 0 ? ` (${formatCount(held)} ${held === 1 ? "pausado" : "pausados"})` : "";
+  const review = q.review ?? 0;
+  const reviewPart = review > 0 ? `, ${formatCount(review)} aguardando revisão` : "";
   return (
     `Fila ${q.paused ? "pausada" : "ativa"}: ${formatCount(q.running)} em andamento, ${formatCount(q.pending)} na fila` +
-    `${pausedPart}, ${formatCount(q.waiting)} aguardando o CapCut, ${formatCount(q.failed)} com erro.`
+    `${pausedPart}, ${formatCount(q.waiting)} aguardando o CapCut${reviewPart}, ${formatCount(q.failed)} com erro.`
   );
 }
 
@@ -139,6 +151,7 @@ const SETTINGS_FIELDS = [
   "whisper_model",
   "keep_original_audio",
   "keep_draft",
+  "review_mode",
   "auto_after_download",
   "max_attempts",
   "export_mode",
@@ -284,7 +297,14 @@ export const CAPCUT_FPS_OPTIONS: { value: CapCutFps; label: string }[] = [
   { value: "original", label: "Igual ao original" },
 ];
 export const CAPCUT_WHISPER_MODELS: { value: CapCutWhisperModel; label: string }[] = [
-  { value: "small", label: "Rápido (small)" },
+  { value: "large-v3", label: "Máxima precisão (large-v3)" },
+  { value: "large-v3-turbo", label: "Rápido (large-v3-turbo)" },
   { value: "medium", label: "Equilibrado (medium)" },
-  { value: "large-v3-turbo", label: "Mais preciso (large-v3-turbo)" },
+  { value: "small", label: "Mais rápido (small)" },
+];
+/** Revisão das legendas antes de exportar (configurações e lote). */
+export const CAPCUT_REVIEW_MODES: { value: CapCutReviewMode; label: string }[] = [
+  { value: "doubtful", label: "Só quando houver trechos duvidosos" },
+  { value: "always", label: "Sempre" },
+  { value: "never", label: "Nunca, exportar direto" },
 ];

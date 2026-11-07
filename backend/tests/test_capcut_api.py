@@ -32,7 +32,7 @@ def test_status_without_core_is_unavailable_not_500(harness, no_core):
     assert body["available"] is False and body["installed"] is False and body["reason"]
     assert body["deps"] == {"faster_whisper": False, "uiautomation": False, "pywin32": False}
     assert body["queue"]["pending"] == 0 and body["queue"]["paused"] is False
-    assert body["settings"]["whisper_model"] == "large-v3-turbo"
+    assert body["settings"]["whisper_model"] == "large-v3"
 
 
 def test_status_with_core_and_core_failure(harness, core, monkeypatch):

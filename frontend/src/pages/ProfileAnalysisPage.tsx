@@ -1,8 +1,9 @@
 import { memo, useCallback, useDeferredValue, useId, useMemo, useState, type FormEvent, type MouseEvent } from "react";
+import { ScanSearch } from "lucide-react";
 import { api, messageOf } from "../api/client";
 import type { ProfileAnalysis, ProfileAnalysisItem } from "../api/types";
 import { Link } from "../components/Layout";
-import { ConfirmDialog, Empty, ErrorLine, Field, Pill, ProgressBar, SkeletonRows, Spinner } from "../components/ui";
+import { ConfirmDialog, Empty, ErrorLine, Field, PageHeader, Pill, ProgressBar, SkeletonRows, Spinner } from "../components/ui";
 import { formatCount } from "../lib/format";
 import {
   ANALYSIS_STATUS_LABEL,
@@ -118,9 +119,7 @@ export function ProfileAnalysisPage() {
 
   return (
     <div className="page">
-      <div className="page-head">
-        <h1>Análise de Perfis</h1>
-      </div>
+      <PageHeader title="Análise de Perfis" subtitle="Levante a situação e as views de uma lista de perfis, sem baixar mídia." />
       <InputCard onStarted={onStarted} />
       {currentId !== null ? (
         <AnalysisPanel
@@ -133,7 +132,7 @@ export function ProfileAnalysisPage() {
           }}
         />
       ) : null}
-      <section style={{ marginTop: 24 }}>
+      <section className="section" style={{ marginTop: 20 }}>
         <div className="section-head">
           <h2>Histórico</h2>
           {history.loading && history.data ? <Spinner /> : null}
@@ -154,7 +153,9 @@ export function ProfileAnalysisPage() {
             <SkeletonRows rows={3} />
           )
         ) : history.data.total === 0 ? (
-          <Empty title="Nenhuma análise ainda" />
+          <Empty title="Nenhuma análise ainda" icon={ScanSearch}>
+            <span>Cole os perfis acima e clique em Analisar.</span>
+          </Empty>
         ) : (
           <>
             <HistoryTable items={history.data.items} currentId={currentId} onDelete={setToDelete} />
@@ -297,7 +298,7 @@ function AnalysisPanel({ id, onChanged, onClose }: { id: number; onChanged: () =
 
   if (query.data === undefined) {
     return (
-      <div className="panel" style={{ marginTop: 14 }}>
+      <div className="panel" style={{ marginTop: 20 }}>
         {query.error ? <ErrorLine message={query.error} onRetry={query.reload} /> : <SkeletonRows rows={2} />}
       </div>
     );
@@ -311,10 +312,10 @@ function AnalysisPanel({ id, onChanged, onClose }: { id: number; onChanged: () =
   const ignored = ignoredText(analysis);
 
   return (
-    <div className="panel" style={{ marginTop: 14 }}>
+    <div className="panel" style={{ marginTop: 20 }}>
       <div className="row between">
         <div className="row">
-          <strong style={{ fontSize: 14 }}>Análise nº {analysis.id}</strong>
+          <strong style={{ fontSize: 15 }}>Análise nº {analysis.id}</strong>
           <Pill tone={analysisTone(analysis.status)}>{ANALYSIS_STATUS_LABEL[analysis.status]}</Pill>
         </div>
         <div className="row">

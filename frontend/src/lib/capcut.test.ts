@@ -35,6 +35,7 @@ const SETTINGS: CapCutSettings = {
   whisper_model: "large-v3-turbo",
   keep_original_audio: true,
   keep_draft: false,
+  review_mode: "doubtful",
   auto_after_download: false,
   max_attempts: 3,
   default_style_id: null,

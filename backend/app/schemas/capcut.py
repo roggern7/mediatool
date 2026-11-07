@@ -11,7 +11,9 @@ from app.schemas.media import MediaOut
 Resolution = Literal["original", "480P", "720P", "1080P", "2K", "4K"]
 Bitrate = Literal["low", "recommended", "high"]
 Fps = Literal["original", "24", "25", "30", "50", "60"]
-WhisperModel = Literal["small", "medium", "large-v3-turbo"]
+WhisperModel = Literal["small", "medium", "large-v3-turbo", "large-v3"]
+# Revisão das legendas antes de exportar (docs/CAPCUT.md, "Fidelidade das legendas").
+ReviewMode = Literal["doubtful", "always", "never"]
 JobStatus = Literal["pending", "running", "waiting", "completed", "failed", "cancelled"]
 Origin = Literal["manual", "auto", "api"]
 ExportMode = Literal["isolated", "interactive"]
@@ -22,7 +24,7 @@ MaxAttempts = Annotated[int, Field(strict=True, ge=1, le=10)]
 FolderText = Annotated[str, Field(max_length=1024)]
 MAX_JOB_MEDIA = 500
 CapCutMode = Literal["caption", "edit", "edit_caption"]
-BatchStatus = Literal["running", "paused", "completed", "completed_with_errors", "cancelled"]
+BatchStatus = Literal["running", "paused", "review", "completed", "completed_with_errors", "cancelled"]
 # Teto de vídeos por lote (o serviço responde 422 `batch_too_large`); o schema aceita mais para o erro ter a contagem.
 MAX_BATCH_MEDIA = 1000
 MAX_BATCH_IDS = 10_000
@@ -42,6 +44,7 @@ class CapCutOptionsPatch(StrictModel):
     whisper_model: WhisperModel | None = None
     keep_original_audio: bool | None = None
     keep_draft: bool | None = None
+    review_mode: ReviewMode | None = None
 
 
 class CapCutSettingsUpdate(CapCutOptionsPatch):
@@ -64,6 +67,7 @@ class CapCutSettingsOut(BaseModel):
     whisper_model: WhisperModel
     keep_original_audio: bool
     keep_draft: bool
+    review_mode: ReviewMode
     auto_after_download: bool
     max_attempts: int
     default_style_id: int | None
@@ -80,6 +84,7 @@ class QueueCounts(BaseModel):
     paused: bool
     pause_reason: str | None = None  # ex.: o dono tentou abrir o CapCut durante a exportação isolada
     held: int = 0                    # na fila com pausa individual (lotes)
+    review: int = 0                  # aguardando a revisão das legendas (status `waiting`, wait_reason `review`)
 
 
 class IsolatedModeInfo(BaseModel):
@@ -97,6 +102,7 @@ class CapCutStatusOut(BaseModel):
     deps: dict[str, bool]
     skill: dict[str, Any]
     models: dict[str, bool]
+    aligner: bool = False            # modelo do alinhamento forçado instalado (data/models/aligner)
     queue: QueueCounts
     settings: CapCutSettingsOut
     export_mode: ExportMode          # modo configurado (mesmo valor de settings.export_mode)
@@ -355,6 +361,9 @@ class JobOut(BaseModel):
     edit_job_id: int | None = None
     edit_status: str | None = None       # status do job `process` da edição (tabela `jobs`)
     edit_progress: int | None = None     # 0..100
+    # Revisão das legendas: o job espera o dono (status `waiting`, wait_reason `review`) e quantas frases têm dúvida.
+    needs_review: bool = False
+    doubt_count: int = 0
 
 
 class JobList(BaseModel):
@@ -434,6 +443,7 @@ class BatchCounts(BaseModel):
     completed: int
     failed: int
     cancelled: int
+    review: int = 0
 
 
 class BatchSummary(BaseModel):
@@ -504,3 +514,62 @@ class LibraryPage(BaseModel):
     items: list[LibraryItem]
     total: int
     next_before_id: int | None
+
+
+# ---- visão da lista do seletor ("Limpar lista"; docs/CAPCUT.md, "Lotes") ---------------------------------------------
+MAX_LIBRARY_VIEW_IDS = 20_000
+
+
+class LibraryClear(StrictModel):
+    """Sem `media_ids`: os vídeos atuais saem da lista. Com ids: só esses saem."""
+
+    media_ids: Annotated[list[PositiveId], Field(min_length=1, max_length=MAX_LIBRARY_VIEW_IDS)] | None = None
+
+
+class LibraryShow(StrictModel):
+    media_ids: Annotated[list[PositiveId], Field(min_length=1, max_length=MAX_LIBRARY_VIEW_IDS)]
+
+
+class LibraryViewOut(BaseModel):
+    cleared: bool        # houve "Limpar lista" (os vídeos até o maior id daquele momento saíram)
+    hidden_count: int    # vídeos tirados um a um ("Tirar selecionados da lista")
+
+
+# ---- revisão das legendas (docs/CAPCUT.md, "Fidelidade das legendas") ------------------------------------------------
+MAX_REVIEW_SEGMENTS = 20_000
+
+
+class ReviewWord(BaseModel):
+    text: str
+    start: float
+    end: float
+    doubt: bool
+    probability: float
+
+
+class ReviewSegment(BaseModel):
+    index: int
+    start: float
+    end: float
+    text: str
+    doubt: bool
+    words: list[ReviewWord]
+
+
+class ReviewOut(BaseModel):
+    job: JobOut
+    duration: float
+    source_url: str
+    aligner: bool
+    segments: list[ReviewSegment]
+
+
+class ReviewEdit(StrictModel):
+    index: Annotated[int, Field(strict=True, ge=0, le=10**9)]
+    text: Annotated[str, Field(max_length=2000)]
+
+
+class ReviewApprove(StrictModel):
+    """Só as frases alteradas (texto vazio remove a frase); lista vazia = aprovar como está."""
+
+    segments: Annotated[list[ReviewEdit], Field(max_length=MAX_REVIEW_SEGMENTS)] = Field(default_factory=list)

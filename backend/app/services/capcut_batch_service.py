@@ -1,6 +1,6 @@
 """Lotes das Legendas CapCut (docs/CAPCUT.md, "Lotes"): criação (por ids ou por filtro), apresentação com contagens,
-status derivado e estimativa, pausa/retomada, cancelamento, reprocessamento das falhas, ZIP, pasta e o seletor de
-vídeos da página.
+status derivado e estimativa, pausa/retomada, cancelamento, reprocessamento das falhas, ZIP, pasta, o seletor de
+vídeos da página e a visão da lista do seletor ("Limpar lista", sem apagar nada; `app_state`).
 
 Um lote é um `capcut_batches` com um `capcut_jobs` por vídeo, na mesma fila e no mesmo executor dos jobs avulsos
 (`app.jobs.capcut_runner`). Nos modos com edição, a edição é um lote `batches` comum de jobs `process` sem preset
@@ -8,7 +8,9 @@ Um lote é um `capcut_batches` com um `capcut_jobs` por vídeo, na mesma fila e 
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 import uuid
 import zipfile
 from datetime import UTC, datetime
@@ -62,6 +64,119 @@ def _scope(folder: str | None, captioned: str | None) -> tuple[str, list[Any]] |
     return (" AND ".join(clauses), params) if clauses else None
 
 
+# ---- visão da lista do seletor ("Limpar lista") --------------------------------------------------------------------
+LIBRARY_VIEW_KEY = "capcut_library_view"
+LIBRARY_VIEW_MAX_IDS = 20_000   # teto de `hidden` e de `shown` (sem repetir; acima dele ficam os mais recentes)
+_view_lock = threading.Lock()
+
+
+def _empty_view() -> dict[str, Any]:
+    return {"cleared_before_id": None, "hidden": [], "shown": []}
+
+
+def _id_list(value: Any) -> list[int]:
+    """Ids positivos sem repetir (vale a última ocorrência), no máximo LIBRARY_VIEW_MAX_IDS (os mais recentes)."""
+    if not isinstance(value, list):
+        return []
+    ids = [item for item in value if isinstance(item, int) and not isinstance(item, bool) and item > 0]
+    unique = list(reversed(dict.fromkeys(reversed(ids))))
+    return unique[-LIBRARY_VIEW_MAX_IDS:]
+
+
+def library_view(ctx: AppContext) -> dict[str, Any]:
+    """`{"cleared_before_id": int|None, "hidden": [ids], "shown": [ids]}`; valor ausente ou inválido = visão vazia."""
+    raw = ctx.app_settings.get_state(LIBRARY_VIEW_KEY)
+    if not raw:
+        return _empty_view()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return _empty_view()
+    if not isinstance(data, dict):
+        return _empty_view()
+    cleared = data.get("cleared_before_id")
+    valid = isinstance(cleared, int) and not isinstance(cleared, bool) and cleared > 0
+    return {"cleared_before_id": cleared if valid else None, "hidden": _id_list(data.get("hidden")),
+            "shown": _id_list(data.get("shown"))}
+
+
+def _save_view(ctx: AppContext, view: dict[str, Any]) -> None:
+    empty = view["cleared_before_id"] is None and not view["hidden"] and not view["shown"]
+    ctx.app_settings.set_state(LIBRARY_VIEW_KEY, None if empty else json.dumps(view, separators=(",", ":")))
+
+
+def view_summary(view: dict[str, Any]) -> dict[str, Any]:
+    return {"cleared": view["cleared_before_id"] is not None, "hidden_count": len(view["hidden"])}
+
+
+def _visible_scope(view: dict[str, Any]) -> tuple[str, list[Any]] | None:
+    """Condição (sobre `media m`) dos vídeos visíveis: (sem limpeza OU id > cleared_before_id OU id em shown) E id fora
+    de hidden. As listas vão como JSON para `json_each` (sem um parâmetro por id)."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    cleared = view["cleared_before_id"]
+    if cleared is not None:
+        if view["shown"]:
+            clauses.append("(m.id > ? OR m.id IN (SELECT value FROM json_each(?)))")
+            params.extend([cleared, json.dumps(view["shown"])])
+        else:
+            clauses.append("m.id > ?")
+            params.append(cleared)
+    if view["hidden"]:
+        clauses.append("m.id NOT IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(view["hidden"]))
+    return (" AND ".join(clauses), params) if clauses else None
+
+
+def _merge_scopes(*scopes: tuple[str, list[Any]] | None) -> tuple[str, list[Any]] | None:
+    present = [scope for scope in scopes if scope is not None]
+    if not present:
+        return None
+    return " AND ".join(f"({clause})" for clause, _ in present), [value for _, values in present for value in values]
+
+
+def get_library_view(ctx: AppContext) -> dict[str, Any]:
+    return view_summary(library_view(ctx))
+
+
+def clear_library_view(ctx: AppContext, media_ids: list[int] | None) -> dict[str, Any]:
+    """Sem ids: os vídeos atuais saem da lista (`cleared_before_id` = maior id de mídia) e as listas zeram. Com ids:
+    entram em `hidden` e saem de `shown`. Nada é apagado."""
+    with _view_lock:
+        if media_ids is None:
+            top = ctx.db.scalar("SELECT MAX(id) FROM media")
+            view = {"cleared_before_id": int(top) if top else None, "hidden": [], "shown": []}
+        else:
+            view = library_view(ctx)
+            gone = set(media_ids)
+            view["hidden"] = _id_list([*view["hidden"], *media_ids])
+            view["shown"] = [item for item in view["shown"] if item not in gone]
+        _save_view(ctx, view)
+    logger.info("Legendas CapCut: lista do seletor limpa (%s)",
+                "todos" if media_ids is None else f"{len(media_ids)} vídeo(s)")
+    return view_summary(view)
+
+
+def show_in_library_view(ctx: AppContext, media_ids: list[int]) -> dict[str, Any]:
+    """Os ids voltam à lista (entram em `shown`, saem de `hidden`), ex.: envio do computador que é duplicata de um
+    vídeo antigo que saiu da lista."""
+    with _view_lock:
+        view = library_view(ctx)
+        back = set(media_ids)
+        view["hidden"] = [item for item in view["hidden"] if item not in back]
+        view["shown"] = _id_list([*view["shown"], *media_ids])
+        _save_view(ctx, view)
+    return view_summary(view)
+
+
+def restore_library_view(ctx: AppContext) -> dict[str, Any]:
+    """Zera a visão: todos os vídeos voltam à lista."""
+    with _view_lock:
+        _save_view(ctx, _empty_view())
+    logger.info("Legendas CapCut: lista do seletor restaurada")
+    return view_summary(_empty_view())
+
+
 def _clean(text: str | None) -> str | None:
     return (text or "").strip().lstrip("@") or None
 
@@ -69,7 +184,7 @@ def _clean(text: str | None) -> str | None:
 def _filter_where(ctx: AppContext, selection: dict[str, Any]) -> tuple[str, list[Any]]:
     where, params = ctx.media.filter_where(media_type="video", role="original", profile=_clean(selection.get("profile")),
                                            q=(selection.get("q") or "").strip() or None)
-    scope = _scope(selection.get("folder"), selection.get("captioned"))
+    scope = _merge_scopes(_scope(selection.get("folder"), selection.get("captioned")), _visible_scope(library_view(ctx)))
     if scope is not None:
         where = f"{where} AND ({scope[0]})"
         params = [*params, *scope[1]]
@@ -92,10 +207,12 @@ def _filter_ids(ctx: AppContext, selection: dict[str, Any]) -> list[int]:
 
 def library(ctx: AppContext, *, q: str | None, profile: str | None, folder: str | None, captioned: str | None,
             limit: int, before_id: int | None) -> dict[str, Any]:
-    """Seletor da página: vídeos originais (sem capas), id DESC, keyset, com o resumo das Legendas CapCut."""
+    """Seletor da página: vídeos originais (sem capas) visíveis na visão da lista, id DESC, keyset, com o resumo das
+    Legendas CapCut."""
     items, total, next_before_id = ctx.media.list(
         view="all", media_type="video", role="original", profile=_clean(profile), q=(q or "").strip() or None,
-        limit=limit, before_id=before_id, scope=_scope(folder, captioned))
+        limit=limit, before_id=before_id,
+        scope=_merge_scopes(_scope(folder, captioned), _visible_scope(library_view(ctx))))
     info = repo(ctx).media_capcut_info([item["id"] for item in items])
     out = media_out(ctx, items)
     for item in out:
@@ -266,7 +383,7 @@ def _seconds(start: str | None, end: datetime) -> float | None:
 def batch_out(ctx: AppContext, batch: dict[str, Any]) -> dict[str, Any]:
     counts = batch["counts"]
     total = counts["total"]
-    open_count = counts["pending"] + counts["running"] + counts["waiting"] + counts["held"]
+    open_count = counts["pending"] + counts["running"] + counts["waiting"] + counts["held"] + counts["review"]
     per_video, _ = repo(ctx).average_seconds(batch_id=batch["id"])
     if per_video is None:
         per_video, _ = repo(ctx).average_seconds(mode=batch["mode"], limit=ESTIMATE_SAMPLES)
@@ -344,7 +461,7 @@ def cancel_batch(ctx: AppContext, batch_id: int) -> dict[str, Any]:
     núcleo) e os jobs de edição ainda abertos pelo cancelamento de lote do worker. Concluídos ficam."""
     batch = _batch_or_404(ctx, batch_id)
     counts = batch["counts"]
-    if not counts["pending"] + counts["running"] + counts["waiting"] + counts["held"]:
+    if not counts["pending"] + counts["running"] + counts["waiting"] + counts["held"] + counts["review"]:
         raise AppError(409, "capcut_batch_finished", "O lote não tem vídeos na fila nem em andamento.")
     repo(ctx).update_batch(batch_id, cancel_requested=1)   # o executor para de pegar jobs do lote
     repo(ctx).cancel_idle_in_batch(batch_id)

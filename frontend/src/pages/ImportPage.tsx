@@ -1,5 +1,5 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
-import { BadgeCheck, Lock, Search, UserRound } from "lucide-react";
+import { BadgeCheck, Download, Lock, Search, UserRound } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
 import { describeErrorCode } from "../api/errors";
 import type {
@@ -11,7 +11,7 @@ import type {
   ProfileInfo,
   UnifiedImportResult,
 } from "../api/types";
-import { ConfirmDialog, Field, Empty, ErrorLine, Pill, SkeletonRows, SplitBar, Spinner } from "../components/ui";
+import { ConfirmDialog, Field, Empty, ErrorLine, PageHeader, Pill, SkeletonRows, SplitBar, Spinner } from "../components/ui";
 import {
   DELETE_WARNING,
   type HistoryTarget,
@@ -478,9 +478,7 @@ export function ImportPage() {
 
   return (
     <div className="page">
-      <div className="page-head">
-        <h1>Importar do Instagram</h1>
-      </div>
+      <PageHeader title="Importar do Instagram" subtitle="Baixe publicações e perfis para a biblioteca." />
 
       <div className="session-line">
         {settings.data === undefined && settings.loading ? (
@@ -532,7 +530,7 @@ export function ImportPage() {
         ))}
       </div>
 
-      <div id="imp-mode-panel" role="tabpanel" aria-labelledby={`imp-mode-${mode}`}>
+      <div id="imp-mode-panel" className="section" role="tabpanel" aria-labelledby={`imp-mode-${mode}`}>
         {mode === "unified" || mode === "patterns" ? (
           <ImportUnifiedForm
             key={mode}
@@ -878,7 +876,7 @@ export function ImportPage() {
         ) : null}
       </div>
 
-      <section className="section" style={{ marginTop: 22 }}>
+      <section className="section">
         <div className="section-head">
           <h2>{showAllBatches ? "Todas as importações" : "Importações recentes"}</h2>
           {recent.loading && recent.data ? <Spinner /> : null}
@@ -906,7 +904,9 @@ export function ImportPage() {
             <SkeletonRows rows={3} />
           )
         ) : recentItems.length === 0 ? (
-          <Empty title="Nenhuma importação ainda" />
+          <Empty title="Nenhuma importação ainda" icon={Download}>
+            <span>Cole links ou perfis acima e clique em Iniciar importação.</span>
+          </Empty>
         ) : (
           <RecentTable items={recentItems} selected={shown} onSelect={setSelected} onRemove={openHistory} />
         )}
@@ -1137,7 +1137,7 @@ function BatchSummary({ batch }: { batch: Batch }) {
     <>
       <div className="row between">
         <div className="row">
-          <strong style={{ fontSize: 14 }}>{batchTitle(batch)}</strong>
+          <strong style={{ fontSize: 15 }}>{batchTitle(batch)}</strong>
           <Pill tone={batchToneOf(batch)}>{batchLabel(batch)}</Pill>
           {ACTIVE_BATCH.has(batch.status) && !isQueuedInGroup(batch) ? <Spinner /> : null}
         </div>

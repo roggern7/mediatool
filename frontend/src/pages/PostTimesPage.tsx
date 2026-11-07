@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowLeft, Download, ExternalLink } from "lucide-react";
 import { api, downloadGeneratedFile, messageOf } from "../api/client";
 import type { PostTimesAccount, PostTimesReport } from "../api/types";
-import { Empty, ErrorLine, Pill, SkeletonRows, Spinner } from "../components/ui";
+import { Empty, ErrorLine, PageHeader, Pill, SkeletonRows, Spinner } from "../components/ui";
 import { formatDateTime } from "../lib/format";
 import {
   barFractions,
@@ -64,8 +64,8 @@ function ZipButton({ url }: { url: string }) {
     }
   }
   return (
-    <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void download()}>
-      {busy ? <Spinner /> : <Download size={14} strokeWidth={1.6} aria-hidden="true" />}
+    <button type="button" className="btn" disabled={busy} onClick={() => void download()}>
+      {busy ? <Spinner /> : <Download size={15} strokeWidth={1.75} aria-hidden="true" />}
       Baixar .zip
     </button>
   );
@@ -73,25 +73,24 @@ function ZipButton({ url }: { url: string }) {
 
 function Head({ report }: { report: PostTimesReport | undefined }) {
   return (
-    <>
-      <div className="page-head">
-        <h1>Padrões de publicação</h1>
-        <div className="row">
-          <button type="button" className="btn btn-sm btn-ghost" onClick={goBack}>
-            <ArrowLeft size={14} strokeWidth={1.6} aria-hidden="true" />
-            Voltar
-          </button>
-          {report ? <ZipButton url={report.zip_url} /> : null}
-        </div>
-      </div>
-      {report ? (
-        <div className="pt-meta muted small">
-          <span>{report.title}</span>
-          <span>Fuso {report.timezone}</span>
-          <span>Gerado em {formatDateTime(report.generated_at)}</span>
-        </div>
-      ) : null}
-    </>
+    <PageHeader
+      title="Padrões de publicação"
+      subtitle={
+        report ? (
+          <span className="pt-meta">
+            <span>{report.title}</span>
+            <span>Fuso {report.timezone}</span>
+            <span>Gerado em {formatDateTime(report.generated_at)}</span>
+          </span>
+        ) : undefined
+      }
+    >
+      <button type="button" className="btn btn-ghost" onClick={goBack}>
+        <ArrowLeft size={15} strokeWidth={1.75} aria-hidden="true" />
+        Voltar
+      </button>
+      {report ? <ZipButton url={report.zip_url} /> : null}
+    </PageHeader>
   );
 }
 

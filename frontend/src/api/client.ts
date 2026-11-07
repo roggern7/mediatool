@@ -18,11 +18,14 @@ import type {
   CapCutPreviewRequest,
   CapCutPreviewStatus,
   CapCutJob,
+  CapCutReview,
+  CapCutReviewApprove,
   CapCutJobList,
   CapCutJobStatus,
   CapCutJobsCreated,
   CapCutLibraryItem,
   CapCutLibraryQuery,
+  CapCutLibraryView,
   CapCutSettings,
   CapCutSettingsUpdate,
   CapCutStatus,
@@ -437,6 +440,10 @@ export const api = {
   retryCapcutJob: (id: number) => request<CapCutJob>("POST", `/capcut/jobs/${id}/retry`),
   deleteCapcutJob: (id: number) => request<void>("DELETE", `/capcut/jobs/${id}`),
   revealCapcutJob: (id: number) => request<{ ok: boolean }>("POST", `/capcut/jobs/${id}/reveal`),
+  capcutReview: (id: number) => request<CapCutReview>("GET", `/capcut/jobs/${id}/review`),
+  /** Só as frases alteradas; lista vazia = aprovar como está. */
+  approveCapcutReview: (id: number, body: CapCutReviewApprove) =>
+    request<CapCutJob>("POST", `/capcut/jobs/${id}/review`, { body }),
   pauseCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/pause"),
   resumeCapcutQueue: () => request<{ paused: boolean }>("POST", "/capcut/queue/resume"),
   holdCapcutJob: (id: number) => request<CapCutJob>("POST", `/capcut/jobs/${id}/hold`),
@@ -444,6 +451,14 @@ export const api = {
   /** Seletor de vídeos do lote: vídeos originais (sem capas), id DESC, keyset, com a situação das legendas. */
   capcutLibrary: (q: CapCutLibraryQuery = {}) =>
     request<Paged<CapCutLibraryItem>>("GET", "/capcut/library", { query: { ...q } }),
+  capcutLibraryView: () => request<CapCutLibraryView>("GET", "/capcut/library/view"),
+  /** Sem ids: os vídeos atuais saem da lista. Com ids: só esses saem. Nada é apagado. */
+  clearCapcutLibrary: (mediaIds?: number[]) =>
+    request<CapCutLibraryView>("POST", "/capcut/library/clear", { body: mediaIds ? { media_ids: mediaIds } : {} }),
+  /** Os ids voltam à lista (envio do computador que é duplicata de um vídeo que saiu da lista). */
+  showInCapcutLibrary: (mediaIds: number[]) =>
+    request<CapCutLibraryView>("POST", "/capcut/library/show", { body: { media_ids: mediaIds } }),
+  restoreCapcutLibrary: () => request<CapCutLibraryView>("POST", "/capcut/library/restore"),
   capcutEstimate: (mode: CapCutBatchMode, count: number) =>
     request<CapCutEstimate>("GET", "/capcut/estimate", { query: { mode, count } }),
   /** Filtro resolvido no servidor pode levar alguns segundos com muitos vídeos. */

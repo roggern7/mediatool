@@ -122,7 +122,7 @@ export function RealPreviewPanel({
                 src={capcutPreviewFileUrl(preview)}
                 controls
                 playsInline
-                style={{ width: "100%", maxHeight: 480, background: "#000", borderRadius: 6, marginTop: 8 }}
+                style={{ width: "100%", maxHeight: 480, background: "var(--stage)", borderRadius: "var(--radius)", marginTop: 8 }}
               />
               {started && !designsEqual(started.design, design) ? (
                 <div className="field-hint">O modelo mudou depois desta prévia; gere outra para ver as alterações.</div>

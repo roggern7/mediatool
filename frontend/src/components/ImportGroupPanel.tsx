@@ -134,7 +134,7 @@ export function ImportGroupPanel({
     <div className="panel" style={{ marginTop: 20 }}>
       <div className="row between" style={{ flexWrap: "wrap" }}>
         <div className="row">
-          <strong style={{ fontSize: 14 }}>{groupTitle(group)}</strong>
+          <strong style={{ fontSize: 15 }}>{groupTitle(group)}</strong>
           <Pill tone={status.tone}>{status.label}</Pill>
           {group.status === "active" ? <Spinner /> : null}
         </div>

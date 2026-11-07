@@ -7,7 +7,7 @@ import { EditSelectionList } from "../components/edit/EditSelectionList";
 import { EditSettingsForm } from "../components/edit/EditSettingsForm";
 import { LibraryVideoPicker } from "../components/edit/LibraryVideoPicker";
 import { LocalFilesDrop } from "../components/edit/LocalFilesDrop";
-import { Spinner } from "../components/ui";
+import { PageHeader, Spinner } from "../components/ui";
 import {
   DEFAULT_EDIT_FORM,
   type EditForm,
@@ -145,13 +145,10 @@ export function EditPage() {
 
   return (
     <div className="page">
-      <div className="page-head">
-        <h1>Editar</h1>
-      </div>
-      <p className="muted" style={{ marginTop: -8, marginBottom: 16 }}>
-        Escolha vídeos da biblioteca ou do computador, ajuste as configurações e inicie. Cada vídeo editado vira uma
-        nova versão na biblioteca.
-      </p>
+      <PageHeader
+        title="Editar"
+        subtitle="Escolha vídeos, ajuste as configurações e inicie. Cada vídeo editado vira uma nova versão na biblioteca."
+      />
 
       {running ? (
         <EditProgressPanel batchId={running.batchId} names={running.names} onClose={() => setRunning(null)} />
@@ -184,7 +181,9 @@ export function EditPage() {
           </section>
           <section className="section">
             <div className="section-head">
-              <h2>Selecionados ({selection.length})</h2>
+              <h2>
+                Selecionados <span className="count-badge">{selection.length}</span>
+              </h2>
             </div>
             <EditSelectionList
               items={selection}
@@ -202,7 +201,7 @@ export function EditPage() {
           <div className="edit-start">
             <button
               type="button"
-              className="btn btn-primary"
+              className="btn btn-primary btn-lg"
               disabled={blocker !== null || starting}
               onClick={() => void start()}
             >

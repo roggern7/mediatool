@@ -12,6 +12,7 @@ import {
   jobNote,
   jobProgress,
   jobStatusText,
+  needsReview,
   stageLabel,
 } from "../../lib/capcut";
 import { formatCount, formatDateTime } from "../../lib/format";
@@ -19,6 +20,9 @@ import { nextPollMs } from "../../lib/polling";
 import { useQuery } from "../../lib/useQuery";
 import { useToast } from "../../lib/toast";
 import { Empty, ErrorLine, Pill, ProgressBar, SkeletonRows, Spinner, Thumb } from "../ui";
+import { ReviewDialog } from "./ReviewDialog";
+
+type JobAction = "cancel" | "retry" | "delete" | "reveal" | "review";
 
 const PAGE_SIZE = 50;
 const STATUS_FILTERS: { value: CapCutJobStatus | ""; label: string }[] = [
@@ -38,6 +42,7 @@ export function CapCutJobsTable({ onChanged }: { onChanged: () => void }) {
   const [offset, setOffset] = useState(0);
   const [pollMs, setPollMs] = useState<number>(() => nextPollMs(null, false));
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [reviewing, setReviewing] = useState<number | null>(null);
   const jobs = useQuery(
     `capcut-jobs:${filter}:${offset}`,
     () =>
@@ -48,7 +53,11 @@ export function CapCutJobsTable({ onChanged }: { onChanged: () => void }) {
     pollMs,
   );
 
-  async function act(job: CapCutJob, action: "cancel" | "retry" | "delete" | "reveal") {
+  async function act(job: CapCutJob, action: JobAction) {
+    if (action === "review") {
+      setReviewing(job.id);
+      return;
+    }
     setBusyId(job.id);
     try {
       if (action === "cancel") await api.cancelCapcutJob(job.id);
@@ -97,7 +106,7 @@ export function CapCutJobsTable({ onChanged }: { onChanged: () => void }) {
         )
       ) : page.total === 0 ? (
         <Empty title="Nenhum vídeo na fila de legendas">
-          <span className="muted small">Use "Processar vídeos" acima ou, na Biblioteca, "Legendar no CapCut".</span>
+          <span className="muted small">Use o botão "Processar" no rodapé da página ou, na Biblioteca, "Legendar no CapCut".</span>
         </Empty>
       ) : (
         <>
@@ -149,6 +158,18 @@ export function CapCutJobsTable({ onChanged }: { onChanged: () => void }) {
           ) : null}
         </>
       )}
+      {reviewing !== null ? (
+        <ReviewDialog
+          jobId={reviewing}
+          onClose={() => setReviewing(null)}
+          onApproved={() => {
+            setReviewing(null);
+            setPollMs(nextPollMs(null, true));
+            jobs.reload();
+            onChanged();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -160,7 +181,7 @@ function JobRow({
 }: {
   job: CapCutJob;
   busy: boolean;
-  onAction: (action: "cancel" | "retry" | "delete" | "reveal") => void;
+  onAction: (action: JobAction) => void;
 }) {
   const active = isCapcutActive(job);
   const note = jobNote(job);
@@ -180,7 +201,7 @@ function JobRow({
         </span>
       </td>
       <td>
-        <Pill tone={isHeldJob(job) ? "warn" : capcutTone(job.status)}>{jobStatusText(job)}</Pill>
+        <Pill tone={isHeldJob(job) || needsReview(job) ? "warn" : capcutTone(job.status)}>{jobStatusText(job)}</Pill>
       </td>
       <td className="muted small nowrap" title={job.export_mode ? exportModeHelp(job.export_mode) : "Ainda não exportado"}>
         {jobExportModeText(job.export_mode)}
@@ -210,6 +231,11 @@ function JobRow({
         )}
       </td>
       <td className="nowrap" style={{ textAlign: "right" }}>
+        {needsReview(job) && !job.cancel_requested ? (
+          <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => onAction("review")}>
+            Revisar
+          </button>
+        ) : null}
         {active ? (
           <button
             type="button"

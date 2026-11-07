@@ -378,3 +378,22 @@ def test_desktop_busy_before_any_draft_or_capcut(env):
     if inst.root_meta_path.exists():  # sem índice = nada foi registrado
         store = json.loads(inst.root_meta_path.read_text(encoding="utf-8"))["all_draft_store"]
         assert all(e["draft_name"] != spec.draft_name for e in store)
+
+
+def test_transcribe_only_runs_just_the_transcription(env):
+    """Revisão das legendas: só a transcrição (sem CapCut), com o andamento da etapa e palavras em dicionário."""
+    from app.integrations.capcut.pipeline import transcribe_only
+
+    _inst, video, tmp = env
+    calls: list = []
+    rec = Recorder()
+    spec = make_spec(tmp, video)
+    words = transcribe_only(spec, cancel=threading.Event(), on_stage=rec.on_stage, transcriber=fake_transcriber(calls))
+    assert words == [w.to_dict() for w in WORDS]
+    assert calls == [(video, spec.whisper_model, "pt", spec.models_dir)]
+    assert rec.names() == ["transcribing"]
+    assert rec.stages[0][1] == 0.0 and rec.stages[-1][1] == 1.0
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(CapCutCancelled):
+        transcribe_only(spec, cancel=cancelled, on_stage=rec.on_stage, transcriber=fake_transcriber(calls))

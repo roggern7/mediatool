@@ -1,6 +1,8 @@
 /* Página "Padrões de publicação" */
 .pt-meta {
-  margin: -12px 0 18px;
+  display: inline-flex;
+  flex-wrap: wrap;
+  row-gap: 2px;
 }
 .pt-meta span + span::before {
   content: "·";
@@ -18,10 +20,10 @@
   gap: 8px;
 }
 .pt-patterns li {
-  padding: 9px 12px;
+  padding: 10px 14px;
   border-left: 3px solid var(--accent);
   background: var(--surface-2);
-  border-radius: 0 var(--radius) var(--radius) 0;
+  border-radius: var(--radius-xs) var(--radius) var(--radius) var(--radius-xs);
 }
 .pt-charts {
   display: grid;
@@ -65,8 +67,8 @@
   display: block;
   width: 100%;
   min-height: 2px;
-  background: var(--border-strong);
-  border-radius: 3px 3px 0 0;
+  background: var(--surface-3);
+  border-radius: 4px 4px 1px 1px;
 }
 .pt-bars li.top .pt-bar-fill {
   background: var(--accent);
@@ -113,15 +115,15 @@
   white-space: nowrap;
 }
 .pt-badge.ritmo {
-  background: rgba(107, 138, 253, 0.16);
-  color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 .pt-badge.rajada {
-  background: rgba(214, 166, 72, 0.16);
+  background: var(--warn-soft);
   color: var(--warn);
 }
 .pt-badge.pausa {
-  background: rgba(141, 148, 155, 0.16);
+  background: var(--surface-3);
   color: var(--text-muted);
 }
 .pt-more {

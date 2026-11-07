@@ -122,6 +122,46 @@ def wait_export_complete(path: Path, *, expected_duration: float, cancel: thread
             raise CapCutCancelled()
 
 
+def _transcribe(spec: CapCutJobSpec, video: Path, has_audio: bool, clip: tuple[float, float] | None, *,
+                cancel: threading.Event, stage: StageCallback,
+                transcriber: Callable[..., list[Word]] | None) -> list[Word]:
+    """Palavras do vídeo (só do trecho `clip`, quando há), com o andamento da etapa `transcribing`."""
+    stage("transcribing", 0.0, f"Transcrevendo (modelo {spec.whisper_model})")
+    if has_audio:
+        source = video
+        if clip is not None:
+            Path(spec.work_dir).mkdir(parents=True, exist_ok=True)
+            source = _clip_audio(video, clip, Path(spec.work_dir) / "clip.wav")
+        try:
+            words = (transcriber or transcribe_file)(
+                source, model=spec.whisper_model, language=spec.language, models_dir=Path(spec.models_dir),
+                cancel=cancel, progress=lambda p: stage("transcribing", p, None))
+        finally:
+            if source != video:
+                source.unlink(missing_ok=True)
+    else:
+        words = []
+    stage("transcribing", 1.0, f"{len(words)} palavras")
+    return words
+
+
+def transcribe_only(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: StageCallback,
+                    transcriber: Callable[..., list[Word]] | None = None) -> list[dict[str, Any]]:
+    """Só a transcrição (revisão das legendas): mesmo tratamento de trecho e andamento do `process_video`, sem
+    CapCut. Palavras em dicionário (com `seg` e `doubt`)."""
+    if cancel.is_set():
+        raise CapCutCancelled()
+    video = Path(spec.video_path)
+    if not video.is_file():
+        raise CapCutError("source_missing", "O vídeo original não foi encontrado.")
+    info = probe(video)
+    clip = clip_range(spec, info.duration)
+    words = _transcribe(spec, video, info.has_audio, clip, cancel=cancel, stage=on_stage, transcriber=transcriber)
+    if cancel.is_set():
+        raise CapCutCancelled()
+    return [w.to_dict() for w in words]
+
+
 def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: StageCallback,
                   on_transcript: Callable[[list[dict[str, Any]]], None] | None = None,
                   install: CapCutInstall | None = None, controller_factory: Callable[..., Any] | None = None,
@@ -153,7 +193,7 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
     export_mode = str(getattr(spec, "export_mode", None) or isolated.DEFAULT_EXPORT_MODE)
     if export_mode not in isolated.EXPORT_MODES:
         raise CapCutError("invalid_export_mode", "Modo de exportação desconhecido. Escolha \"Isolado\" ou "
-                          "\"Interativo\" nas configurações das Legendas CapCut.")
+                          "\"Interativo\" nas configurações da Edição CapCut.")
     warnings: list[str] = []
     clip = clip_range(spec, info.duration)
     expected_duration = clip[1] if clip else info.duration
@@ -163,22 +203,7 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
         words = [Word.from_dict(w) for w in spec.transcript]
         stage("transcribing", 1.0, "Transcrição reaproveitada")
     else:
-        stage("transcribing", 0.0, f"Transcrevendo (modelo {spec.whisper_model})")
-        if info.has_audio:
-            source = video
-            if clip is not None:
-                Path(spec.work_dir).mkdir(parents=True, exist_ok=True)
-                source = _clip_audio(video, clip, Path(spec.work_dir) / "clip.wav")
-            try:
-                words = (transcriber or transcribe_file)(
-                    source, model=spec.whisper_model, language=spec.language, models_dir=Path(spec.models_dir),
-                    cancel=cancel, progress=lambda p: stage("transcribing", p, None))
-            finally:
-                if source != video:
-                    source.unlink(missing_ok=True)
-        else:
-            words = []
-        stage("transcribing", 1.0, f"{len(words)} palavras")
+        words = _transcribe(spec, video, info.has_audio, clip, cancel=cancel, stage=stage, transcriber=transcriber)
         if on_transcript is not None:
             on_transcript([w.to_dict() for w in words])
     word_dicts = [w.to_dict() for w in words]
