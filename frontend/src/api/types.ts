@@ -1088,6 +1088,8 @@ export interface CapCutQueueCounts {
   paused: boolean;
   /** Motivo de uma pausa automática (ex.: o dono tentou abrir o CapCut durante a exportação isolada). */
   pause_reason?: string | null;
+  /** Jobs com pausa individual (ausente em backends antigos). */
+  held?: number;
 }
 
 export interface CapCutStatus {
@@ -1267,7 +1269,19 @@ export interface CapCutJob {
   output_probe: Record<string, unknown> | null;
   warnings: string[];
   origin: "manual" | "auto" | "api";
+  /** Lote de download do modo automático (não é o lote de legendas). */
   batch_id: number | null;
+  /** Lote da página Legendas CapCut (null em jobs avulsos e antigos). */
+  capcut_batch_id?: number | null;
+  /** caption | edit | edit_caption; ausente em backends antigos (= caption). */
+  mode?: CapCutBatchMode;
+  /** Pausa individual (só pending/waiting). */
+  held?: boolean;
+  /** jobs.id da edição feita antes (modos com edição). */
+  edit_job_id?: number | null;
+  /** Status do job de edição (tabela jobs); null sem edição. */
+  edit_status?: string | null;
+  edit_progress?: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -1283,4 +1297,127 @@ export interface CapCutJobList {
 export interface CapCutJobsCreated {
   created: CapCutJob[];
   skipped: { media_id: number; reason: "media_not_found" | "not_video" | "cover" | "already_queued" }[];
+}
+
+/* Lotes da página Legendas CapCut (docs/CONTRACTS.md, seção 8.9). */
+
+/** caption = só legendas; edit = só edição (não abre o CapCut); edit_caption = edição e depois legendas. */
+export type CapCutBatchMode = "caption" | "edit" | "edit_caption";
+export type CapCutBatchStatus = "running" | "paused" | "completed" | "completed_with_errors" | "cancelled";
+export type CapCutCaptioned = "any" | "yes" | "no";
+
+/** Seleção por filtro resolvida no servidor (todos os filtrados, não só a página). `folder`: chave de pasta do Editar. */
+export interface CapCutBatchFilter {
+  q?: string;
+  profile?: string;
+  folder?: string;
+  captioned?: CapCutCaptioned;
+}
+
+/** Opções da exportação que o lote sobrescreve (mesmos nomes das configurações). */
+export type CapCutOptionsPatch = Partial<
+  Pick<CapCutSettings, "resolution" | "bitrate" | "fps" | "keep_original_audio">
+>;
+
+export interface CapCutBatchEditSettings {
+  preset_id?: number | null;
+  duration_mode: EditDurationMode;
+  custom_seconds?: number;
+  /** Início do corte em segundos (0..86400). */
+  start_seconds?: number;
+  /** 0,5..2,0. */
+  speed: number;
+  sharpen: boolean;
+}
+
+/** Corpo de POST /api/capcut/batches: `media_ids` OU `filter`. */
+export interface CapCutBatchCreate {
+  name?: string;
+  mode: CapCutBatchMode;
+  media_ids?: number[];
+  filter?: CapCutBatchFilter;
+  include_done?: boolean;
+  caption?: { style_id?: number | null; overrides?: CapCutOptionsPatch };
+  edit?: CapCutBatchEditSettings;
+}
+
+export type CapCutBatchSkipReason =
+  | "media_not_found"
+  | "not_video"
+  | "cover"
+  | "already_queued"
+  | "already_done";
+
+export interface CapCutBatchCounts {
+  total: number;
+  pending: number;
+  running: number;
+  waiting: number;
+  held: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+}
+
+export interface CapCutBatchSummary {
+  style_name: string | null;
+  /** Ex.: "Preset X · 30 s · 1,2x · nitidez"; null sem edição. */
+  edit: string | null;
+  resolution: CapCutResolution | null;
+  fps: CapCutFps | null;
+  bitrate: CapCutBitrate | null;
+  keep_audio: boolean | null;
+  highlight: boolean | null;
+}
+
+export interface CapCutBatch {
+  id: number;
+  name: string;
+  mode: CapCutBatchMode;
+  status: CapCutBatchStatus;
+  paused: boolean;
+  cancel_requested: boolean;
+  created_at: string;
+  finished_at: string | null;
+  output_dir: string;
+  output_exists: boolean;
+  counts: CapCutBatchCounts;
+  /** 0..100 (média do progresso dos jobs; concluídos = 100). */
+  progress: number;
+  per_video_seconds: number | null;
+  eta_seconds: number | null;
+  elapsed_seconds: number | null;
+  current_job: CapCutJob | null;
+  summary: CapCutBatchSummary;
+  options: Record<string, unknown>;
+}
+
+export interface CapCutBatchCreated {
+  batch: CapCutBatch;
+  skipped: { media_id: number; reason: CapCutBatchSkipReason }[];
+}
+
+export interface CapCutBatchList {
+  items: CapCutBatch[];
+  total: number;
+}
+
+export interface CapCutEstimate {
+  per_video_seconds: number | null;
+  total_seconds: number | null;
+  samples: number;
+}
+
+/** Item do seletor de vídeos do lote (GET /api/capcut/library): mídia + situação das legendas. */
+export interface CapCutLibraryItem extends Media {
+  capcut: { done: number; last_output_name: string | null; open: boolean };
+}
+
+export interface CapCutLibraryQuery {
+  q?: string;
+  profile?: string;
+  folder?: string;
+  captioned?: CapCutCaptioned;
+  limit?: number;
+  before_id?: number;
 }

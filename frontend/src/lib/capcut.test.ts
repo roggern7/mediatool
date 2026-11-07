@@ -14,6 +14,9 @@ import {
   jobNote,
   jobProgress,
   stageLabel,
+  isHeldJob,
+  jobStatusText,
+  queueSummaryText,
   stageProgress,
   styleSummaryText,
   whisperModelText,
@@ -200,5 +203,28 @@ describe("legendas: cliente", () => {
     await api.listCapcutJobs({ status: "failed", limit: 50 });
     expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/capcut/jobs?status=failed&limit=50");
     expect(capcutJobFileUrl(7)).toBe("/api/capcut/jobs/7/file");
+  });
+});
+
+describe("legendas: pausa individual e linha da fila", () => {
+  it("pausado só na fila ou aguardando; na tabela geral, 'Na fila · pausado'", () => {
+    expect(isHeldJob({ status: "pending", held: true })).toBe(true);
+    expect(isHeldJob({ status: "waiting", held: true })).toBe(true);
+    expect(isHeldJob({ status: "cancelled", held: true })).toBe(false);
+    expect(isHeldJob({ status: "pending", held: false })).toBe(false);
+    expect(isHeldJob({ status: "pending" })).toBe(false);
+    expect(jobStatusText({ status: "pending", held: true })).toBe("Na fila · pausado");
+    expect(jobStatusText({ status: "failed", held: true })).toBe("Erro");
+    expect(jobStatusText({ status: "completed" })).toBe("Concluído");
+  });
+
+  it("os pausados já estão em pending: aparecem entre parênteses, sem somar de novo", () => {
+    const q = { pending: 5, running: 1, waiting: 0, failed: 2, completed: 0, cancelled: 0, paused: false, held: 2 };
+    expect(queueSummaryText(q)).toBe("Fila ativa: 1 em andamento, 5 na fila (2 pausados), 0 aguardando o CapCut, 2 com erro.");
+    expect(queueSummaryText({ ...q, held: 1, paused: true })).toBe(
+      "Fila pausada: 1 em andamento, 5 na fila (1 pausado), 0 aguardando o CapCut, 2 com erro.",
+    );
+    // Backend antigo, sem `held`.
+    expect(queueSummaryText({ ...q, held: undefined })).toBe("Fila ativa: 1 em andamento, 5 na fila, 0 aguardando o CapCut, 2 com erro.");
   });
 });

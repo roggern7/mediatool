@@ -154,3 +154,17 @@ export function queueSummary(items: UploadItem[]): { ready: number; failed: numb
     total: items.length,
   };
 }
+
+/**
+ * Separa os vídeos (pela extensão aceita ou, sem extensão, pelo tipo `video/`) dos outros arquivos. Usado ao escolher
+ * uma pasta inteira: imagens, textos e afins da pasta não entram na fila como erro.
+ */
+export function splitVideoFiles<F extends { name: string; type?: string }>(files: F[]): { videos: F[]; others: number } {
+  const videos = files.filter((file) => {
+    const dot = file.name.lastIndexOf(".");
+    const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
+    if (ext) return (ACCEPTED_VIDEO_EXTENSIONS as readonly string[]).includes(ext);
+    return (file.type ?? "").toLowerCase().startsWith("video/");
+  });
+  return { videos, others: files.length - videos.length };
+}

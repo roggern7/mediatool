@@ -4,7 +4,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.schemas.common import PositiveId, PresetName, StrictModel
+from app.db.repositories.edit_folders import FOLDER_KEY_PATTERN
+from app.schemas.common import PositiveId, PresetName, SafeText, StrictModel
+from app.schemas.media import MediaOut
 
 Resolution = Literal["original", "480P", "720P", "1080P", "2K", "4K"]
 Bitrate = Literal["low", "recommended", "high"]
@@ -19,6 +21,11 @@ MaxChars = Annotated[int, Field(strict=True, ge=8, le=80)]
 MaxAttempts = Annotated[int, Field(strict=True, ge=1, le=10)]
 FolderText = Annotated[str, Field(max_length=1024)]
 MAX_JOB_MEDIA = 500
+CapCutMode = Literal["caption", "edit", "edit_caption"]
+BatchStatus = Literal["running", "paused", "completed", "completed_with_errors", "cancelled"]
+# Teto de vídeos por lote (o serviço responde 422 `batch_too_large`); o schema aceita mais para o erro ter a contagem.
+MAX_BATCH_MEDIA = 1000
+MAX_BATCH_IDS = 10_000
 
 
 class CapCutOptionsPatch(StrictModel):
@@ -72,6 +79,7 @@ class QueueCounts(BaseModel):
     cancelled: int
     paused: bool
     pause_reason: str | None = None  # ex.: o dono tentou abrir o CapCut durante a exportação isolada
+    held: int = 0                    # na fila com pausa individual (lotes)
 
 
 class IsolatedModeInfo(BaseModel):
@@ -340,6 +348,13 @@ class JobOut(BaseModel):
     started_at: str | None
     finished_at: str | None
     updated_at: str
+    # Lotes (migration 0031): o lote, o modo, a pausa individual e a edição de que o job depende.
+    capcut_batch_id: int | None = None
+    mode: CapCutMode = "caption"
+    held: bool = False
+    edit_job_id: int | None = None
+    edit_status: str | None = None       # status do job `process` da edição (tabela `jobs`)
+    edit_progress: int | None = None     # 0..100
 
 
 class JobList(BaseModel):
@@ -360,3 +375,132 @@ class JobsCreated(BaseModel):
 
 class QueueState(BaseModel):
     paused: bool
+
+
+# ---- lotes (docs/CAPCUT.md, "Lotes") --------------------------------------------------------------------------------
+class BatchFilter(StrictModel):
+    """Seleção por filtro, resolvida no servidor (todos os vídeos originais filtrados, não só a página)."""
+
+    q: Annotated[SafeText, Field(max_length=200)] | None = None
+    profile: Annotated[SafeText, Field(max_length=64)] | None = None
+    folder: Annotated[str, Field(pattern=FOLDER_KEY_PATTERN)] | None = None
+    captioned: Literal["any", "yes", "no"] = "any"
+
+
+class BatchCaption(StrictModel):
+    style_id: Annotated[int, Field(strict=True, ge=0, le=2**53)] | None = None
+    overrides: CapCutOptionsPatch | None = None
+
+
+class BatchEdit(StrictModel):
+    """Edição do lote: preset opcional (seus params são a base) + duração, início do corte, velocidade e nitidez."""
+
+    preset_id: PositiveId | None = None
+    duration_mode: Literal["original", "15", "30", "60", "custom"]
+    custom_seconds: Annotated[float, Field(strict=True, gt=0, le=7200, allow_inf_nan=False)] | None = None
+    start_seconds: Annotated[float, Field(strict=True, ge=0, le=86_400, allow_inf_nan=False)] = 0.0
+    speed: Annotated[float, Field(strict=True, ge=0.5, le=2, allow_inf_nan=False)]
+    sharpen: Annotated[bool, Field(strict=True)]
+
+    @model_validator(mode="after")
+    def _custom_requires_seconds(self) -> BatchEdit:
+        if self.duration_mode == "custom" and self.custom_seconds is None:
+            raise ValueError("Informe a duração personalizada em segundos.")
+        return self
+
+
+class BatchCreate(StrictModel):
+    name: Annotated[SafeText, Field(max_length=120)] | None = None
+    mode: CapCutMode
+    media_ids: Annotated[list[PositiveId], Field(min_length=1, max_length=MAX_BATCH_IDS)] | None = None
+    filter: BatchFilter | None = None
+    include_done: bool = False
+    caption: BatchCaption | None = None
+    edit: BatchEdit | None = None
+
+    @model_validator(mode="after")
+    def _one_selection(self) -> BatchCreate:
+        if (self.media_ids is None) == (self.filter is None):
+            raise ValueError("informe media_ids ou filter (um dos dois)")
+        return self
+
+
+class BatchCounts(BaseModel):
+    total: int
+    pending: int
+    running: int
+    waiting: int
+    held: int
+    completed: int
+    failed: int
+    cancelled: int
+
+
+class BatchSummary(BaseModel):
+    """Resumo legível das configurações usadas (campos de legenda/exportação nulos no modo `edit`)."""
+
+    style_name: str | None = None
+    edit: str | None = None
+    resolution: str | None = None
+    fps: str | None = None
+    bitrate: str | None = None
+    keep_audio: bool | None = None
+    highlight: bool | None = None
+
+
+class BatchOut(BaseModel):
+    id: int
+    name: str
+    mode: CapCutMode
+    status: BatchStatus
+    paused: bool
+    cancel_requested: bool
+    created_at: str
+    finished_at: str | None
+    output_dir: str
+    output_exists: bool
+    counts: BatchCounts
+    progress: int
+    per_video_seconds: float | None
+    eta_seconds: float | None
+    elapsed_seconds: float | None
+    current_job: JobOut | None
+    summary: BatchSummary
+    options: dict[str, Any]
+
+
+class BatchList(BaseModel):
+    items: list[BatchOut]
+    total: int
+
+
+class BatchSkipped(BaseModel):
+    media_id: int
+    reason: Literal["media_not_found", "not_video", "cover", "already_queued", "already_done"]
+
+
+class BatchCreated(BaseModel):
+    batch: BatchOut
+    skipped: list[BatchSkipped]
+
+
+class EstimateOut(BaseModel):
+    per_video_seconds: float | None
+    total_seconds: float | None
+    samples: int
+
+
+class LibraryCapCut(BaseModel):
+    done: int                       # jobs concluídos com legenda (`caption`/`edit_caption`)
+    last_output_name: str | None    # arquivo do último legendado
+    open: bool                      # há job das Legendas CapCut aberto (qualquer modo)
+
+
+class LibraryItem(MediaOut):
+    capcut: LibraryCapCut
+
+
+class LibraryPage(BaseModel):
+    items: list[LibraryItem]
+    total: int
+    next_before_id: int | None

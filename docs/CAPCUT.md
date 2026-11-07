@@ -455,6 +455,103 @@ design na API).
   o motivo (`queue.pause_reason`, mostrado na página), liberando o CapCut para o dono; ele retoma a fila quando
   terminar. Limitação: a tentativa do dono durante aquele vídeo (até ~1–2 min) não abre nada; precisa abrir de novo.
 
+## Lotes
+
+Pedido em massa da página Legendas CapCut (migration 0031; contrato em `docs/CONTRACTS.md` 8.9). Código:
+`services/capcut_batch_service.py` (criação, apresentação, ações, ZIP, seletor), `db/repositories/capcut.py` (tabela
+`capcut_batches`, contagens e status derivado em SQL), `jobs/capcut_runner.py` (fonte editada e modo só edição). Não
+há fila paralela: o lote é um `capcut_batches` com um `capcut_jobs` por vídeo, na MESMA fila e no MESMO executor dos
+jobs avulsos (um por vez, ordem por id, então os jobs de um lote ficam contíguos). Jobs antigos e os criados por
+`POST /jobs`, "Legendar no CapCut" da Biblioteca e o automático após o download continuam `mode = caption`, sem lote.
+
+Modos (`mode` do lote e de cada job):
+
+- `caption`: só legendas, fonte = original da mídia (igual ao job avulso).
+- `edit_caption`: na criação, UM lote `batches` de edição (mesma forma do `edit_service.start`: `source = library`,
+  `preset_id` NULL, `preset_name = "Edição"`, `process = 1`) com um job `process` por vídeo; o capcut job guarda
+  `edit_job_id`. O worker edita em paralelo à fila do CapCut. `claim_next` só pega o job quando o job de edição está
+  em estado final (`completed`/`failed`/`cancelled`; job de edição inexistente não segura). Edição concluída: fonte
+  = arquivo da rendition (`jobs.rendition_id` -> `renditions.processed_path`). Edição com erro ou cancelada: o job
+  termina `failed` `edit_failed` ("A edição deste vídeo falhou: <erro>"), sem nova tentativa. Rendition sem arquivo:
+  `source_missing`. O dedupe de renditions do worker continua (mesma mídia + mesmos params reaproveitam a rendition).
+  Se o job de edição tiver sido apagado do histórico, a rendition é procurada pelos params gravados em
+  `options.edit_params` do job.
+- `edit`: igual, mas o CapCut NÃO é aberto (não depende dele nem do núcleo instalado): a rendition é copiada para a
+  pasta do lote como `<nome>_editado.mp4` (`<nome>_editado (2).mp4` e assim por diante, sem sobrescrever; cópia em
+  `.part` e troca atômica), `output_probe` = dados da rendition (largura, altura, duração, fps, áudio), `progress`
+  100. Falha na cópia: `failed` `copy_failed`. A pausa global da fila também segura esses jobs.
+
+Params da edição: base = params do preset escolhido (`edit.preset_id`) ou, sem preset, os da edição
+(`metadata_cleanup`, `mirror` e `auto_adjust` desligados, como `edit_service.edit_params`); por cima: `speed`
+(0,5 a 2,0), `sharpen`, `max_duration` = limite + 0,03 s (`EDIT_DURATION_MARGIN`; `original` = sem limite),
+`reencode = true` (o CapCut precisa de MP4) e `audio_sync_start = true`. Validados pelo `PresetParams`; o início do
+corte (`start_seconds` -> `trim_start`, até 86400 s) é gravado depois da validação, como no `edit_service`. Sem preset
+e sem nenhuma mudança: 422 `edit_no_changes`.
+
+Legendas e exportação (modos com legenda): modelo (`caption.style_id`, 0 = embutido) e `caption.overrides` (as mesmas
+opções do job avulso: resolução, fps, qualidade, manter o áudio original), com o mesmo instantâneo por job. Saída na
+pasta do lote com o nome atual `<nome>_legendado.mp4`. Resolução/FPS/qualidade não se aplicam ao modo `edit` (o
+resumo do lote traz esses campos nulos). `keep_original_audio` vai no instantâneo; no `edit_caption` o "áudio
+original" é o do vídeo editado (a fonte do CapCut).
+
+Pasta do lote: `<pasta de saída>/Lote <id>` (absoluta, criada quando o primeiro vídeo termina). Nome padrão
+"Lote <id> · dd/mm HH:MM" (fuso das exportações), editável no pedido. `options` do lote = instantâneo do pedido:
+`mode`, `include_done`, `output_dir`, `selection` (quantidade de ids ou o filtro), `caption` (opções de legenda sem o
+estilo serializado), `keep_original_audio`, `edit` (params, preset, duração, início, velocidade, nitidez, resumo) e
+`summary` (resumo legível).
+
+Seleção: `media_ids` OU `filter` = `{q, profile, folder (chave de pasta do Editar), captioned: any|yes|no}`, resolvido
+no servidor (todos os filtrados). Só vídeos originais (sem capas). Teto de 1000 vídeos por lote (422
+`batch_too_large` com a contagem, conferido antes de pular duplicados). Duplicação: pula mídia com job das Legendas
+aberto em qualquer modo (`already_queued`) e mídia com job concluído no mesmo `mode` (`already_done`;
+`include_done: true` reprocessa). "Já legendado" (`captioned`, marca do seletor) = job concluído em `caption` ou
+`edit_caption`. Nenhum vídeo criado: 422 `batch_empty` e nada é gravado.
+
+Pausas: lote pausado (`paused = 1`): o executor não pega jobs dele (o que está rodando termina); a edição no worker
+continua. Retomar acorda o executor. Pausa individual (`held = 1`) só em job `pending`/`waiting` (409
+`capcut_job_not_holdable` em execução ou encerrado). Nenhuma das duas mexe na pausa global (`pause_reason` continua
+igual).
+
+Cancelar o lote: grava `cancel_requested` (o executor para de pegar jobs do lote), cancela na hora os `pending`/
+`waiting`, o job em execução recebe o cancelamento individual de sempre (sinal ao núcleo, fechamento seguro do
+CapCut) e o lote de edição, se ainda aberto, é cancelado pelo cancelamento de lote do worker
+(`import_service.cancel_batch`). Concluídos ficam. Lote sem job aberto: 409 `capcut_batch_finished`, nada é
+gravado. Cancelar (lote ou job) zera a pausa individual. Cancelar UM job do lote não cancela a edição dele. Reprocessar
+falhas: `failed`/`cancelled` do lote voltam para a fila (tentativas zeradas, transcrição mantida, `cancel_requested`
+do lote limpo, pausa individual zerada); se a edição do job falhou, foi cancelada, está aberta com cancelamento
+pedido, sumiu ou concluiu sem a rendition (linha ou arquivo), um novo job `process` com os mesmos params entra no
+mesmo lote de edição (reaberto) e `edit_job_id` passa a apontar para ele. "Tentar de novo" de um job do lote segue a
+mesma regra. Concluídos nunca são refeitos.
+
+Status derivado (contagens: `pending`/`waiting` sem pausa individual; `held` = na fila com pausa individual): sem job
+aberto, `cancelled` (cancelamento pedido ou todos cancelados), `completed_with_errors` (algum com erro ou cancelado)
+ou `completed`; com job aberto, `cancelled` (cancelamento em andamento), `running` (há job em execução), `paused`
+(lote pausado ou só restam jobs com pausa individual) ou `running`. `finished_at` é gravado quando não resta job
+aberto e limpo quando volta a ter (executor ao fim de cada job, ações da API e recuperação no startup). `progress` =
+média do `progress` dos jobs (concluído = 100).
+
+Estimativa: média real de `finished_at - started_at` dos concluídos do lote; sem nenhum, dos últimos 20 concluídos do
+mesmo modo (qualquer lote ou avulso); sem histórico, null. `eta_seconds` = média x abertos - tempo já decorrido do
+job em execução (mín. 0). `started_at` é o da primeira vez que o job foi pego, então esperas de "CapCut ocupado" e
+tentativas entram na média. `GET /estimate?mode=&count=` usa a média do modo para a seleção antes de criar.
+
+ZIP (`GET /batches/{id}/zip`): os MP4 concluídos do lote que ainda existem (só dentro da pasta registrada no job),
+sem compressão, num arquivo temporário `<data_dir>/tmp/capcut-lote-<id>-<hex>.zip` apagado depois do envio (e na
+falha); nomes repetidos ganham " (2)". Antes, a mesma conta de espaço do ZIP da exportação (`services/export_zip.py`:
+soma + margem contra o livre menos a reserva dos downloads e os ZIPs na fila): sem espaço, 507 `export_no_space`.
+Sobras `capcut-lote-*.zip` (ex.: envio interrompido) são apagadas no startup (`recover_capcut_jobs`).
+Remover do histórico (`DELETE`) só oculta o lote (`hidden = 1`); os arquivos ficam. O lote de edição aparece também
+no histórico da página Editar (é um lote de edição comum).
+
+Recuperação: o lote, o instantâneo e o vínculo `edit_job_id` estão no banco; a recuperação de sempre devolve o job
+`running` para a fila e a do worker cuida da edição. Queda no meio do cancelamento de um lote (`cancel_requested = 1`
+gravado, jobs ainda abertos): no startup os jobs abertos desse lote terminam `cancelled` (no startup nada está
+rodando, então isso vale também para o que estava `running`); "Reprocessar falhas" limpa o cancelamento do lote.
+
+Testes: `tests/test_capcut_batches.py` (processador do CapCut falso e worker com o processor falso) e
+`tests/test_capcut_batches_real.py` (modo só edição com FFmpeg real e vídeo sintético: duração com corte no início,
+velocidade e limite).
+
 ## Limitações conhecidas
 
 - Formato e nomes de interface verificados só no CapCut 9.7.1.4203 em português; outra versão/idioma pode quebrar a

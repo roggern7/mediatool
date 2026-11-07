@@ -130,7 +130,8 @@ def core_status(ctx: AppContext) -> dict[str, Any]:
             reason = "Não foi possível ler o estado do CapCut."
     counts = repo(ctx).counts()
     queue = {**{key: counts[key] for key in ("pending", "running", "waiting", "failed", "completed", "cancelled")},
-             "paused": queue_paused(ctx), "pause_reason": ctx.app_settings.get_state(PAUSE_REASON_KEY)}
+             "paused": queue_paused(ctx), "pause_reason": ctx.app_settings.get_state(PAUSE_REASON_KEY),
+             "held": repo(ctx).held_count()}
     settings = get_settings(ctx)
     return {**info, "available": available, "reason": None if available else reason, "queue": queue,
             "settings": settings, "export_mode": settings["export_mode"]}
@@ -550,10 +551,20 @@ def enqueue_after_download(ctx: AppContext, media_id: int, batch_id: int | None)
     return result["created"][0]["id"] if result["created"] else None
 
 
+EDIT_DONE_STATUSES = ("completed", "failed", "cancelled")   # estados finais da tabela `jobs`
+MSG_EDITING = "Editando"
+
+
 def job_out(job: dict[str, Any]) -> dict[str, Any]:
     options = dict(job["options"] or {})
     options.pop("style", None)
     output_path = job["output_path"]
+    edit_status = job.get("edit_status")
+    edit_raw = job.get("edit_progress_raw")
+    edit_progress = (int(round(min(1.0, max(0.0, float(edit_raw))) * 100)) if edit_raw is not None
+                     else 100 if edit_status == "completed" else None)
+    waiting_edit = (edit_status is not None and edit_status not in EDIT_DONE_STATUSES
+                    and job["status"] in ("pending", "waiting"))
     return {
         **{key: job[key] for key in (
             "id", "media_id", "media_profile", "media_type", "status", "stage", "stage_progress", "progress", "detail",
@@ -571,6 +582,13 @@ def job_out(job: dict[str, Any]) -> dict[str, Any]:
         "output_name": Path(output_path).name if output_path else None,
         "output_exists": bool(output_path) and Path(output_path).is_file(),
         "warnings": list(job["warnings"] or []),
+        "detail": MSG_EDITING if waiting_edit else job["detail"],
+        "capcut_batch_id": job.get("capcut_batch_id"),
+        "mode": job.get("mode") or "caption",
+        "held": bool(job.get("held")),
+        "edit_job_id": job.get("edit_job_id"),
+        "edit_status": edit_status,
+        "edit_progress": edit_progress,
     }
 
 
@@ -596,15 +614,68 @@ def cancel_job(ctx: AppContext, job_id: int) -> dict[str, Any]:
         runner = ctx.capcut_runner
         if runner is None or not runner.cancel(job_id):
             repo(ctx).finish_orphan_cancel(job_id)
-    return get_job(ctx, job_id)
+    view = get_job(ctx, job_id)
+    if view["capcut_batch_id"] is not None:
+        repo(ctx).refresh_batch_finished(view["capcut_batch_id"])
+    return view
 
 
 def retry_job(ctx: AppContext, job_id: int) -> dict[str, Any]:
     get_job(ctx, job_id)
-    if not repo(ctx).retry(job_id):
-        raise AppError(409, "capcut_job_not_retryable", "Só é possível tentar de novo um job com erro ou cancelado.")
+    with ctx.db.transaction():
+        job = repo(ctx).get_job(job_id)
+        if job is None or not retry_with_edit(ctx, job):
+            raise AppError(409, "capcut_job_not_retryable",
+                           "Só é possível tentar de novo um job com erro ou cancelado.")
     _wake(ctx)
+    ctx.wake_worker()
     return get_job(ctx, job_id)
+
+
+def _edit_needs_redo(ctx: AppContext, edit: dict[str, Any] | None) -> bool:
+    """A edição de um job de lote precisa ser refeita: não existe, falhou/foi cancelada, está aberta com cancelamento
+    pedido ou concluiu mas a rendition (linha ou arquivo) sumiu."""
+    if edit is None or edit["status"] in ("failed", "cancelled"):
+        return True
+    if edit["status"] != "completed":
+        return bool(edit.get("cancel_requested"))
+    rendition = ctx.media.get_rendition(edit["rendition_id"]) if edit.get("rendition_id") else None
+    if rendition is None:
+        return True
+    try:
+        return not ctx.storage.resolve(rendition["processed_path"]).is_file()
+    except Exception:  # noqa: BLE001 - caminho inválido no banco: mesmo efeito de arquivo ausente
+        return True
+
+
+def retry_with_edit(ctx: AppContext, job: dict[str, Any]) -> bool:
+    """Nova tentativa (`failed`/`cancelled` -> `pending`, mesma regra do `retry`). Job de lote com edição cuja edição
+    falhou, foi cancelada, está sendo cancelada, não existe mais ou concluiu sem a rendition no disco ganha um novo job `process` com os mesmos params (no mesmo lote de
+    edição, reaberto) e o `edit_job_id` aponta para ele. O lote do job deixa de estar cancelado. Chamar numa
+    transação. False = o estado não permite."""
+    if job["status"] not in ("failed", "cancelled"):
+        return False
+    if job.get("mode") in ("edit", "edit_caption") and job.get("media_id") is not None:
+        edit = ctx.jobs.get(job["edit_job_id"]) if job.get("edit_job_id") else None
+        params = (edit or {}).get("params") or (job["options"] or {}).get("edit_params")
+        media = ctx.media.get(job["media_id"])
+        if _edit_needs_redo(ctx, edit) and params is not None and media is not None:
+            from app.services.edit_service import EDIT_PRESET_NAME
+
+            edit_batch_id = (edit or {}).get("batch_id") or ctx.db.scalar(
+                "SELECT edit_batch_id FROM capcut_batches WHERE id = ?", (job.get("capcut_batch_id"),))
+            new_id = ctx.jobs.create_process(media=media, batch_id=edit_batch_id, preset_id=None,
+                                             preset_name=EDIT_PRESET_NAME, params=params)
+            if edit_batch_id is not None:
+                ctx.batches.reopen(edit_batch_id)
+                ctx.batches.sync_found(edit_batch_id)
+            repo(ctx).update_job(job["id"], edit_job_id=new_id)
+    if not repo(ctx).retry(job["id"]):
+        return False
+    if job.get("capcut_batch_id") is not None:
+        repo(ctx).update_batch(job["capcut_batch_id"], cancel_requested=0)
+        repo(ctx).refresh_batch_finished(job["capcut_batch_id"])
+    return True
 
 
 def work_dir(ctx: AppContext, job_id: int) -> Path:

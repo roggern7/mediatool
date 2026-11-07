@@ -1,20 +1,29 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from starlette.responses import Response
 
 from app.api.deps import MAX_ID, Ctx, IdPath
 from app.core.security import CLIENT_HEADER
+from app.db.repositories.edit_folders import FOLDER_KEY_PATTERN
 from app.schemas.capcut import (
     AnimationPage,
     AnimationType,
+    BatchCreate,
+    BatchCreated,
+    BatchList,
+    BatchOut,
+    BatchStatus,
     CaptionDraft,
     CapCutSettingsOut,
+    CapCutMode,
     CapCutSettingsUpdate,
     CapCutStatusOut,
+    EstimateOut,
     FontPage,
     FontSource,
     JobList,
@@ -22,6 +31,7 @@ from app.schemas.capcut import (
     JobsCreate,
     JobsCreated,
     JobStatus,
+    LibraryPage,
     PreviewCreate,
     PreviewCreated,
     PreviewOut,
@@ -30,7 +40,8 @@ from app.schemas.capcut import (
     StyleOut,
     StyleUpdate,
 )
-from app.services import capcut_service
+from app.schemas.common import SafeText
+from app.services import capcut_batch_service, capcut_service
 
 router = APIRouter(prefix="/capcut", tags=["legendas capcut"])
 
@@ -219,3 +230,115 @@ def pause_queue(ctx: Ctx) -> dict[str, bool]:
 @router.post("/queue/resume", response_model=QueueState)
 def resume_queue(ctx: Ctx) -> dict[str, bool]:
     return capcut_service.set_queue_paused(ctx, False)
+
+
+# ---- lotes (docs/CAPCUT.md, "Lotes") --------------------------------------------------------------------------------
+@router.get("/library", response_model=LibraryPage)
+def library(
+    ctx: Ctx,
+    q: Annotated[SafeText | None, Query(max_length=200)] = None,
+    profile: Annotated[SafeText | None, Query(max_length=64)] = None,
+    folder: Annotated[str | None, Query(pattern=FOLDER_KEY_PATTERN)] = None,
+    captioned: Literal["any", "yes", "no"] = "any",
+    limit: Annotated[int, Query(ge=1, le=200)] = 60,
+    before_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+) -> dict[str, Any]:
+    """Seletor: vídeos originais (sem capas), id DESC, keyset; cada item com `capcut: {done, last_output_name, open}`."""
+    return capcut_batch_service.library(ctx, q=q, profile=profile, folder=folder, captioned=captioned, limit=limit,
+                                        before_id=before_id)
+
+
+@router.get("/estimate", response_model=EstimateOut)
+def estimate(ctx: Ctx, mode: CapCutMode, count: Annotated[int, Query(ge=0, le=100_000)] = 1) -> dict[str, Any]:
+    """Média real por vídeo dos últimos 20 concluídos do modo; sem histórico, nulos."""
+    return capcut_batch_service.estimate(ctx, mode, count)
+
+
+@router.post("/batches", response_model=BatchCreated, status_code=202)
+def create_batch(ctx: Ctx, body: BatchCreate) -> dict[str, Any]:
+    """Um job por vídeo (por `media_ids` ou por `filter`, até 1000); pula os que já estão na fila e os já concluídos
+    no mesmo modo (sem `include_done`)."""
+    return capcut_batch_service.create_batch(ctx, body)
+
+
+@router.get("/batches", response_model=BatchList)
+def list_batches(
+    ctx: Ctx,
+    status: BatchStatus | None = None,
+    mode: CapCutMode | None = None,
+    q: Annotated[SafeText | None, Query(max_length=200)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 20,
+    offset: Annotated[int, Query(ge=0, le=2**31)] = 0,
+) -> dict[str, Any]:
+    """Histórico (sem os removidos), mais recentes primeiro."""
+    return capcut_batch_service.list_batches(ctx, status=status, mode=mode, q=q, limit=limit, offset=offset)
+
+
+@router.get("/batches/{batch_id}", response_model=BatchOut)
+def get_batch(ctx: Ctx, batch_id: IdPath) -> dict[str, Any]:
+    return capcut_batch_service.get_batch(ctx, batch_id)
+
+
+@router.get("/batches/{batch_id}/jobs", response_model=JobList)
+def list_batch_jobs(
+    ctx: Ctx,
+    batch_id: IdPath,
+    status: JobStatus | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0, le=2**31)] = 0,
+) -> dict[str, Any]:
+    """Na ordem da fila; `counts` = contagens do lote."""
+    return capcut_batch_service.list_batch_jobs(ctx, batch_id, status=status, limit=limit, offset=offset)
+
+
+@router.post("/batches/{batch_id}/pause", response_model=BatchOut)
+def pause_batch(ctx: Ctx, batch_id: IdPath) -> dict[str, Any]:
+    return capcut_batch_service.set_paused(ctx, batch_id, True)
+
+
+@router.post("/batches/{batch_id}/resume", response_model=BatchOut)
+def resume_batch(ctx: Ctx, batch_id: IdPath) -> dict[str, Any]:
+    return capcut_batch_service.set_paused(ctx, batch_id, False)
+
+
+@router.post("/batches/{batch_id}/cancel", response_model=BatchOut)
+def cancel_batch(ctx: Ctx, batch_id: IdPath) -> dict[str, Any]:
+    return capcut_batch_service.cancel_batch(ctx, batch_id)
+
+
+@router.post("/batches/{batch_id}/retry-failed", response_model=BatchOut)
+def retry_failed_batch(ctx: Ctx, batch_id: IdPath) -> dict[str, Any]:
+    return capcut_batch_service.retry_failed(ctx, batch_id)
+
+
+@router.post("/batches/{batch_id}/reveal")
+def reveal_batch(ctx: Ctx, batch_id: IdPath) -> dict[str, bool]:
+    """Abre a pasta do lote no Explorer."""
+    capcut_batch_service.reveal_batch(ctx, batch_id)
+    return {"ok": True}
+
+
+@router.get("/batches/{batch_id}/zip", response_class=FileResponse)
+def batch_zip(ctx: Ctx, batch_id: IdPath) -> FileResponse:
+    """ZIP (sem compressão) com os vídeos concluídos que ainda existem; o temporário é apagado depois do envio."""
+    path = capcut_batch_service.build_zip(ctx, batch_id)
+    return FileResponse(path, media_type="application/zip", filename=f"lote-{batch_id}.zip",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
+
+
+@router.delete("/batches/{batch_id}", status_code=204)
+def delete_batch(ctx: Ctx, batch_id: IdPath) -> Response:
+    """Remove do histórico (os arquivos ficam); 409 `capcut_batch_active` com vídeo na fila ou em andamento."""
+    capcut_batch_service.hide_batch(ctx, batch_id)
+    return Response(status_code=204)
+
+
+@router.post("/jobs/{job_id}/hold", response_model=JobOut)
+def hold_job(ctx: Ctx, job_id: IdPath) -> dict[str, Any]:
+    """Pausa individual (só na fila); 409 `capcut_job_not_holdable`."""
+    return capcut_batch_service.hold_job(ctx, job_id, True)
+
+
+@router.post("/jobs/{job_id}/release", response_model=JobOut)
+def release_job(ctx: Ctx, job_id: IdPath) -> dict[str, Any]:
+    return capcut_batch_service.hold_job(ctx, job_id, False)

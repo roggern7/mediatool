@@ -1,10 +1,14 @@
 // Legendas CapCut: rótulos, progresso, polling e patch das configurações (funções puras, testadas em capcut.test.ts).
 
 import type {
+  CapCutBitrate,
   CapCutExportMode,
+  CapCutFps,
   CapCutJob,
   CapCutJobStatus,
   CapCutJobsCreated,
+  CapCutQueueCounts,
+  CapCutResolution,
   CapCutSettings,
   CapCutSettingsUpdate,
   CapCutStage,
@@ -92,6 +96,30 @@ export function jobProgress(job: Pick<CapCutJob, "status" | "progress" | "stage"
 
 export function isCapcutActive(job: Pick<CapCutJob, "status">): boolean {
   return CAPCUT_ACTIVE.has(job.status);
+}
+
+/** Pausa individual vale só para job na fila ou aguardando; nos outros status `held` é ignorado. */
+export function isHeldJob(job: Pick<CapCutJob, "status" | "held">): boolean {
+  return Boolean(job.held) && (job.status === "pending" || job.status === "waiting");
+}
+
+/** Status do job na lista: "Na fila · pausado" com pausa individual; senão o rótulo do status. */
+export function jobStatusText(job: Pick<CapCutJob, "status" | "held">): string {
+  const label = CAPCUT_STATUS_LABEL[job.status];
+  return isHeldJob(job) ? `${label} · pausado` : label;
+}
+
+/**
+ * Linha da fila global. `pending` já inclui os pausados individualmente: eles aparecem entre parênteses, sem somar
+ * de novo. "Fila ativa: 1 em andamento, 5 na fila (2 pausados), 0 aguardando o CapCut, 1 com erro."
+ */
+export function queueSummaryText(q: CapCutQueueCounts): string {
+  const held = q.held ?? 0;
+  const pausedPart = held > 0 ? ` (${formatCount(held)} ${held === 1 ? "pausado" : "pausados"})` : "";
+  return (
+    `Fila ${q.paused ? "pausada" : "ativa"}: ${formatCount(q.running)} em andamento, ${formatCount(q.pending)} na fila` +
+    `${pausedPart}, ${formatCount(q.waiting)} aguardando o CapCut, ${formatCount(q.failed)} com erro.`
+  );
 }
 
 /** 2 s com algum job ativo; ocioso, os degraus de lib/polling. */
@@ -232,3 +260,31 @@ export function exportModeStatusText(
   }
   return { ok: true, text: `${exportModeLabel(mode)}: ${exportModeHelp(mode)}` };
 }
+
+/** Opções das configurações e da exportação do lote (mesmos rótulos nos dois lugares). */
+export const CAPCUT_RESOLUTIONS: { value: CapCutResolution; label: string }[] = [
+  { value: "original", label: "Igual ao original" },
+  { value: "480P", label: "480p" },
+  { value: "720P", label: "720p" },
+  { value: "1080P", label: "1080p" },
+  { value: "2K", label: "2K" },
+  { value: "4K", label: "4K" },
+];
+export const CAPCUT_BITRATES: { value: CapCutBitrate; label: string }[] = [
+  { value: "low", label: "Menor" },
+  { value: "recommended", label: "Recomendada" },
+  { value: "high", label: "Maior" },
+];
+export const CAPCUT_FPS_OPTIONS: { value: CapCutFps; label: string }[] = [
+  { value: "60", label: "60 fps (padrão)" },
+  { value: "50", label: "50 fps" },
+  { value: "30", label: "30 fps" },
+  { value: "25", label: "25 fps" },
+  { value: "24", label: "24 fps" },
+  { value: "original", label: "Igual ao original" },
+];
+export const CAPCUT_WHISPER_MODELS: { value: CapCutWhisperModel; label: string }[] = [
+  { value: "small", label: "Rápido (small)" },
+  { value: "medium", label: "Equilibrado (medium)" },
+  { value: "large-v3-turbo", label: "Mais preciso (large-v3-turbo)" },
+];

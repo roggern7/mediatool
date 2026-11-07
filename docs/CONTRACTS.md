@@ -1826,9 +1826,27 @@ Automático após o download: com `auto_after_download`, cada vídeo NOVO com pa
 (depois do insert e da miniatura) vira um job `auto` do lote. Duplicatas e reaproveitados não disparam; falha ao
 enfileirar só vai para o log e não muda o resultado do download.
 
+Lotes (migration **0031**, estritamente aditiva; reversão por `migrations/down/0031_capcut_batches.down.sql`; regras
+em `docs/CAPCUT.md`, "Lotes"; serviço `app/services/capcut_batch_service.py`): tabela `capcut_batches` (`name`,
+`mode` `caption`|`edit`|`edit_caption`, `options` = instantâneo JSON do pedido, `output_dir` absoluto =
+`<pasta de saída>/Lote <id>`, `edit_batch_id` = lote `batches` dos jobs `process` da edição, `paused`,
+`cancel_requested`, `hidden`, `created_at`, `finished_at`, `updated_at`) e, em `capcut_jobs`, `capcut_batch_id`
+(`ON DELETE SET NULL`; `batch_id` continua sendo o lote de download do automático), `mode` (padrão `caption`),
+`edit_job_id` (jobs.id da edição) e `held` (pausa individual). Jobs existentes: `caption`, sem lote, sem pausa. O
+executor só pega job sem `held`, de lote não pausado e sem cancelamento pedido, e com a edição em estado final. Status
+derivado do lote: `running`|`paused`|`completed`|`completed_with_errors`|`cancelled`.
+
+`Batch` = `{id, name, mode, status, paused, cancel_requested, created_at, finished_at, output_dir, output_exists,
+counts: {total, pending, running, waiting, held, completed, failed, cancelled} (pending/waiting sem os `held`),
+progress 0..100 (média dos jobs, concluído = 100), per_video_seconds, eta_seconds, elapsed_seconds (desde a criação até
+o fim ou agora), current_job: Job|null (o job em execução), summary: {style_name, edit, resolution, fps, bitrate,
+keep_audio, highlight} (campos de legenda/exportação null no modo `edit`; `edit` ex.: "Meu preset · 30 s · 1,2x ·
+nitidez · início em 5 s"), options}`. `Job` ganha `capcut_batch_id`, `mode`, `held`, `edit_job_id`, `edit_status`
+(status do job de edição na tabela `jobs`) e `edit_progress` (0..100); enquanto espera a edição, `detail` = "Editando".
+
 | Método | Caminho | Corpo / query | Resposta |
 |---|---|---|---|
-| GET | /api/capcut/status | | `{available, reason, installed, version, drafts_dir, running_pids, deps, skill, models, queue: {pending, running, waiting, failed, completed, cancelled, paused}, settings, export_mode, isolated: {available, reason}}` (`isolated` = pré-requisitos do modo isolado presentes; não cria a área de trabalho); sem o núcleo: 200 com `available: false` |
+| GET | /api/capcut/status | | `{available, reason, installed, version, drafts_dir, running_pids, deps, skill, models, queue: {pending, running, waiting, failed, completed, cancelled, paused, pause_reason, held}, settings, export_mode, isolated: {available, reason}}` (`isolated` = pré-requisitos do modo isolado presentes; não cria a área de trabalho); sem o núcleo: 200 com `available: false` |
 | GET/PUT | /api/capcut/settings | PUT: campos parciais (`null` = padrão; `export_mode` só `isolated`\|`interactive`) | `CapCutSettings` (+ `output_dir_is_default`, `export_mode`); 422 `invalid_output_dir`\|`validation_error`; 404 `style_not_found` |
 | GET | /api/capcut/drafts | | `[{name, modified_at, text_segments, preview}]`; 409 `capcut_unavailable` ou o `code` do núcleo |
 | GET | /api/capcut/styles | | `[{id, name, builtin, is_default, source_draft, summary, created_at, design}]` (id 0 = embutido, sempre primeiro, com o `design` equivalente como ponto de partida do editor; `design` null nos copiados de rascunho) |
@@ -1852,6 +1870,19 @@ enfileirar só vai para o log e não muda o resultado do download.
 | GET | /api/capcut/jobs/{id}/file | | o vídeo legendado (download); só arquivo dentro do `output_dir` do job: 403 `not_allowed`; 404 `capcut_output_not_found` |
 | POST | /api/capcut/jobs/{id}/reveal | | `{ok: true}`: abre o Explorer com o arquivo selecionado; mesmos erros do `file` e os de abrir no sistema |
 | POST | /api/capcut/queue/pause, /api/capcut/queue/resume | | `{paused}`; pausar não interrompe o job em andamento. `GET /status` traz `queue.pause_reason` quando a pausa foi automática (o dono tentou abrir o CapCut durante a exportação isolada); retomar limpa o motivo |
+| POST | /api/capcut/jobs/{id}/hold, /api/capcut/jobs/{id}/release | | `Job` (pausa individual; só `pending`/`waiting`); 409 `capcut_job_not_holdable` |
+| GET | /api/capcut/library | `q?`, `profile?`, `folder?` (chave de pasta do Editar), `captioned` `any`\|`yes`\|`no`, `limit` 1..200 (60), `before_id?` | `{items: [Media + capcut: {done, last_output_name, open}], total, next_before_id}`: só vídeos originais (sem capas), id DESC, keyset; `done`/`captioned` = jobs concluídos com legenda (`caption`/`edit_caption`); `open` = job aberto em qualquer modo |
+| GET | /api/capcut/estimate | `mode`, `count` (1) | `{per_video_seconds, total_seconds, samples}` (média dos últimos 20 concluídos do modo; sem histórico, null) |
+| POST | /api/capcut/batches | `{name?, mode, media_ids? (até 1000) \| filter? {q, profile, folder, captioned}, include_done? (false), caption?: {style_id?, overrides?: as do POST /jobs}, edit?: {preset_id?, duration_mode original\|15\|30\|60\|custom, custom_seconds?, start_seconds? 0..86400, speed 0,5..2, sharpen}}` (um de `media_ids`/`filter`) | 202 `{batch: Batch, skipped: [{media_id, reason: media_not_found\|not_video\|cover\|already_queued\|already_done}]}`; 404 `style_not_found`\|`preset_not_found`; 422 `edit_required`\|`edit_no_changes`\|`batch_empty` (nada gravado)\|`batch_too_large` (com a contagem)\|`invalid_output_dir`\|`validation_error` |
+| GET | /api/capcut/batches | `status?`, `mode?`, `q?` (nome), `limit` 1..200 (20), `offset` | `{items: Batch[], total}` (sem os removidos, id DESC) |
+| GET | /api/capcut/batches/{id} | | `Batch`; 404 `capcut_batch_not_found` |
+| GET | /api/capcut/batches/{id}/jobs | `status?`, `limit` 1..200 (100), `offset` | `{items: Job[], total, counts}` (ordem da fila; `counts` = contagens do lote) |
+| POST | /api/capcut/batches/{id}/pause, /resume | | `Batch` (pausado: o job em execução termina; a edição no worker segue) |
+| POST | /api/capcut/batches/{id}/cancel | | `Batch` (abertos cancelados, o em execução pelo cancelamento individual; edições abertas canceladas; concluídos ficam; pausa individual zerada); 409 `capcut_batch_finished` sem job aberto (nada gravado) |
+| POST | /api/capcut/batches/{id}/retry-failed | | `Batch` (`failed`/`cancelled` voltam para a fila sem pausa individual e o cancelamento do lote é limpo; edição com erro, cancelada, em cancelamento, apagada ou sem a rendition no disco é refeita num job novo); 409 `nothing_to_retry` |
+| POST | /api/capcut/batches/{id}/reveal | | `{ok: true}`: abre a pasta do lote no Explorer; 404 `batch_folder_not_found` (nenhum vídeo terminou) e os erros de abrir no sistema |
+| GET | /api/capcut/batches/{id}/zip | | `lote-<id>.zip` (sem compressão) com os MP4 concluídos que existem (temporário em `<data_dir>/tmp/capcut-lote-*.zip`, apagado depois do envio, na falha e no startup); 404 `batch_no_results`; 507 `export_no_space` (mesma conta de espaço do ZIP da exportação) |
+| DELETE | /api/capcut/batches/{id} | | 204: some do histórico (os arquivos ficam); 409 `capcut_batch_active` com vídeo na fila ou em andamento |
 
 ## 9. Processor (`media_processor`)
 

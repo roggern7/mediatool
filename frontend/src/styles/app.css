@@ -1753,3 +1753,112 @@ details.more > summary:hover {
   background: var(--bg);
   cursor: pointer;
 }
+
+/* ---------- Legendas CapCut: lotes ---------- */
+
+.cc-status {
+  padding: 10px 14px;
+  margin-bottom: 8px;
+}
+.cc-step-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: 2px;
+}
+.cc-pick-bar {
+  flex-wrap: wrap;
+}
+.cc-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
+}
+.cc-card {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  min-width: 0;
+}
+.cc-card.on {
+  border-color: var(--accent);
+}
+.cc-card label {
+  display: grid;
+  gap: 6px;
+  cursor: pointer;
+  min-width: 0;
+}
+.cc-fieldset {
+  border: 0;
+  margin: 0 0 12px;
+  padding: 0;
+  min-width: 0;
+}
+.cc-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px 24px;
+  align-items: start;
+}
+.cc-plan {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  display: grid;
+  gap: 2px;
+}
+.cc-monitor {
+  margin-bottom: 8px;
+}
+.cc-collapse > summary h2 {
+  display: inline;
+  font-family: var(--display);
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+.cc-collapse > summary h2::before {
+  content: "▸ ";
+  color: var(--text-dim);
+}
+.cc-collapse[open] > summary h2::before {
+  content: "▾ ";
+}
+.cc-collapse-body {
+  margin-top: 12px;
+}
+.cc-selbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+@media (max-width: 760px) {
+  .cc-config-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  }
+}
