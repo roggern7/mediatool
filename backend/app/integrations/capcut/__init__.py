@@ -30,6 +30,7 @@ __all__ = [
     "ForegroundLost", "IsolatedUnavailable", "UiTimeout", "ExportFailed", "CapCutJobSpec", "CapCutResult", "process_video", "status",
     "list_caption_drafts", "extract_style", "default_style", "style_summary", "discard_job_work", "catalog_fonts",
     "catalog_animations", "font_file", "default_design", "compile_design", "design_warnings", "EXPORT_MODES",
+    "transcribe_only",
 ]
 
 EXPORT_MODES = ("isolated", "interactive")  # igual a isolated.EXPORT_MODES (este pacote não importa o pywin32)
@@ -42,6 +43,14 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event,
     from app.integrations.capcut.pipeline import process_video as run
 
     return run(spec, cancel=cancel, on_stage=on_stage, on_transcript=on_transcript)
+
+
+def transcribe_only(spec: CapCutJobSpec, *, cancel: threading.Event,
+                    on_stage: Callable[[str, float | None, str | None], None]) -> list[dict[str, Any]]:
+    """Só a transcrição do vídeo do job (sem CapCut), para a revisão das legendas. Palavras em dicionário."""
+    from app.integrations.capcut.pipeline import transcribe_only as run
+
+    return run(spec, cancel=cancel, on_stage=on_stage)
 
 
 def discard_job_work(work_dir: Path) -> None:
@@ -68,7 +77,7 @@ def status(data_dir: Path) -> dict[str, Any]:
     """Situação do CapCut, das dependências, do skill e dos modelos (só leitura, sem abrir o CapCut)."""
     from app.integrations.capcut import install as install_mod
     from app.integrations.capcut import isolated, skill
-    from app.integrations.capcut.transcribe import MODELS, model_downloaded
+    from app.integrations.capcut.transcribe import MODELS, aligner_available, model_downloaded
 
     inst = install_mod.detect()
     models_dir = Path(data_dir) / "models" / "whisper"
@@ -86,6 +95,7 @@ def status(data_dir: Path) -> dict[str, Any]:
         "skill": skill.info(),
         "isolated": isolated.availability(),
         "models": {size: model_downloaded(models_dir, size) for size in MODELS},
+        "aligner": aligner_available(models_dir),
     }
 
 

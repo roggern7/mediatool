@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { CapCutBatch, CapCutBatchCounts, CapCutSettings, PresetParams } from "../api/types";
 import {
+  BATCH_MODE_LABEL,
+  BATCH_MODE_OPTIONS,
   DEFAULT_BATCH_EDIT,
   EMPTY_SELECTION,
   type BatchPlan,
@@ -28,8 +30,11 @@ import {
   pageState,
   parseStart,
   planBlocker,
+  nextMode,
   planLines,
+  processButtonText,
   resolveEstimate,
+  selectedText,
   selectAllFiltered,
   selectionBlocker,
   selectionCount,
@@ -46,6 +51,7 @@ const SETTINGS = {
   fps: "60",
   bitrate: "recommended",
   keep_original_audio: true,
+  review_mode: "doubtful",
 } as CapCutSettings;
 
 const COUNTS: CapCutBatchCounts = {
@@ -181,7 +187,13 @@ describe("lote: pedido por modo", () => {
       name: "Meu lote",
       caption: {
         style_id: 4,
-        overrides: { resolution: "1080P", fps: "60", bitrate: "recommended", keep_original_audio: true },
+        overrides: {
+          resolution: "1080P",
+          fps: "60",
+          bitrate: "recommended",
+          keep_original_audio: true,
+          review_mode: "doubtful",
+        },
       },
     });
   });
@@ -269,14 +281,14 @@ describe("lote: pedido por modo", () => {
       "Rápido",
     );
     expect(lines).toEqual([
-      "3 vídeos · Edição + legendas",
+      "3 vídeos · Editar e legendar",
       "Edição: Preset Rápido · 15 s · 1,20x · nitidez",
       "Legendas: modelo Amarelo",
       "Exportação: 1080p · 60 fps · qualidade Recomendada · com áudio original",
       "Vídeos já processados neste modo são pulados.",
     ]);
     expect(planLines(plan({ mode: "edit", includeDone: true, selection: toggleOne(EMPTY_SELECTION, 1) }), "x", null)).toEqual([
-      "1 vídeo · Só edição",
+      "1 vídeo · Editar",
       "Edição: Sem alterações",
       "Vídeos já processados neste modo são feitos de novo.",
     ]);
@@ -386,7 +398,7 @@ describe("lote: jobs", () => {
 
   it("ações por job", () => {
     const job = { status: "pending" as const, held: false, cancel_requested: false, output_exists: false };
-    expect(batchJobActions(job)).toEqual({ hold: true, release: false, cancel: true, retry: false, download: false });
+    expect(batchJobActions(job)).toEqual({ review: false, hold: true, release: false, cancel: true, retry: false, download: false });
     expect(batchJobActions({ ...job, held: true })).toMatchObject({ hold: false, release: true });
     expect(batchJobActions({ ...job, status: "running" })).toMatchObject({ hold: false, release: false, cancel: true });
     expect(batchJobActions({ ...job, status: "failed" })).toMatchObject({ retry: true, cancel: false });
@@ -438,5 +450,35 @@ describe("lote: correções da verificação", () => {
     expect(batchEtaText(null, { per_video_seconds: 60, total_seconds: 300, samples: 3 })).toBe("~5 min (aproximado)");
     expect(batchEtaText(null, { per_video_seconds: null, total_seconds: null, samples: 0 })).toBe("—");
     expect(batchEtaText(null, undefined)).toBe("—");
+  });
+});
+
+describe("Edição CapCut: modos e barra de ação", () => {
+  it("modos com título curto e frase sem traço", () => {
+    expect(BATCH_MODE_OPTIONS.map((o) => o.label)).toEqual(["Legendar", "Editar", "Editar e legendar"]);
+    expect(BATCH_MODE_OPTIONS.map((o) => o.help)).toEqual([
+      "Transcreve e coloca legendas pelo CapCut",
+      "Corta, acelera ou dá nitidez, sem CapCut",
+      "Edita e depois legenda a versão editada",
+    ]);
+    for (const o of BATCH_MODE_OPTIONS) {
+      expect(o.help).not.toMatch(/—|--/);
+      expect(BATCH_MODE_LABEL[o.value]).toBe(o.label);
+    }
+  });
+
+  it("setas do teclado: próximo e anterior, voltando ao início", () => {
+    expect(nextMode("caption", 1)).toBe("edit");
+    expect(nextMode("edit_caption", 1)).toBe("caption");
+    expect(nextMode("caption", -1)).toBe("edit_caption");
+    expect(nextMode("edit", -1)).toBe("caption");
+  });
+
+  it("textos da barra: seleção e botão", () => {
+    expect(selectedText(1)).toBe("1 vídeo selecionado");
+    expect(selectedText(1200)).toBe("1.200 vídeos selecionados");
+    expect(processButtonText(0)).toBe("Processar vídeos");
+    expect(processButtonText(1)).toBe("Processar 1 vídeo");
+    expect(processButtonText(3)).toBe("Processar 3 vídeos");
   });
 });

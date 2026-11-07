@@ -37,14 +37,25 @@ export function navigate(to: string): void {
   document.querySelector(".main")?.scrollTo(0, 0);
 }
 
+/** Troca a URL sem nova entrada no histórico (rota antiga -> nova), mantendo a busca (ex.: "?lote=12"). */
+export function redirect(to: string): void {
+  window.history.replaceState(null, "", to + window.location.search);
+  window.dispatchEvent(new Event(NAV_EVENT));
+}
+
 export const ROUTES = {
   import: "/",
   library: "/biblioteca",
   edit: "/editar",
-  captions: "/legendas",
+  captions: "/edicao-capcut",
   queue: "/fila",
   profiles: "/analise-perfis",
   presets: "/presets",
   settings: "/configuracoes",
   postTimes: "/padroes",
 } as const;
+
+/** Rotas antigas que redirecionam para as novas (links salvos continuam funcionando). */
+export const LEGACY_ROUTES: Readonly<Record<string, string>> = {
+  "/legendas": ROUTES.captions,
+};

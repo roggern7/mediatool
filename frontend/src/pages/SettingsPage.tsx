@@ -3,7 +3,7 @@ import { RefreshCw } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
 import { type ExtensionDevice, type ExtensionPairingCode, extensionApi, formatPairingCode } from "../api/extension";
 import type { CheckStatus, InstagramProvider, Diagnostics, InstagramStatus, Preset, SessionInput, Settings, ToolDiag } from "../api/types";
-import { ConfirmDialog, ErrorLine, Field, Pill, SkeletonRows, Spinner } from "../components/ui";
+import { ConfirmDialog, ErrorLine, Field, PageHeader, Pill, SkeletonRows, Spinner } from "../components/ui";
 import { formatDateTime } from "../lib/format";
 import { diskShortage, diskText } from "../lib/disk";
 import { describeSessionTest, formatTestDuration } from "../lib/sessionTest";
@@ -34,10 +34,8 @@ export function SettingsPage() {
   const refreshDiag = () => setDiagTick((t) => t + 1);
 
   return (
-    <div className="page">
-      <div className="page-head">
-        <h1>Configurações</h1>
-      </div>
+    <div className="page page-narrow">
+      <PageHeader title="Configurações" subtitle="Conta do Instagram, processamento, extensão e diagnóstico." />
 
       <section className="section">
         <div className="section-head">

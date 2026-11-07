@@ -1,7 +1,15 @@
 import { useState } from "react";
 import { api, capcutBatchZipUrl, capcutJobFileUrl, messageOf } from "../../api/client";
 import type { CapCutBatch, CapCutJob, CapCutJobStatus } from "../../api/types";
-import { CAPCUT_STATUS_LABEL, capcutTone, isHeldJob, jobNote, jobProgress } from "../../lib/capcut";
+import {
+  CAPCUT_STATUS_LABEL,
+  capcutTone,
+  isHeldJob,
+  jobNote,
+  jobProgress,
+  needsReview,
+  REVIEW_STATUS_LABEL,
+} from "../../lib/capcut";
 import {
   BATCH_MODE_LABEL,
   BATCH_STATUS_LABEL,
@@ -18,10 +26,12 @@ import {
   isBatchRunning,
   openCount,
 } from "../../lib/capcutBatch";
+import { nextReviewJob, reviewWaitingText } from "../../lib/capcutReview";
 import { formatCount, formatDateTime } from "../../lib/format";
 import { useQuery } from "../../lib/useQuery";
 import { useToast } from "../../lib/toast";
 import { ConfirmDialog, Empty, ErrorLine, Pill, ProgressBar, SkeletonRows, Spinner, Thumb } from "../ui";
+import { ReviewDialog } from "./ReviewDialog";
 
 const PAGE_SIZE = 50;
 const JOB_FILTERS: { value: CapCutJobStatus | ""; label: string }[] = [
@@ -34,15 +44,18 @@ const JOB_FILTERS: { value: CapCutJobStatus | ""; label: string }[] = [
 ];
 
 type BatchAction = "pause" | "resume" | "cancel" | "retry-failed" | "reveal" | "remove";
-type JobAction = "hold" | "release" | "cancel" | "retry" | "reveal";
+type JobAction = "hold" | "release" | "cancel" | "retry" | "reveal" | "review";
 
 /** Etapa 4: lote em destaque (progresso, contagens, tempo restante, vídeo atual), ações do lote e lista dos jobs. */
 export function BatchMonitor({
   batchId,
   onChanged,
   onRemoved,
+  highlight = false,
 }: {
   batchId: number;
+  /** Lote que acabou de ser criado: borda em destaque e o selo "Novo". */
+  highlight?: boolean;
   /** Algo mudou (status global e histórico recarregam). */
   onChanged: () => void;
   onRemoved: () => void;
@@ -53,6 +66,7 @@ export function BatchMonitor({
   const [offset, setOffset] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [reviewing, setReviewing] = useState<number | null>(null);
   const batch = useQuery(
     `capcut-batch:${batchId}`,
     () =>
@@ -102,6 +116,10 @@ export function BatchMonitor({
   }
 
   async function runJob(job: CapCutJob, action: JobAction) {
+    if (action === "review") {
+      setReviewing(job.id);
+      return;
+    }
     setBusy(`job:${job.id}`);
     try {
       if (action === "hold") await api.holdCapcutJob(job.id);
@@ -119,13 +137,23 @@ export function BatchMonitor({
   }
 
   const b = batch.data;
-  // Edição + legendas sem histórico: o servidor não estima; aproxima pela média de "Só legendas" para os abertos.
+  // Editar e legendar sem histórico: o servidor não estima; aproxima pela média de "Legendar" para os abertos.
   const openNow = b ? openCount(b.counts) : 0;
   const wantApprox = b !== undefined && b.mode === "edit_caption" && b.eta_seconds === null && openNow > 0 && b.status !== "cancelled";
   const approx = useQuery(wantApprox ? `capcut-batch-eta:${batchId}:${openNow}` : "capcut-batch-eta:off", () =>
     wantApprox ? api.capcutEstimate("caption", openNow) : Promise.resolve(undefined),
   );
   const etaText = b ? batchEtaText(b.eta_seconds, wantApprox ? approx.data : undefined) : "—";
+  // Lote com vídeos aguardando a revisão das legendas: o próximo a revisar ("Revisar próximo").
+  const reviewCount = b?.counts.review ?? 0;
+  const waitingJobs = useQuery(
+    reviewCount > 0 ? `capcut-batch-review:${batchId}:${reviewCount}` : "capcut-batch-review:off",
+    () =>
+      reviewCount > 0
+        ? api.listCapcutBatchJobs(batchId, { status: "waiting", limit: 200, offset: 0 })
+        : Promise.resolve(undefined),
+  );
+  const nextReview = reviewCount > 0 ? nextReviewJob(waitingJobs.data?.items ?? []) : null;
   if (b === undefined) {
     return (
       <div className="panel">
@@ -137,11 +165,12 @@ export function BatchMonitor({
   const page = jobs.data;
 
   return (
-    <div className="panel cc-monitor">
+    <div className={`panel cc-monitor${highlight ? " cc-monitor-new" : ""}`}>
       <div className="row between">
         <div style={{ minWidth: 0 }}>
           <div className="row" style={{ gap: 8 }}>
             <strong>{b.name}</strong>
+            {highlight ? <Pill tone="accent">Novo</Pill> : null}
             <Pill tone={batchTone(b.status)}>{BATCH_STATUS_LABEL[b.status]}</Pill>
             <span className="muted small">{BATCH_MODE_LABEL[b.mode]}</span>
             {batch.loading ? <Spinner label="Atualizando" /> : null}
@@ -170,6 +199,7 @@ export function BatchMonitor({
         <Counter n={b.counts.running} label="Em andamento" />
         <Counter n={b.counts.failed} label="Com erro" />
         <Counter n={b.counts.held} label="Pausados" />
+        {reviewCount > 0 ? <Counter n={reviewCount} label={REVIEW_STATUS_LABEL} /> : null}
         <div className="counter">
           <div className="n">{isBatchRunning(b) || b.paused ? etaText : formatEta(null)}</div>
           <div className="l">
@@ -179,6 +209,22 @@ export function BatchMonitor({
         </div>
       </div>
 
+      {reviewCount > 0 ? (
+        <div className="selection-bar" role="status">
+          <span className="grow small">
+            <strong>{reviewWaitingText(reviewCount)}</strong>
+            <span className="muted"> · confira as legendas antes de exportar</span>
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            disabled={nextReview === null}
+            onClick={() => nextReview && setReviewing(nextReview.id)}
+          >
+            Revisar próximo
+          </button>
+        </div>
+      ) : null}
       {b.current_job ? (
         <div className="selection-bar" role="status">
           <Thumb src={b.current_job.thumbnail_url} mediaType={b.current_job.media_type ?? "video"} size={32} />
@@ -277,6 +323,17 @@ export function BatchMonitor({
         </>
       )}
 
+      {reviewing !== null ? (
+        <ReviewDialog
+          jobId={reviewing}
+          onClose={() => setReviewing(null)}
+          onApproved={() => {
+            setReviewing(null);
+            waitingJobs.reload();
+            refresh();
+          }}
+        />
+      ) : null}
       {confirmCancel ? (
         <ConfirmDialog
           title="Cancelar lote"
@@ -382,8 +439,8 @@ function BatchJobRow({
         </span>
       </td>
       <td>
-        <Pill tone={isHeldJob(job) ? "warn" : capcutTone(job.status)}>
-          {isHeldJob(job) ? "Pausado" : CAPCUT_STATUS_LABEL[job.status]}
+        <Pill tone={isHeldJob(job) || needsReview(job) ? "warn" : capcutTone(job.status)}>
+          {needsReview(job) ? REVIEW_STATUS_LABEL : isHeldJob(job) ? "Pausado" : CAPCUT_STATUS_LABEL[job.status]}
         </Pill>
       </td>
       <td className="muted small">{batchJobStep(job)}</td>
@@ -392,6 +449,11 @@ function BatchJobRow({
       </td>
       <td className="muted small col-opt">{note || "—"}</td>
       <td className="nowrap" style={{ textAlign: "right" }}>
+        {can.review ? (
+          <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => onAction("review")}>
+            Revisar
+          </button>
+        ) : null}
         {can.hold ? (
           <button type="button" className="btn btn-sm btn-ghost" disabled={busy} onClick={() => onAction("hold")}>
             Pausar

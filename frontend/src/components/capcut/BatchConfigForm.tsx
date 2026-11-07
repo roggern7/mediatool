@@ -1,6 +1,14 @@
-import { useId, useState } from "react";
-import type { CapCutBatchMode, CapCutBitrate, CapCutFps, CapCutResolution, CapCutStyle, Preset } from "../../api/types";
-import { CAPCUT_BITRATES, CAPCUT_FPS_OPTIONS, CAPCUT_RESOLUTIONS } from "../../lib/capcut";
+import { useId, useRef, useState } from "react";
+import type {
+  CapCutBatchMode,
+  CapCutBitrate,
+  CapCutFps,
+  CapCutResolution,
+  CapCutReviewMode,
+  CapCutStyle,
+  Preset,
+} from "../../api/types";
+import { CAPCUT_BITRATES, CAPCUT_FPS_OPTIONS, CAPCUT_RESOLUTIONS, CAPCUT_REVIEW_MODES } from "../../lib/capcut";
 import {
   BATCH_MODE_OPTIONS,
   BATCH_SPEED_MAX,
@@ -11,13 +19,14 @@ import {
   editFormFromPreset,
   modeHasCaption,
   modeHasEdit,
+  nextMode,
   snapBatchSpeed,
 } from "../../lib/capcutBatch";
 import { DURATION_NOTE, DURATION_OPTIONS, SHARPEN_DESCRIPTION, SHARPEN_LABEL, formatEditSpeed } from "../../lib/editSettings";
 import { parseDecimal } from "../../lib/format";
 import { Field, SkeletonRows, Switch } from "../ui";
 
-/** Etapa 2: o que fazer (legendas, edição ou os dois), modelo, edição, exportação e reprocessar. */
+/** Etapa 2: o que fazer (cartões Legendar, Editar, Editar e legendar), modelo, edição, exportação e reprocessar. */
 export function BatchConfigForm({
   mode,
   onMode,
@@ -52,26 +61,12 @@ export function BatchConfigForm({
   const defaultStyle = styles?.find((s) => s.is_default);
   return (
     <div className="cc-config">
-      <fieldset className="cc-fieldset">
-        <legend className="field-label">O que fazer</legend>
-        <div className="radio-list" role="radiogroup" aria-label="O que fazer">
-          {BATCH_MODE_OPTIONS.map((o) => (
-            <label key={o.value} className="radio">
-              <input
-                type="radio"
-                name={`${base}-mode`}
-                value={o.value}
-                checked={mode === o.value}
-                onChange={() => onMode(o.value)}
-              />
-              <span>
-                {o.label}
-                <span className="muted small"> — {o.help}</span>
-              </span>
-            </label>
-          ))}
+      <div className="cc-fieldset">
+        <div className="field-label" id={`${base}-mode-label`}>
+          O que fazer
         </div>
-      </fieldset>
+        <ModeCards base={base} mode={mode} onMode={onMode} />
+      </div>
 
       <div className="cc-config-grid">
         {modeHasCaption(mode) ? (
@@ -126,10 +121,59 @@ export function BatchConfigForm({
         <input type="checkbox" checked={includeDone} onChange={(e) => onIncludeDone(e.target.checked)} />
         <span>{modeHasCaption(mode) ? "Reprocessar vídeos já legendados" : "Reprocessar vídeos já editados"}</span>
       </label>
-      <div className="field-hint">
-        Desmarcado, os vídeos já concluídos neste modo e os que já estão na fila são pulados.
-        {mode === "edit" ? " No modo Só edição, resolução, FPS e qualidade não se aplicam (o CapCut não é aberto)." : ""}
-      </div>
+      <div className="field-hint">Sem marcar, os vídeos já feitos neste modo e os que estão na fila ficam de fora.</div>
+    </div>
+  );
+}
+
+/** Cartões selecionáveis do modo: grupo de rádio acessível (Tab entra no marcado; setas trocam e já escolhem). */
+function ModeCards({
+  base,
+  mode,
+  onMode,
+}: {
+  base: string;
+  mode: CapCutBatchMode;
+  onMode: (mode: CapCutBatchMode) => void;
+}) {
+  const refs = useRef(new Map<CapCutBatchMode, HTMLButtonElement>());
+  function move(step: 1 | -1) {
+    const next = nextMode(mode, step);
+    onMode(next);
+    refs.current.get(next)?.focus();
+  }
+  return (
+    <div className="cc-modes" role="radiogroup" aria-labelledby={`${base}-mode-label`}>
+      {BATCH_MODE_OPTIONS.map((o) => {
+        const on = mode === o.value;
+        return (
+          <button
+            key={o.value}
+            ref={(el) => {
+              if (el) refs.current.set(o.value, el);
+              else refs.current.delete(o.value);
+            }}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            tabIndex={on ? 0 : -1}
+            className={`cc-mode${on ? " on" : ""}`}
+            onClick={() => onMode(o.value)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+                e.preventDefault();
+                move(1);
+              } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+                e.preventDefault();
+                move(-1);
+              }
+            }}
+          >
+            <span className="cc-mode-title">{o.label}</span>
+            <span className="cc-mode-help">{o.help}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -307,6 +351,20 @@ function ExportFields({
           onChange={(e) => onChange({ ...form, bitrate: e.target.value as CapCutBitrate })}
         >
           {CAPCUT_BITRATES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Revisar legendas" htmlFor={`${base}-review`}>
+        <select
+          id={`${base}-review`}
+          className="select"
+          value={form.review_mode}
+          onChange={(e) => onChange({ ...form, review_mode: e.target.value as CapCutReviewMode })}
+        >
+          {CAPCUT_REVIEW_MODES.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
             </option>

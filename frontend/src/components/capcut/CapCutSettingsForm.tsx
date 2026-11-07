@@ -5,6 +5,7 @@ import type {
   CapCutExportMode,
   CapCutFps,
   CapCutResolution,
+  CapCutReviewMode,
   CapCutSettings,
   CapCutWhisperModel,
 } from "../../api/types";
@@ -13,6 +14,7 @@ import {
   CAPCUT_EXPORT_MODES,
   CAPCUT_FPS_OPTIONS,
   CAPCUT_RESOLUTIONS,
+  CAPCUT_REVIEW_MODES,
   CAPCUT_WHISPER_MODELS,
   capcutSettingsPatch,
   exportModeHelp,
@@ -159,6 +161,24 @@ export function CapCutSettingsForm({
             onChange={(e) => set("whisper_model", e.target.value as CapCutWhisperModel)}
           >
             {CAPCUT_WHISPER_MODELS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field
+          label="Revisar legendas antes de exportar"
+          htmlFor="cc-review"
+          hint="Você ouve os trechos, corrige o texto e os tempos são recalculados."
+        >
+          <select
+            id="cc-review"
+            className="select"
+            value={draft.review_mode}
+            onChange={(e) => set("review_mode", e.target.value as CapCutReviewMode)}
+          >
+            {CAPCUT_REVIEW_MODES.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>

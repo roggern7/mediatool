@@ -1,4 +1,4 @@
-// Lotes da página Legendas CapCut: seleção, pedido por modo, estimativa, status e ações (funções puras, testadas em
+// Lotes da página Edição CapCut: seleção, pedido por modo, estimativa, status e ações (funções puras, testadas em
 // capcutBatch.test.ts).
 
 import type {
@@ -28,6 +28,8 @@ import {
   CAPCUT_STATUS_LABEL,
   isCapcutActive,
   isHeldJob,
+  needsReview,
+  REVIEW_STATUS_LABEL,
   stageLabel,
 } from "./capcut";
 import { CUSTOM_SECONDS_MAX, EDIT_DURATION_MARGIN, NO_CHANGES_TEXT } from "./editSettings";
@@ -45,24 +47,28 @@ export const BATCH_START_MAX = 86_400;
 /* ---------------- Modo e status ---------------- */
 
 export const BATCH_MODE_OPTIONS: { value: CapCutBatchMode; label: string; help: string }[] = [
-  { value: "caption", label: "Só legendas", help: "Transcreve e exporta cada vídeo com legendas pelo CapCut." },
-  { value: "edit", label: "Só edição", help: "Corta, acelera ou aplica nitidez sem abrir o CapCut." },
-  {
-    value: "edit_caption",
-    label: "Edição + legendas",
-    help: "Edita cada vídeo e depois legenda a versão editada no CapCut.",
-  },
+  { value: "caption", label: "Legendar", help: "Transcreve e coloca legendas pelo CapCut" },
+  { value: "edit", label: "Editar", help: "Corta, acelera ou dá nitidez, sem CapCut" },
+  { value: "edit_caption", label: "Editar e legendar", help: "Edita e depois legenda a versão editada" },
 ];
 
 export const BATCH_MODE_LABEL: Record<CapCutBatchMode, string> = {
-  caption: "Só legendas",
-  edit: "Só edição",
-  edit_caption: "Edição + legendas",
+  caption: "Legendar",
+  edit: "Editar",
+  edit_caption: "Editar e legendar",
 };
+
+/** Próximo modo no grupo de cartões (setas do teclado; volta ao início no fim). */
+export function nextMode(mode: CapCutBatchMode, step: 1 | -1): CapCutBatchMode {
+  const index = BATCH_MODE_OPTIONS.findIndex((o) => o.value === mode);
+  const size = BATCH_MODE_OPTIONS.length;
+  return BATCH_MODE_OPTIONS[(index + step + size) % size]?.value ?? mode;
+}
 
 export const BATCH_STATUS_LABEL: Record<CapCutBatchStatus, string> = {
   running: "Em andamento",
   paused: "Pausado",
+  review: "Aguardando revisão",
   completed: "Concluído",
   completed_with_errors: "Concluído com erros",
   cancelled: "Cancelado",
@@ -91,6 +97,7 @@ export function batchTone(status: CapCutBatchStatus): Tone {
     case "running":
       return "accent";
     case "paused":
+    case "review":
       return "warn";
     default:
       return "muted";
@@ -339,6 +346,7 @@ export function exportFormFrom(settings: CapCutSettings): BatchExportForm {
     fps: settings.fps,
     bitrate: settings.bitrate,
     keep_original_audio: settings.keep_original_audio,
+    review_mode: settings.review_mode,
   };
 }
 
@@ -410,6 +418,16 @@ export function planLines(plan: BatchPlan, styleName: string, presetName: string
 
 export function videoCount(n: number): string {
   return `${formatCount(n)} ${n === 1 ? "vídeo" : "vídeos"}`;
+}
+
+/** Barra de ação: "1 vídeo selecionado", "3 vídeos selecionados". */
+export function selectedText(n: number): string {
+  return `${videoCount(n)} ${n === 1 ? "selecionado" : "selecionados"}`;
+}
+
+/** Botão principal: "Processar 3 vídeos"; sem seleção, "Processar vídeos". */
+export function processButtonText(n: number): string {
+  return n > 0 ? `Processar ${videoCount(n)}` : "Processar vídeos";
 }
 
 /** Tempo aproximado: "menos de 1 min", "~12 min", "~1 h 05 min"; "—" sem estimativa. */
@@ -510,6 +528,8 @@ export function batchCountsText(counts: CapCutBatchCounts): string {
   if (queued > 0) parts.push(`${formatCount(queued)} na fila`);
   if (counts.running > 0) parts.push(`${formatCount(counts.running)} em andamento`);
   if (counts.failed > 0) parts.push(`${formatCount(counts.failed)} com erro`);
+  const review = counts.review ?? 0;
+  if (review > 0) parts.push(`${formatCount(review)} aguardando revisão`);
   if (counts.held > 0) parts.push(`${formatCount(counts.held)} ${counts.held === 1 ? "pausado" : "pausados"}`);
   if (counts.cancelled > 0) parts.push(`${formatCount(counts.cancelled)} ${counts.cancelled === 1 ? "cancelado" : "cancelados"}`);
   return parts.join(" · ");
@@ -569,8 +589,9 @@ export function batchActions(
 
 /** Etapa do job no lote: "Pausado", "Editando (40%)", a etapa do CapCut ou o status. */
 export function batchJobStep(
-  job: Pick<CapCutJob, "status" | "stage" | "held" | "edit_status" | "edit_progress" | "mode">,
+  job: Pick<CapCutJob, "status" | "stage" | "held" | "edit_status" | "edit_progress" | "mode" | "needs_review">,
 ): string {
+  if (needsReview(job)) return REVIEW_STATUS_LABEL;
   if (isHeldJob(job)) return "Pausado";
   if (job.status === "pending" && job.edit_status && !TERMINAL_JOB.has(job.edit_status as JobStatus)) {
     const pct = job.edit_progress;
@@ -589,13 +610,17 @@ export interface BatchJobActions {
   cancel: boolean;
   retry: boolean;
   download: boolean;
+  /** Abrir a revisão das legendas. */
+  review: boolean;
 }
 
 export function batchJobActions(
-  job: Pick<CapCutJob, "status" | "held" | "cancel_requested" | "output_exists">,
+  job: Pick<CapCutJob, "status" | "held" | "cancel_requested" | "output_exists" | "needs_review">,
 ): BatchJobActions {
-  const waiting = job.status === "pending" || job.status === "waiting";
+  const review = needsReview(job) && !job.cancel_requested;
+  const waiting = (job.status === "pending" || job.status === "waiting") && !needsReview(job);
   return {
+    review,
     hold: waiting && !job.held,
     release: isHeldJob(job),
     cancel: isCapcutActive(job) && !job.cancel_requested,

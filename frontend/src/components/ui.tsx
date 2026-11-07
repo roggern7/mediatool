@@ -1,5 +1,6 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
-import { Film, Image as ImageIcon } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { Film, Image as ImageIcon, Inbox, type LucideIcon } from "lucide-react";
 import type { Tone } from "../lib/labels";
 import type { MediaType } from "../api/types";
 import { formatPercent } from "../lib/format";
@@ -72,11 +73,28 @@ export function Field({
   );
 }
 
-export function Empty({ title, children }: { title: string; children?: ReactNode }) {
+/** Estado vazio: ícone, título e (opcional) orientação ou ação do próximo passo. */
+export function Empty({ title, children, icon: Icon = Inbox }: { title: string; children?: ReactNode; icon?: LucideIcon }) {
   return (
     <div className="empty">
+      <span className="empty-icon" aria-hidden="true">
+        <Icon size={20} strokeWidth={1.6} />
+      </span>
       <strong>{title}</strong>
       {children}
+    </div>
+  );
+}
+
+/** Cabeçalho da página: título grande, subtítulo curto e a ação principal à direita. */
+export function PageHeader({ title, subtitle, children }: { title: ReactNode; subtitle?: ReactNode; children?: ReactNode }) {
+  return (
+    <div className="page-head">
+      <div className="page-head-text">
+        <h1>{title}</h1>
+        {subtitle ? <p className="page-sub">{subtitle}</p> : null}
+      </div>
+      {children ? <div className="row page-actions">{children}</div> : null}
     </div>
   );
 }
@@ -145,6 +163,14 @@ export function Thumb({ src, mediaType, size = 40 }: { src: string | null; media
   );
 }
 
+/**
+ * No navegador o diálogo vai para o fim do <body> (fora de superfícies com vidro fosco, que prenderiam o
+ * `position: fixed`). Sem DOM (renderização no servidor dos testes) ele fica no lugar, para a marcação ser conferida.
+ */
+function ModalPortal({ children }: { children: ReactNode }) {
+  return typeof document === "undefined" ? <>{children}</> : <Dialog.Portal>{children}</Dialog.Portal>;
+}
+
 export function Modal({
   title,
   onClose,
@@ -158,27 +184,33 @@ export function Modal({
   actions?: ReactNode;
   wide?: boolean;
 }) {
-  const titleId = useId();
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Radix Dialog: prende o foco no diálogo, devolve o foco ao fechar, fecha só o diálogo de cima com Esc e
+  // esconde o resto da página dos leitores de tela (a região dos avisos continua anunciada).
   return (
-    <div
-      className="overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+    <Dialog.Root
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
       }}
     >
-      <div className={`modal${wide ? " wide" : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <h2 id={titleId}>{title}</h2>
-        {children}
-        {actions ? <div className="modal-actions">{actions}</div> : null}
-      </div>
-    </div>
+      <ModalPortal>
+        <Dialog.Overlay className="overlay">
+          <Dialog.Content
+            className={`modal${wide ? " wide" : ""}`}
+            aria-modal="true"
+            aria-describedby={undefined}
+            onPointerDownOutside={(e) => {
+              // Clicar num aviso (toast) não fecha o diálogo.
+              if ((e.target as Element | null)?.closest?.(".toasts")) e.preventDefault();
+            }}
+          >
+            <Dialog.Title>{title}</Dialog.Title>
+            {children}
+            {actions ? <div className="modal-actions">{actions}</div> : null}
+          </Dialog.Content>
+        </Dialog.Overlay>
+      </ModalPortal>
+    </Dialog.Root>
   );
 }
 

@@ -13,6 +13,9 @@ OPEN_STATUSES = ("pending", "running", "waiting")
 OPEN_STATUSES_SQL = "('pending', 'running', 'waiting')"
 TERMINAL_STATUSES_SQL = "('completed', 'failed', 'cancelled')"
 RETRYABLE_STATUSES = ("failed", "cancelled")
+# Revisão das legendas: `waiting` com wait_reason 'review' espera o dono (o executor nunca pega; não conta em `waiting`).
+REVIEW_SQL = "(status = 'waiting' AND wait_reason = 'review')"
+NOT_REVIEW_SQL = "(wait_reason IS NULL OR wait_reason <> 'review')"
 _JSON_COLUMNS = ("options", "output_probe", "warnings")
 # Colunas da listagem: o `transcript` (pode ter milhares de palavras) só é lido pelo executor.
 _LIST_COLUMNS = (
@@ -21,6 +24,10 @@ _LIST_COLUMNS = (
     " j.chunks, j.draft_name, j.output_path, j.output_probe, j.warnings, j.origin, j.batch_id, j.created_at,"
     " j.started_at, j.finished_at, j.updated_at, (j.transcript IS NOT NULL) AS has_transcript,"
     " j.capcut_batch_id, j.mode, j.held, j.edit_job_id,"
+    # Frases com trecho duvidoso: só no job em revisão (a transcrição inteira não é lida na listagem).
+    " CASE WHEN j.status = 'waiting' AND j.wait_reason = 'review' AND j.transcript IS NOT NULL THEN"
+    " (SELECT COUNT(DISTINCT COALESCE(json_extract(t.value, '$.seg'), 0)) FROM json_each(j.transcript) t"
+    "  WHERE json_extract(t.value, '$.doubt') = 1) ELSE 0 END AS doubt_count,"
     " m.original_filename AS media_filename, m.source_profile AS media_profile, m.thumbnail_path AS media_thumbnail,"
     " m.media_type AS media_type, e.status AS edit_status, e.progress AS edit_progress_raw,"
     " e.error_message AS edit_error_message"
@@ -32,13 +39,15 @@ BATCH_MODES = ("caption", "edit", "edit_caption")
 # Contagens por lote; `held` = na fila com pausa individual (fora de `pending`/`waiting`). Progresso: concluído = 100.
 _BATCH_AGG = (
     "SELECT capcut_batch_id AS bid, COUNT(*) AS total, SUM(status = 'running') AS running,"
-    " SUM(status = 'pending' AND held = 0) AS pending, SUM(status = 'waiting' AND held = 0) AS waiting,"
-    " SUM(status IN ('pending', 'waiting') AND held = 1) AS held, SUM(status = 'completed') AS completed,"
+    f" SUM(status = 'pending' AND held = 0) AS pending, SUM(status = 'waiting' AND held = 0 AND {NOT_REVIEW_SQL})"
+    f" AS waiting, SUM(status IN ('pending', 'waiting') AND held = 1 AND {NOT_REVIEW_SQL}) AS held,"
+    f" SUM{REVIEW_SQL} AS review, SUM(status = 'completed') AS completed,"
     " SUM(status = 'failed') AS failed, SUM(status = 'cancelled') AS cancelled,"
     " SUM(CASE WHEN status = 'completed' THEN 100 ELSE progress END) AS progress_sum"
     " FROM capcut_jobs WHERE capcut_batch_id IS NOT NULL GROUP BY capcut_batch_id"
 )
-_OPEN_EXPR = "(COALESCE(a.running, 0) + COALESCE(a.pending, 0) + COALESCE(a.waiting, 0) + COALESCE(a.held, 0))"
+_OPEN_EXPR = ("(COALESCE(a.running, 0) + COALESCE(a.pending, 0) + COALESCE(a.waiting, 0) + COALESCE(a.held, 0)"
+              " + COALESCE(a.review, 0))")
 # Status derivado do lote (docs/CAPCUT.md, "Lotes").
 _BATCH_STATUS_SQL = (
     f"CASE WHEN {_OPEN_EXPR} = 0 AND (b.cancel_requested = 1 OR (a.total > 0 AND a.cancelled = a.total))"
@@ -47,6 +56,7 @@ _BATCH_STATUS_SQL = (
     f" WHEN {_OPEN_EXPR} = 0 THEN 'completed'"
     " WHEN b.cancel_requested = 1 THEN 'cancelled'"
     " WHEN a.running > 0 THEN 'running'"
+    " WHEN COALESCE(a.pending, 0) + COALESCE(a.waiting, 0) = 0 AND COALESCE(a.review, 0) > 0 THEN 'review'"
     " WHEN b.paused = 1 OR COALESCE(a.pending, 0) + COALESCE(a.waiting, 0) = 0 THEN 'paused'"
     " ELSE 'running' END"
 )
@@ -54,10 +64,11 @@ _BATCH_SELECT = (
     f"WITH a AS ({_BATCH_AGG}) SELECT b.*, COALESCE(a.total, 0) AS c_total, COALESCE(a.pending, 0) AS c_pending,"
     " COALESCE(a.running, 0) AS c_running, COALESCE(a.waiting, 0) AS c_waiting, COALESCE(a.held, 0) AS c_held,"
     " COALESCE(a.completed, 0) AS c_completed, COALESCE(a.failed, 0) AS c_failed,"
-    " COALESCE(a.cancelled, 0) AS c_cancelled, COALESCE(a.progress_sum, 0) AS progress_sum,"
+    " COALESCE(a.cancelled, 0) AS c_cancelled, COALESCE(a.review, 0) AS c_review,"
+    " COALESCE(a.progress_sum, 0) AS progress_sum,"
     f" {_BATCH_STATUS_SQL} AS status FROM capcut_batches b LEFT JOIN a ON a.bid = b.id"
 )
-_BATCH_COUNT_KEYS = ("total", "pending", "running", "waiting", "held", "completed", "failed", "cancelled")
+_BATCH_COUNT_KEYS = ("total", "pending", "running", "waiting", "held", "completed", "failed", "cancelled", "review")
 
 
 def decode_job(row) -> dict[str, Any] | None:
@@ -138,15 +149,18 @@ class CapCutRepository:
         return [decode_job(row) for row in rows], total
 
     def counts(self) -> dict[str, int]:
-        rows = self.db.fetchall("SELECT status, COUNT(*) AS n FROM capcut_jobs GROUP BY status")
-        result = dict.fromkeys(JOB_STATUSES, 0)
-        result.update({row["status"]: int(row["n"]) for row in rows})
+        """Por status; `review` (aguardando a revisão das legendas) fica fora de `waiting`."""
+        rows = self.db.fetchall(
+            f"SELECT CASE WHEN {REVIEW_SQL} THEN 'review' ELSE status END AS s, COUNT(*) AS n FROM capcut_jobs"
+            " GROUP BY s")
+        result = dict.fromkeys((*JOB_STATUSES, "review"), 0)
+        result.update({row["s"]: int(row["n"]) for row in rows})
         return result
 
     def held_count(self) -> int:
-        """Jobs na fila com pausa individual (`held`)."""
+        """Jobs na fila com pausa individual (`held`), fora os em revisão."""
         return int(self.db.scalar(
-            "SELECT COUNT(*) FROM capcut_jobs WHERE held = 1 AND status IN ('pending', 'waiting')"))
+            f"SELECT COUNT(*) FROM capcut_jobs WHERE held = 1 AND status IN ('pending', 'waiting') AND {NOT_REVIEW_SQL}"))
 
     def open_media_ids(self, media_ids: list[int]) -> set[int]:
         """Mídias que já têm job aberto (pending/running/waiting)."""
@@ -160,12 +174,14 @@ class CapCutRepository:
     def claim_next(self, now: str) -> dict[str, Any] | None:
         """O job mais antigo com prazo vencido (`pending` ou `waiting`) vira `running`, numa só transação. A tentativa
         conta aqui (a espera por CapCut ocupado a devolve). Ficam de fora: job com pausa individual (`held`), job de
-        lote pausado ou em cancelamento e job cuja edição (`edit_job_id`) ainda não terminou (job de edição inexistente não segura)."""
+        lote pausado ou em cancelamento, job aguardando a revisão das legendas (`wait_reason='review'`) e job cuja
+        edição (`edit_job_id`) ainda não terminou (job de edição inexistente não segura)."""
         with self.db.transaction() as conn:
             row = conn.execute(
                 "SELECT j.id FROM capcut_jobs j LEFT JOIN capcut_batches b ON b.id = j.capcut_batch_id"
                 " LEFT JOIN jobs e ON e.id = j.edit_job_id"
                 " WHERE j.status IN ('pending', 'waiting') AND j.cancel_requested = 0 AND j.held = 0"
+                " AND (j.wait_reason IS NULL OR j.wait_reason <> 'review')"
                 " AND (b.id IS NULL OR (b.paused = 0 AND b.cancel_requested = 0))"
                 f" AND (j.edit_job_id IS NULL OR e.id IS NULL OR e.status IN {EDIT_TERMINAL_SQL})"
                 " AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= ?) ORDER BY j.id LIMIT 1",
@@ -199,6 +215,16 @@ class CapCutRepository:
         cursor = self.db.execute(
             f"UPDATE capcut_jobs SET {assignments}, updated_at = ? WHERE id = ? AND cancel_requested = 0",
             (*fields.values(), utc_now(), job_id))
+        return cursor.rowcount > 0
+
+    def approve_review(self, job_id: int, *, transcript: list[dict[str, Any]], options: dict[str, Any]) -> bool:
+        """Revisão aprovada: grava a transcrição e as opções e devolve o job à fila, só se ele ainda está em revisão
+        e sem cancelamento pedido (condição na própria gravação). False = não estava mais em revisão."""
+        cursor = self.db.execute(
+            "UPDATE capcut_jobs SET transcript = ?, options = ?, status = 'pending', wait_reason = NULL,"
+            " next_attempt_at = NULL, stage = NULL, stage_progress = NULL, progress = 0, detail = NULL, updated_at = ?"
+            " WHERE id = ? AND status = 'waiting' AND wait_reason = 'review' AND cancel_requested = 0",
+            (canonical_json(transcript), canonical_json(options), utc_now(), job_id))
         return cursor.rowcount > 0
 
     def finish_orphan_cancel(self, job_id: int) -> bool:

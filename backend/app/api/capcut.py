@@ -31,17 +31,23 @@ from app.schemas.capcut import (
     JobsCreate,
     JobsCreated,
     JobStatus,
+    LibraryClear,
     LibraryPage,
+    LibraryShow,
+    LibraryViewOut,
     PreviewCreate,
     PreviewCreated,
     PreviewOut,
     QueueState,
+    ReviewApprove,
+    ReviewOut,
     StyleCreate,
     StyleOut,
     StyleUpdate,
 )
 from app.schemas.common import SafeText
-from app.services import capcut_batch_service, capcut_service
+from app.services import capcut_batch_service, capcut_review, capcut_service
+from app.services.storage import mime_for
 
 router = APIRouter(prefix="/capcut", tags=["legendas capcut"])
 
@@ -214,6 +220,26 @@ def job_file(ctx: Ctx, job_id: IdPath) -> FileResponse:
     return FileResponse(path, media_type="video/mp4", filename=path.name)
 
 
+@router.get("/jobs/{job_id}/review", response_model=ReviewOut)
+def get_review(ctx: Ctx, job_id: IdPath) -> dict[str, Any]:
+    """Frases da transcrição (agrupadas por `seg`), com as palavras duvidosas marcadas, para a revisão das legendas."""
+    return capcut_review.review_view(ctx, job_id)
+
+
+@router.get("/jobs/{job_id}/source", response_class=FileResponse)
+def job_source(ctx: Ctx, job_id: IdPath) -> FileResponse:
+    """O arquivo exato que foi transcrito (original da mídia ou rendition da edição), para o player da revisão."""
+    path = capcut_review.source_path(ctx, capcut_review._job(ctx, job_id))
+    return FileResponse(path, media_type=mime_for(path))
+
+
+@router.post("/jobs/{job_id}/review", response_model=JobOut)
+def approve_review(ctx: Ctx, job_id: IdPath, body: ReviewApprove) -> dict[str, Any]:
+    """Aprova a revisão: só as frases alteradas (texto vazio remove a frase), realinhadas no áudio; o job volta para
+    a fila. 409 `capcut_job_not_in_review` fora da revisão. Síncrona (threadpool): decodifica e alinha fora do loop."""
+    return capcut_review.approve(ctx, job_id, [edit.model_dump() for edit in body.segments])
+
+
 @router.post("/jobs/{job_id}/reveal")
 def reveal_job(ctx: Ctx, job_id: IdPath) -> dict[str, bool]:
     """Abre o Explorer com o vídeo legendado selecionado."""
@@ -243,9 +269,35 @@ def library(
     limit: Annotated[int, Query(ge=1, le=200)] = 60,
     before_id: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
 ) -> dict[str, Any]:
-    """Seletor: vídeos originais (sem capas), id DESC, keyset; cada item com `capcut: {done, last_output_name, open}`."""
+    """Seletor: vídeos originais (sem capas) visíveis na visão da lista ("Limpar lista"), id DESC, keyset; cada item
+    com `capcut: {done, last_output_name, open}`."""
     return capcut_batch_service.library(ctx, q=q, profile=profile, folder=folder, captioned=captioned, limit=limit,
                                         before_id=before_id)
+
+
+@router.get("/library/view", response_model=LibraryViewOut)
+def library_view(ctx: Ctx) -> dict[str, Any]:
+    """Visão da lista do seletor: `cleared` (houve "Limpar lista") e quantos vídeos saíram um a um."""
+    return capcut_batch_service.get_library_view(ctx)
+
+
+@router.post("/library/clear", response_model=LibraryViewOut)
+def clear_library(ctx: Ctx, body: LibraryClear | None = None) -> dict[str, Any]:
+    """Sem `media_ids`: os vídeos atuais saem da lista (os novos continuam aparecendo). Com ids: só esses saem.
+    Nada é apagado; vale para a lista e para "todos os filtrados" (não para `media_ids` explícitos de um lote)."""
+    return capcut_batch_service.clear_library_view(ctx, body.media_ids if body is not None else None)
+
+
+@router.post("/library/show", response_model=LibraryViewOut)
+def show_in_library(ctx: Ctx, body: LibraryShow) -> dict[str, Any]:
+    """Os ids voltam à lista (ex.: envio do computador que é duplicata de um vídeo que saiu da lista)."""
+    return capcut_batch_service.show_in_library_view(ctx, body.media_ids)
+
+
+@router.post("/library/restore", response_model=LibraryViewOut)
+def restore_library(ctx: Ctx) -> dict[str, Any]:
+    """Todos os vídeos voltam à lista."""
+    return capcut_batch_service.restore_library_view(ctx)
 
 
 @router.get("/estimate", response_model=EstimateOut)

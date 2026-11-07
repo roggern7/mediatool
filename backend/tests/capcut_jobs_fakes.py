@@ -72,6 +72,17 @@ class FakeCapCutProcessor:
     words: list[dict[str, Any]] = field(default_factory=lambda: [{"start": 0.0, "end": 0.5, "text": "olá",
                                                                   "probability": 0.9}])
 
+    transcribed: list[Any] = field(default_factory=list)      # specs da transcrição avulsa (revisão das legendas)
+    transcribe_errors: list[Exception] = field(default_factory=list)
+
+    def transcribe_only(self, spec, *, cancel, on_stage):
+        """`transcribe_only` falso do núcleo: só a transcrição (sem CapCut), com as palavras de `words`."""
+        self.transcribed.append(spec)
+        on_stage("transcribing", 0.5, "Transcrevendo")
+        if self.transcribe_errors:
+            raise self.transcribe_errors.pop(0)
+        return [dict(w) for w in self.words]
+
     def __call__(self, spec, *, cancel, on_stage, on_transcript=None):
         self.specs.append(spec)
         on_stage("transcribing", 0.5, "Transcrevendo")

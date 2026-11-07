@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Copy, Lock, Pencil, Plus, Trash2 } from "lucide-react";
+import { Copy, Lock, Pencil, Plus, SlidersHorizontal, Trash2 } from "lucide-react";
 import { ApiError, api, messageOf } from "../api/client";
 import type { Preset, PresetParams } from "../api/types";
-import { ConfirmDialog, Empty, ErrorLine, Field, Modal, SkeletonRows, Spinner, Switch } from "../components/ui";
+import { ConfirmDialog, Empty, ErrorLine, Field, Modal, PageHeader, SkeletonRows, Spinner, Switch } from "../components/ui";
 import { OptionalAdjustmentsForm } from "../components/OptionalAdjustmentsForm";
 import { formatSeconds, formatSpeed, toDecimalInput } from "../lib/format";
 import {
@@ -73,80 +73,83 @@ export function PresetsPage() {
 
   return (
     <div className="page">
-      <div className="page-head">
-        <h1>Presets</h1>
+      <PageHeader title="Presets" subtitle="Receitas de processamento para aplicar às mídias da biblioteca.">
         <button type="button" className="btn btn-primary" onClick={() => setEditing({ mode: "create" })}>
-          <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+          <Plus size={15} strokeWidth={2} aria-hidden="true" />
           Novo preset
         </button>
-      </div>
+      </PageHeader>
 
-      {presets.data === undefined ? (
-        presets.error ? (
-          <ErrorLine message={presets.error} onRetry={presets.reload} />
+      <div className="section flush">
+        {presets.data === undefined ? (
+          presets.error ? (
+            <ErrorLine message={presets.error} onRetry={presets.reload} />
+          ) : (
+            <SkeletonRows rows={3} />
+          )
+        ) : presets.data.length === 0 ? (
+          <Empty title="Nenhum preset" icon={SlidersHorizontal}>
+            <span>Crie um preset para processar mídias sempre do mesmo jeito.</span>
+          </Empty>
         ) : (
-          <SkeletonRows rows={3} />
-        )
-      ) : presets.data.length === 0 ? (
-        <Empty title="Nenhum preset" />
-      ) : (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Nome</th>
-                <th>Configuração</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {presets.data.map((p) => (
-                <tr key={p.id}>
-                  <td className="nowrap">
-                    <strong style={{ fontWeight: 500 }}>{p.name}</strong>
-                  </td>
-                  <td className="muted">{summary(p.params)}</td>
-                  <td className="actions">
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => setEditing({ mode: "edit", preset: p })}
-                    >
-                      <Pencil size={13} strokeWidth={1.75} aria-hidden="true" />
-                      Editar
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm"
-                      disabled={dupId === p.id}
-                      onClick={() => void duplicate(p)}
-                    >
-                      {dupId === p.id ? <Spinner /> : <Copy size={13} strokeWidth={1.75} aria-hidden="true" />}
-                      Duplicar
-                    </button>
-                    {p.is_builtin ? (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Nome</th>
+                  <th>Configuração</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {presets.data.map((p) => (
+                  <tr key={p.id}>
+                    <td className="nowrap">
+                      <strong style={{ fontWeight: 500 }}>{p.name}</strong>
+                    </td>
+                    <td className="muted">{summary(p.params)}</td>
+                    <td className="actions">
                       <button
                         type="button"
                         className="btn btn-ghost btn-sm"
-                        disabled
-                        title="Presets do sistema não podem ser excluídos"
+                        onClick={() => setEditing({ mode: "edit", preset: p })}
                       >
-                        <Lock size={13} strokeWidth={1.75} aria-hidden="true" />
-                        Não excluível
+                        <Pencil size={13} strokeWidth={1.75} aria-hidden="true" />
+                        Editar
                       </button>
-                    ) : (
-                      <button type="button" className="btn btn-ghost btn-sm btn-danger" onClick={() => setDeleting(p)}>
-                        <Trash2 size={13} strokeWidth={1.75} aria-hidden="true" />
-                        Excluir
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        disabled={dupId === p.id}
+                        onClick={() => void duplicate(p)}
+                      >
+                        {dupId === p.id ? <Spinner /> : <Copy size={13} strokeWidth={1.75} aria-hidden="true" />}
+                        Duplicar
                       </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+                      {p.is_builtin ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          disabled
+                          title="Presets do sistema não podem ser excluídos"
+                        >
+                          <Lock size={13} strokeWidth={1.75} aria-hidden="true" />
+                          Não excluível
+                        </button>
+                      ) : (
+                        <button type="button" className="btn btn-ghost btn-sm btn-danger" onClick={() => setDeleting(p)}>
+                          <Trash2 size={13} strokeWidth={1.75} aria-hidden="true" />
+                          Excluir
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {editing ? (
         <PresetEditor

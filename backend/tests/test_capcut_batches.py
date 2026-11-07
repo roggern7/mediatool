@@ -80,7 +80,7 @@ def test_create_by_ids_snapshot_folder_and_order(setup):
     assert batch["name"] == "Meu lote" and batch["mode"] == "caption" and batch["status"] == "running"
     assert batch["output_dir"] == str(out.resolve() / f"Lote {batch['id']}") and batch["output_exists"] is False
     assert batch["counts"] == {"total": 3, "pending": 3, "running": 0, "waiting": 0, "held": 0, "completed": 0,
-                               "failed": 0, "cancelled": 0}
+                               "failed": 0, "cancelled": 0, "review": 0}
     assert batch["summary"]["style_name"] == capcut_service.BUILTIN_STYLE_NAME and batch["summary"]["edit"] is None
     assert batch["summary"]["fps"] == "60" and batch["options"]["caption"]["fps"] == "60"
     jobs = _jobs(harness, batch["id"])

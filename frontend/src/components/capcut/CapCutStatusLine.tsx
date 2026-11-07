@@ -48,7 +48,7 @@ export function CapCutStatusLine({
     <div className="panel cc-status">
       {!status.available ? (
         <div className="alert err" role="alert" style={{ marginBottom: 10 }}>
-          <span className="grow">{status.reason ?? "As Legendas CapCut não estão disponíveis."}</span>
+          <span className="grow">{status.reason ?? "A Edição CapCut não está disponível."}</span>
         </div>
       ) : null}
       <div className="row between">

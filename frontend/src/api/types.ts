@@ -1040,7 +1040,9 @@ export interface PostTimesReport {
 export type CapCutResolution = "original" | "480P" | "720P" | "1080P" | "2K" | "4K";
 export type CapCutBitrate = "low" | "recommended" | "high";
 export type CapCutFps = "original" | "24" | "25" | "30" | "50" | "60";
-export type CapCutWhisperModel = "small" | "medium" | "large-v3-turbo";
+export type CapCutWhisperModel = "small" | "medium" | "large-v3-turbo" | "large-v3";
+/** Revisão das legendas antes de exportar: só com trechos duvidosos, sempre ou nunca. */
+export type CapCutReviewMode = "doubtful" | "always" | "never";
 /** isolated = área de trabalho separada (sem mouse/teclado/tela); interactive = usa a tela e precisa do PC livre. */
 export type CapCutExportMode = "isolated" | "interactive";
 export type CapCutJobStatus = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
@@ -1067,6 +1069,7 @@ export interface CapCutSettings {
   whisper_model: CapCutWhisperModel;
   keep_original_audio: boolean;
   keep_draft: boolean;
+  review_mode: CapCutReviewMode;
   auto_after_download: boolean;
   max_attempts: number;
   default_style_id: number | null;
@@ -1090,6 +1093,8 @@ export interface CapCutQueueCounts {
   pause_reason?: string | null;
   /** Jobs com pausa individual (ausente em backends antigos). */
   held?: number;
+  /** Jobs aguardando a revisão das legendas (fora de `waiting`; ausente em backends antigos). */
+  review?: number;
 }
 
 export interface CapCutStatus {
@@ -1102,6 +1107,8 @@ export interface CapCutStatus {
   deps: Record<string, boolean>;
   skill: { installed?: boolean; path?: string; commit?: string | null };
   models: Record<string, boolean>;
+  /** Modelo do alinhamento forçado instalado (ausente em backends antigos). */
+  aligner?: boolean;
   queue: CapCutQueueCounts;
   settings: CapCutSettings;
   export_mode: CapCutExportMode;
@@ -1282,6 +1289,10 @@ export interface CapCutJob {
   /** Status do job de edição (tabela jobs); null sem edição. */
   edit_status?: string | null;
   edit_progress?: number | null;
+  /** Aguardando a revisão das legendas (status waiting, wait_reason review). */
+  needs_review?: boolean;
+  /** Frases com trecho duvidoso (só no job em revisão). */
+  doubt_count?: number;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -1291,7 +1302,7 @@ export interface CapCutJob {
 export interface CapCutJobList {
   items: CapCutJob[];
   total: number;
-  counts: Record<CapCutJobStatus, number>;
+  counts: Record<CapCutJobStatus, number> & { review?: number };
 }
 
 export interface CapCutJobsCreated {
@@ -1303,7 +1314,13 @@ export interface CapCutJobsCreated {
 
 /** caption = só legendas; edit = só edição (não abre o CapCut); edit_caption = edição e depois legendas. */
 export type CapCutBatchMode = "caption" | "edit" | "edit_caption";
-export type CapCutBatchStatus = "running" | "paused" | "completed" | "completed_with_errors" | "cancelled";
+export type CapCutBatchStatus =
+  | "running"
+  | "paused"
+  | "review"
+  | "completed"
+  | "completed_with_errors"
+  | "cancelled";
 export type CapCutCaptioned = "any" | "yes" | "no";
 
 /** Seleção por filtro resolvida no servidor (todos os filtrados, não só a página). `folder`: chave de pasta do Editar. */
@@ -1316,7 +1333,7 @@ export interface CapCutBatchFilter {
 
 /** Opções da exportação que o lote sobrescreve (mesmos nomes das configurações). */
 export type CapCutOptionsPatch = Partial<
-  Pick<CapCutSettings, "resolution" | "bitrate" | "fps" | "keep_original_audio">
+  Pick<CapCutSettings, "resolution" | "bitrate" | "fps" | "keep_original_audio" | "review_mode">
 >;
 
 export interface CapCutBatchEditSettings {
@@ -1357,6 +1374,8 @@ export interface CapCutBatchCounts {
   completed: number;
   failed: number;
   cancelled: number;
+  /** Aguardando a revisão das legendas (ausente em backends antigos). */
+  review?: number;
 }
 
 export interface CapCutBatchSummary {
@@ -1420,4 +1439,45 @@ export interface CapCutLibraryQuery {
   captioned?: CapCutCaptioned;
   limit?: number;
   before_id?: number;
+}
+
+/** Visão da lista do seletor (GET /api/capcut/library/view e as rotas clear/show/restore). Nada é apagado. */
+export interface CapCutLibraryView {
+  /** Houve "Limpar lista": os vídeos daquele momento saíram (os novos continuam aparecendo). */
+  cleared: boolean;
+  /** Vídeos tirados um a um ("Tirar selecionados da lista"). */
+  hidden_count: number;
+}
+
+/* Revisão das legendas (docs/CONTRACTS.md, seção 8.9). */
+
+export interface CapCutReviewWord {
+  text: string;
+  start: number;
+  end: number;
+  doubt: boolean;
+  probability: number;
+}
+
+export interface CapCutReviewSegment {
+  index: number;
+  start: number;
+  end: number;
+  text: string;
+  doubt: boolean;
+  words: CapCutReviewWord[];
+}
+
+export interface CapCutReview {
+  job: CapCutJob;
+  duration: number;
+  source_url: string;
+  /** false = tempos das frases corrigidas ajustados pelas sílabas (sem o alinhador). */
+  aligner: boolean;
+  segments: CapCutReviewSegment[];
+}
+
+/** Corpo de POST /capcut/jobs/{id}/review: só as frases alteradas (texto vazio remove a frase). */
+export interface CapCutReviewApprove {
+  segments: { index: number; text: string }[];
 }

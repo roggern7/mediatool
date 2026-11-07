@@ -53,7 +53,7 @@ REQUIRED_MODULES = ("win32service", "win32process", "win32gui", "win32con", "pyt
 
 
 def _hint(problem: str) -> str:
-    return (f"{problem} Nas configurações das Legendas CapCut, troque o modo de exportação para \"Interativo\" "
+    return (f"{problem} Nas configurações da Edição CapCut, troque o modo de exportação para \"Interativo\" "
             "(usa a tela e precisa do PC livre) e tente de novo.")
 
 

@@ -35,8 +35,8 @@ export interface UploadQueueApi {
   remove: (key: string) => Media | null;
 }
 
-/** Fila de envio de vídeos locais. `onReady` recebe cada vídeo registrado (novo ou já existente na biblioteca). */
-export function useUploadQueue(onReady: (media: Media) => void): UploadQueueApi {
+/** Fila de envio de vídeos locais. `onReady` recebe cada vídeo registrado (novo ou já existente na biblioteca: `duplicate`). */
+export function useUploadQueue(onReady: (media: Media, duplicate: boolean) => void): UploadQueueApi {
   const [items, setItems] = useState<UploadItem[]>([]);
   // A fonte da verdade fica na ref (os callbacks do XHR leem o estado atual sem esperar um render).
   const itemsRef = useRef<UploadItem[]>([]);
@@ -101,7 +101,7 @@ export function useUploadQueue(onReady: (media: Media) => void): UploadQueueApi 
       if (controller.signal.aborted) return;
       commit(markDone(itemsRef.current, key, result.media, result.duplicate));
       files.current.delete(key);
-      onReadyRef.current(result.media);
+      onReadyRef.current(result.media, result.duplicate);
     } catch (err) {
       if (controller.signal.aborted) return;
       commit(markError(itemsRef.current, key, messageOf(err)));

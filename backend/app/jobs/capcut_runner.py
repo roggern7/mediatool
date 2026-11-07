@@ -19,6 +19,14 @@ fonte passa a ser a rendition editada (edição com erro/cancelada => `failed` `
 modo `edit` o CapCut não é aberto: a rendition é copiada para a pasta do lote como `<nome>_editado.mp4`. A pausa da
 fila também segura esses jobs.
 
+Revisão das legendas (docs/CAPCUT.md, "Fidelidade das legendas"): job com legenda (`caption`/`edit_caption`) e
+`review_mode` (instantâneo; job antigo sem a chave = `never`) diferente de `never`, ainda não aprovado
+(`options.review.approved`), primeiro só transcreve (sem CapCut; `transcribe_only` do núcleo ou do processador
+injetado). Com `always`, ou `doubtful` e alguma palavra com `doubt`, para em `waiting`/`review` sem gastar a tentativa
+(o executor não pega esse job até a aprovação pela API); senão segue com a transcrição. A transcrição grava a fonte em
+`options.transcript_source` ({path, size, mtime_ns}); fonte diferente na hora de rodar descarta a transcrição e a
+aprovação.
+
 Prévias do editor visual: ficam só em memória (fora do banco e da lista de jobs), passam na frente dos jobs comuns
 (mesmo com a fila pausada), rodam no mesmo executor (um CapCut por vez) e não mexem em tentativas nem em nada dos jobs.
 Uma prévia nova cancela as prévias ainda na fila (pendentes/em espera). CapCut ocupado/PC em uso => `waiting` com nova
@@ -79,6 +87,9 @@ MSG_EDIT_MISSING = "A versão editada deste vídeo não está mais na Biblioteca
 MSG_EDIT_CANCELLED = "a edição foi cancelada."
 MSG_COPY_FAILED = "Não foi possível copiar o vídeo editado para a pasta do lote."
 EDIT_MODES = ("edit", "edit_caption")
+CAPTION_MODES = ("caption", "edit_caption")
+REVIEW_WAIT_REASON = "review"
+MSG_REVIEW = "Aguardando revisão das legendas"
 PREVIEW_SAMPLE_TEXT = "Exemplo de legenda no seu estilo"
 PREVIEW_KEEP_FILES = 10
 PREVIEW_KEEP_ENTRIES = 30
@@ -92,6 +103,12 @@ def stage_percent(stage: str | None, fraction: float | None) -> int:
     start, end = STAGE_RANGES[stage]
     value = 0.0 if fraction is None else min(1.0, max(0.0, float(fraction)))
     return int(round(start + (end - start) * value))
+
+
+def source_stamp(path: Path) -> dict[str, Any]:
+    """Identidade do arquivo transcrito (`options.transcript_source`): caminho, tamanho e mtime em ns."""
+    info = path.stat()
+    return {"path": str(path), "size": int(info.st_size), "mtime_ns": int(info.st_mtime_ns)}
 
 
 def recover_capcut_jobs(ctx: AppContext) -> int:
@@ -228,18 +245,77 @@ class CapCutRunner:
             self._fail(job_id, "deps_missing", capcut_service.MSG_UNAVAILABLE)
             return
         spec_cls = getattr(core, "CapCutJobSpec", None) or SimpleNamespace
+        try:
+            source = source_stamp(video)
+        except OSError:
+            self._fail(job_id, "source_missing", MSG_SOURCE_MISSING)
+            return
+        job = self._drop_stale_transcript(job, source)
+        if mode in CAPTION_MODES and self._review_gate(job, video, source, core, spec_cls):
+            return
         mode = capcut_service.export_mode(self.ctx)
         try:
-            self.repo.update_job(job_id, options={**(job["options"] or {}), "export_mode": mode})
+            options = {**(job["options"] or {}), "export_mode": mode}
+            self.repo.update_job(job_id, options=options)
             spec = spec_cls(**self._spec_fields(job, video), export_mode=mode)
             result = processor(spec, cancel=self._cancel, on_stage=self._stage_callback(job_id),
-                               on_transcript=self._transcript_callback(job_id))
+                               on_transcript=self._transcript_callback(job_id, options, source))
         except Exception as exc:  # noqa: BLE001 - classificado abaixo; a fila segue
             self._handle_failure(job, exc)
             self._pause_if_user_wants_capcut(None, exc)
             return
         self._complete(job_id, result)
         self._pause_if_user_wants_capcut(result, None)
+
+    def _drop_stale_transcript(self, job: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+        """Transcrição gravada de outra fonte (edição refeita, arquivo trocado): descartada junto com a aprovação da
+        revisão, para a legenda de um arquivo nunca ir para outro. Sem fonte gravada (job antigo): fica como está."""
+        options = dict(job["options"] or {})
+        recorded = options.get("transcript_source")
+        if job["transcript"] is None or recorded is None or recorded == source:
+            return job
+        options.pop("transcript_source", None)
+        options.pop("review", None)
+        self.repo.update_job(job["id"], transcript=None, options=options)
+        logger.info("Legendas CapCut: job %s com a fonte trocada; a transcrição será refeita", job["id"])
+        return {**job, "transcript": None, "options": options}
+
+    def _transcriber(self, core: Any) -> Callable[..., list[dict[str, Any]]] | None:
+        """Só a transcrição: do processador injetado (testes) ou do núcleo. None = o processador transcreve."""
+        if self.ctx.capcut_processor is not None:
+            return getattr(self.ctx.capcut_processor, "transcribe_only", None)
+        return getattr(core, "transcribe_only", None) if core is not None else None
+
+    def _review_gate(self, job: dict[str, Any], video: Path, source: dict[str, Any], core: Any,
+                     spec_cls: Any) -> bool:
+        """Revisão das legendas antes do CapCut. True = o job parou aqui (em revisão, falhou ou foi cancelado)."""
+        job_id = job["id"]
+        options = dict(job["options"] or {})
+        review_mode = options.get("review_mode") or "never"
+        if review_mode == "never" or (options.get("review") or {}).get("approved"):
+            return False
+        transcript = job["transcript"]
+        if transcript is None:
+            transcriber = self._transcriber(core)
+            if transcriber is None:
+                return False
+            try:
+                spec = spec_cls(**self._spec_fields(job, video), export_mode=capcut_service.export_mode(self.ctx))
+                transcript = list(transcriber(spec, cancel=self._cancel, on_stage=self._stage_callback(job_id)))
+                options["transcript_source"] = source
+                self.repo.update_job(job_id, transcript=transcript, options=options)
+            except Exception as exc:  # noqa: BLE001 - mesma classificação do processador
+                self._handle_failure(job, exc)
+                return True
+            job.update(transcript=transcript, options=options)
+        if review_mode != "always" and not any(bool(w.get("doubt")) for w in transcript):
+            return False
+        # Etapa do dono, não falha: a tentativa do claim é devolvida e o executor não pega o job até a aprovação.
+        if self._requeue(job_id, status="waiting", wait_reason=REVIEW_WAIT_REASON, next_attempt_at=None,
+                         attempts=max(job["attempts"] - 1, 0), stage=None, stage_progress=None, progress=0,
+                         detail=MSG_REVIEW):
+            logger.info("Legendas CapCut: job %s aguardando a revisão das legendas", job_id)
+        return True
 
     def _edited_source(self, job: dict[str, Any]) -> tuple[Path, dict[str, Any]] | None:
         """(arquivo da rendition editada, rendition) do job de lote com edição. None = o job já foi encerrado aqui
@@ -325,7 +401,7 @@ class CapCutRunner:
             "highlight_color": options.get("highlight_color"),
             "max_words": int(options.get("max_words", 3)),
             "max_chars": int(options.get("max_chars", 24)),
-            "whisper_model": options.get("whisper_model", "large-v3-turbo"),
+            "whisper_model": options.get("whisper_model", "large-v3"),
             "language": "pt",
             "resolution": options.get("resolution", "original"),
             "bitrate": options.get("bitrate", "recommended"),
@@ -351,9 +427,10 @@ class CapCutRunner:
 
         return on_stage
 
-    def _transcript_callback(self, job_id: int) -> Callable[[list[dict[str, Any]]], None]:
+    def _transcript_callback(self, job_id: int, options: dict[str, Any],
+                             source: dict[str, Any]) -> Callable[[list[dict[str, Any]]], None]:
         def on_transcript(words: list[dict[str, Any]]) -> None:
-            self.repo.update_job(job_id, transcript=list(words))
+            self.repo.update_job(job_id, transcript=list(words), options={**options, "transcript_source": source})
 
         return on_transcript
 

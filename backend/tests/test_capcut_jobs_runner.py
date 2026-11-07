@@ -73,7 +73,7 @@ def test_success_records_output_transcript_and_spec(setup):
     assert spec.video_path == harness.ctx.storage.resolve("originals/test/v0.mp4")
     assert spec.work_dir == harness.settings.data_dir / "capcut" / "work" / str(created["id"])
     assert spec.models_dir == harness.settings.data_dir / "models" / "whisper"
-    assert spec.style is None and spec.whisper_model == "large-v3-turbo" and spec.max_words == 3
+    assert spec.style is None and spec.whisper_model == "large-v3" and spec.max_words == 3
     assert runner.run_next() is False
     api_view = harness.client.get(f"/api/capcut/jobs/{created['id']}").json()
     assert api_view["output_exists"] is True and api_view["output_name"] == "v0_legendado.mp4"

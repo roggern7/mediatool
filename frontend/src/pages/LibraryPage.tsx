@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { Captions, ExternalLink, FolderOpen, Trash2, Wand2, X } from "lucide-react";
+import { Captions, ExternalLink, FolderOpen, Library, Search, Trash2, Wand2, X } from "lucide-react";
 import { api, messageOf } from "../api/client";
 import type { ExportContent, Media, MediaView, Preset, Rendition } from "../api/types";
 import { LIBRARY_TYPE_FILTERS, isCover, libraryTypeQuery, mediaKindLabel, type LibraryTypeFilter } from "../lib/importCovers";
 import { Link } from "../components/Layout";
 import { ExportContentSelect, ExportStatus } from "../components/ExportPanel";
 import { PresetPickerDialog } from "../components/PresetPicker";
-import { ConfirmDialog, Empty, ErrorLine, Pill, SkeletonRows, Spinner, Thumb } from "../components/ui";
+import { ConfirmDialog, Empty, ErrorLine, PageHeader, Pill, SkeletonRows, Spinner, Thumb } from "../components/ui";
 import {
   formatBytes,
   formatCount,
@@ -88,7 +88,7 @@ export function LibraryPage() {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [busy, setBusy] = useState(false);
   const [pollMs, setPollMs] = useState<number | null>(null);
-  // Resultado do último "Legendar no CapCut" (com link para a página das legendas).
+  // Resultado do último "Legendar no CapCut" (com link para a página Edição CapCut).
   const [capcutNotice, setCapcutNotice] = useState<string | null>(null);
   // Retoma o ZIP/exportação da Biblioteca em andamento, ou volta a oferecer o ZIP pronto, ao reabrir a tela.
   const exportFlow = useExportFlow({ resumeFor: { kind: "library" } });
@@ -200,7 +200,7 @@ export function LibraryPage() {
     if (source) void exportFlow.start(source, mode, exportContent);
   }
 
-  /** Envia a seleção da página para as Legendas CapCut; o servidor pula o que não é vídeo original. */
+  /** Envia a seleção da página para a Edição CapCut; o servidor pula o que não é vídeo original. */
   async function captionSelected() {
     setBusy(true);
     try {
@@ -259,26 +259,27 @@ export function LibraryPage() {
 
   return (
     <div className="page">
-      <div className="page-head">
-        <h1>Biblioteca</h1>
-        <div className="row">
-          {list.loading && list.data ? <Spinner /> : null}
-          <span className="muted small">
-            {list.data ? (processedView ? `${formatCount(total)} mídias processadas` : `${formatCount(total)} itens`) : null}
+      <PageHeader
+        title="Biblioteca"
+        subtitle={
+          <span className="row" style={{ gap: 8 }}>
+            {list.data ? (processedView ? `${formatCount(total)} mídias processadas` : `${formatCount(total)} itens`) : "Tudo o que você baixou e processou."}
+            {list.loading && list.data ? <Spinner /> : null}
           </span>
-          <button
-            type="button"
-            className="btn btn-sm"
-            title="Abre no Explorer a pasta onde os arquivos originais ficam guardados"
-            onClick={() => void openLibraryFolder()}
-          >
-            <FolderOpen size={13} strokeWidth={1.75} aria-hidden="true" />
-            Abrir pasta da Biblioteca
-          </button>
-        </div>
-      </div>
+        }
+      >
+        <button
+          type="button"
+          className="btn"
+          title="Abre no Explorer a pasta onde os arquivos originais ficam guardados"
+          onClick={() => void openLibraryFolder()}
+        >
+          <FolderOpen size={15} strokeWidth={1.75} aria-hidden="true" />
+          Abrir pasta da Biblioteca
+        </button>
+      </PageHeader>
 
-      <div className="tabs" role="tablist">
+      <div className="tabs" role="tablist" aria-label="Visão da biblioteca">
         {VIEWS.map((v) => (
           <button
             key={v.value}
@@ -440,7 +441,7 @@ export function LibraryPage() {
       {capcutNotice ? (
         <div className="alert" role="status">
           <span className="grow">{capcutNotice}</span>
-          <Link to={ROUTES.captions}>Ver em Legendas CapCut</Link>
+          <Link to={ROUTES.captions}>Ver em Edição CapCut</Link>
           <button type="button" className="btn btn-sm btn-ghost" onClick={() => setCapcutNotice(null)}>
             Fechar
           </button>
@@ -449,7 +450,7 @@ export function LibraryPage() {
       <ExportStatus flow={exportFlow} />
 
       <div className={`library${detail ? " with-detail" : ""}`}>
-        <div style={{ minWidth: 0 }}>
+        <div className="section flush" style={{ minWidth: 0 }}>
           {list.data === undefined ? (
             list.error ? (
               <ErrorLine message={list.error} onRetry={list.reload} />
@@ -458,16 +459,21 @@ export function LibraryPage() {
             )
           ) : rows.length === 0 ? (
             processedView && typeFilter === "all" && q === "" ? (
-              <Empty title="Nenhuma mídia processada">
+              <Empty title="Nenhuma mídia processada" icon={Wand2}>
                 <span className="muted small">
                   O processamento é opcional. Os originais baixados ficam na aba Originais.
                 </span>
               </Empty>
             ) : filtered ? (
-              <Empty title="Nada encontrado com esses filtros" />
+              <Empty title="Nada encontrado com esses filtros" icon={Search}>
+                <span>Tente outro tipo ou limpe a busca.</span>
+              </Empty>
             ) : (
-              <Empty title="Biblioteca vazia">
-                <Link to={ROUTES.import}>Baixar do Instagram</Link>
+              <Empty title="Biblioteca vazia" icon={Library}>
+                <span>Importe publicações do Instagram para começar.</span>
+                <Link to={ROUTES.import} className="btn btn-primary">
+                  Baixar do Instagram
+                </Link>
               </Empty>
             )
           ) : (
@@ -899,7 +905,7 @@ function MediaDetail({
         ))
       )}
 
-      <div style={{ borderTop: "1px solid var(--border)", marginTop: 12, paddingTop: 12 }}>
+      <div style={{ borderTop: "1px solid var(--separator)", marginTop: 12, paddingTop: 12 }}>
         <button type="button" className="btn btn-sm btn-danger" onClick={onDelete}>
           <Trash2 size={13} strokeWidth={1.75} aria-hidden="true" />
           Excluir item

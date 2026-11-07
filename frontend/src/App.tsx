@@ -1,6 +1,7 @@
+import { useEffect } from "react";
 import { Layout } from "./components/Layout";
 import { ToastProvider } from "./components/Toasts";
-import { ROUTES, usePath } from "./lib/router";
+import { LEGACY_ROUTES, ROUTES, redirect, usePath } from "./lib/router";
 import { ImportPage } from "./pages/ImportPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { EditPage } from "./pages/EditPage";
@@ -36,13 +37,21 @@ function Page({ path }: { path: string }) {
       return <SettingsPage />;
     case ROUTES.postTimes:
       return <PostTimesPage />;
-    default:
+    default: {
+      const moved = LEGACY_ROUTES[path];
+      if (moved) return <Redirect to={moved} />;
       return (
         <div className="page">
           <Empty title="Página não encontrada" />
         </div>
       );
+    }
   }
+}
+
+function Redirect({ to }: { to: string }) {
+  useEffect(() => redirect(to), [to]);
+  return null;
 }
 
 export function App() {

@@ -636,7 +636,7 @@ describe("cliente: análise de perfis", () => {
   });
 });
 
-describe("cliente: lotes das Legendas CapCut", () => {
+describe("cliente: lotes da Edição CapCut", () => {
   const fetchMock = vi.fn();
   beforeEach(() => {
     vi.stubGlobal("window", globalThis);
@@ -679,6 +679,28 @@ describe("cliente: lotes das Legendas CapCut", () => {
       "/api/capcut/library?q=gato&folder=local%3A2026-11-07&captioned=yes&limit=50&before_id=90",
       "/api/capcut/estimate?mode=caption&count=12",
     ]);
+  });
+
+  it("visão da lista do seletor: ler, limpar tudo, tirar ids, mostrar e restaurar", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({ cleared: false, hidden_count: 0 })));
+    await api.capcutLibraryView();
+    await api.clearCapcutLibrary();
+    await api.clearCapcutLibrary([3, 4]);
+    await api.showInCapcutLibrary([9]);
+    await api.restoreCapcutLibrary();
+    const calls = fetchMock.mock.calls.map((c) => {
+      const init = c[1] as RequestInit;
+      return `${init.method} ${String(c[0])} ${init.body === undefined ? "" : String(init.body)}`.trim();
+    });
+    expect(calls).toEqual([
+      "GET /api/capcut/library/view",
+      "POST /api/capcut/library/clear {}",
+      'POST /api/capcut/library/clear {"media_ids":[3,4]}',
+      'POST /api/capcut/library/show {"media_ids":[9]}',
+      "POST /api/capcut/library/restore",
+    ]);
+    const post = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect((post.headers as Record<string, string>)["X-Media-Tool-Client"]).toBe("panel");
   });
 
   it("ações do lote e pausa individual usam POST/DELETE nas rotas do contrato", async () => {
