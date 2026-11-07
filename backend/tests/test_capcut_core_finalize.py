@@ -166,3 +166,28 @@ def test_run_tool_system_errors_are_transient(monkeypatch, raised, code):
     with pytest.raises(CapCutError) as exc:
         media_mod.run_tool(["ffmpeg", "-version"])
     assert exc.value.code == code and exc.value.transient is True
+
+
+def test_export_problems_detects_open_truncated_and_short_files(media, tmp_path):
+    """Só fecha o CapCut com o MP4 finalizado: liberado, legível, com a duração da origem e final decodificável."""
+    import os
+
+    from app.integrations.capcut.finalize import export_problems
+
+    original, _videos, exported = media
+    assert export_problems(exported, expected_duration=2.0) == []
+    # aberto só para leitura por outro processo (o CapCut faz isso depois de exportar): pronto
+    if os.name == "nt":
+        with open(exported, "rb"):
+            assert export_problems(exported, expected_duration=2.0) == []
+        # aberto com acesso de escrita (o CapCut ainda gravando): não está pronto
+        with open(exported, "ab"):
+            assert export_problems(exported, expected_duration=2.0) == ["o CapCut ainda está gravando o arquivo"]
+    # gravação interrompida no meio (MP4 truncado)
+    truncated = tmp_path / "truncado.mp4"
+    truncated.write_bytes(exported.read_bytes()[: exported.stat().st_size // 2])
+    assert export_problems(truncated, expected_duration=2.0) != []
+    # duração diferente da origem
+    short = fake_capcut_export(original, tmp_path / "curto.mp4", seconds=1.0)
+    assert any("duração" in p for p in export_problems(short, expected_duration=2.0))
+    assert export_problems(tmp_path / "nao_existe.mp4", expected_duration=2.0) == ["arquivo ausente ou vazio"]

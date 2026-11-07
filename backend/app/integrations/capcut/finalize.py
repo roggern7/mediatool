@@ -113,6 +113,51 @@ def discard_recorded_exports(work_dir: Path, capcut_videos_dir: Path | None) -> 
     return remaining
 
 
+def file_released(path: Path) -> bool:
+    """True se nenhum processo está GRAVANDO o arquivo. Abre para leitura aceitando só outros leitores
+    (FILE_SHARE_READ): falha se algum handle aberto tem acesso de escrita. Verificado no CapCut 9.7.1: depois de
+    exportar, ele mantém o MP4 aberto só para leitura enquanto o projeto está aberto (prévia); isso não impede."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    generic_read, open_existing = 0x80000000, 3
+    file_share_read = 0x1
+    handle = kernel32.CreateFileW(str(path), generic_read, file_share_read, None, open_existing, 0, None)
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return False
+    kernel32.CloseHandle(handle)
+    return True
+
+
+def export_problems(path: Path, *, expected_duration: float, tolerance: float = 0.5) -> list[str]:
+    """Problemas do MP4 exportado (lista vazia = finalizado e íntegro): arquivo liberado pelo CapCut, contêiner
+    legível com vídeo, duração igual à da origem e o ÚLTIMO segundo decodificando sem erro (um MP4 ainda em gravação ou
+    truncado falha aqui)."""
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return ["arquivo ausente ou vazio"]
+    if not file_released(path):
+        return ["o CapCut ainda está gravando o arquivo"]
+    try:
+        info = probe(path)
+    except CapCutError as exc:
+        return [f"contêiner ilegível ({exc.message})"]
+    problems: list[str] = []
+    if expected_duration > 0 and abs(info.duration - expected_duration) > tolerance:
+        problems.append(f"duração {info.duration:.2f}s diferente da origem ({expected_duration:.2f}s)")
+    tail = run_tool([tool_path("ffmpeg"), "-v", "error", "-nostdin", "-sseof", "-1", "-i", str(path), "-map", "0:v:0",
+                     "-f", "null", "-"], timeout=120)
+    if tail.returncode != 0 or (tail.stderr or "").strip():
+        problems.append("o final do vídeo não decodifica")
+    return problems
+
+
 def probe_dict(info: MediaProbe) -> dict[str, Any]:
     return {"width": info.width, "height": info.height, "fps": info.fps, "duration": round(info.duration, 3),
             "video_codec": info.video_codec, "audio_codec": info.audio_codec, "sample_rate": info.sample_rate,

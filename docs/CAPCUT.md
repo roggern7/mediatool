@@ -214,11 +214,19 @@ usa `WM_CLOSE` (sem mouse).
   `Popen` do lançador e os descendentes, reconhecidos pelo PID pai E pelo horário de criação (filho criado depois do
   pai; PID reaproveitado por outro processo não conta). A árvore é atualizada a cada consulta, então segue o executável
   versionado mesmo depois de o lançador sair. Um CapCut aberto pelo dono por fora (mesmo depois de o nosso cair) nunca
-  entra. Não verificado com o CapCut aberto: que o lançador `Apps\CapCut.exe` inicia o `Apps\<versão>\CapCut.exe`
-  como processo filho (se não for, a tela inicial não é encontrada e o job falha com `ui_timeout`, sem tocar em nada).
+  entra. Verificado em 2026-11-07: o lançador `Apps\CapCut.exe` inicia o `Apps\<versão>\CapCut.exe` como processo
+  filho, e as janelas do editor e da exportação pertencem a esse filho.
 - Janelas usadas na automação e no fechamento: só as dos PIDs dessa árvore.
-- `shutdown()`: `WM_CLOSE` nas janelas da árvore, espera até 40 s; `taskkill /PID <pid> /F` em cada PID da árvore só
-  como último recurso.
+- Antes de fechar o projeto, o pipeline espera o MP4 ficar FINALIZADO e íntegro (`finalize.export_problems`, até
+  180 s): ninguém está gravando o arquivo (abrir aceitando só outros leitores funciona; o CapCut mantém o MP4 aberto só para leitura enquanto o projeto está aberto, e isso não impede), o ffprobe lê o contêiner com vídeo, a
+  duração bate com a origem (±0,5 s) e o último segundo decodifica sem erro. Senão `output_invalid` (transitório).
+- Fechamento (`close_project()` e `shutdown()`): `WM_CLOSE` nas janelas da árvore. Se o CapCut mostrar o aviso modal
+  (QML `modalDialog`, nomes acessíveis `mainText: <título>` / `subText: <detalhe>`, ex.: "Confirmar saída? Uma tarefa
+  está em andamento. Deseja sair?"), o Media Tool NUNCA confirma: responde com o botão de cancelar (`Cancelar`,
+  `Não`, `Voltar`...; Invoke e, se preciso, clique travado) ou fecha só a janela do aviso, espera e pede o fechamento
+  de novo a cada 15 s, por até 10 min. Sem aviso, o pedido é repetido a cada 5 s até o prazo (o 1º só leva do editor
+  à tela inicial). Se a tarefa não terminar, o CapCut fica ABERTO e o job registra um aviso; a fila
+  espera (`capcut_busy`) até alguém fechá-lo. NÃO há `taskkill`: o CapCut nunca é forçado a fechar.
 - Intermediário exportado: apagado na finalização se estiver em `%LOCALAPPDATA%\CapCut\Videos` e o caminho não
   existia antes da exportação. Se a tentativa falha depois de exportar, o caminho fica anotado em
   `<data_dir>/capcut/work/<job>/exports.json`; a tentativa seguinte (antes de abrir o CapCut), a conclusão e a exclusão

@@ -46,6 +46,12 @@ CLS_EXPORT = "ExportWindow_QMLTYPE"
 CLS_POPUP = "LVPopupWindow_QMLTYPE"
 # Aviso modal (página web embutida) que o CapCut abre no lugar da exportação, ex.: recurso Pro sem assinatura.
 CLS_BLOCKING_MODAL = "ModalRouterWebView_QMLTYPE"
+# Fechamento: textos de botão que CANCELAM o aviso de saída (nunca o que confirma), intervalo entre novos pedidos
+# de fechamento e espera máxima por uma tarefa em andamento.
+EXIT_PROMPT_CANCEL = {"cancelar", "cancel", "não", "nao", "no", "voltar", "continuar", "continuar editando"}
+EXIT_RETRY_SECONDS = 15.0
+CLOSE_REPEAT_SECONDS = 5.0  # repetição do pedido de fechamento sem aviso (editor -> tela inicial -> sair)
+EXIT_TASK_TIMEOUT = 600.0
 
 RESOLUTIONS = (("480P", 480), ("720P", 720), ("1080P", 1080), ("2K", 1440), ("4K", 2160), ("8K", 4320))
 BITRATES = {"low": "Abaixar", "recommended": "Recomendado", "high": "Superior"}
@@ -235,6 +241,9 @@ class CapCutController:
         self.warnings: list[str] = []
         self._libs: Any = None
         self._last_injected_tick = 0  # GetTickCount da última entrada sintética nossa (0 = nenhuma ainda)
+        # Espera máxima por uma tarefa que o CapCut diz estar em andamento ao fechar (nunca forçamos).
+        self.task_timeout = EXIT_TASK_TIMEOUT
+        self.exit_prompt_seen = ""
 
     # ------------------------------------------------------------------ utilidades
     @property
@@ -723,35 +732,139 @@ class CapCutController:
         self.last_export_created = not existed
         return target
 
+    # ------------------------------------------------------------------ fechamento seguro
+    def _exit_prompt(self) -> tuple[int, str, str, Any] | None:
+        """Diálogo modal do CapCut aberto (ex.: "Confirmar saída? Uma tarefa está em andamento."): (hwnd, título,
+        detalhe, raiz UIA). O QML do CapCut expõe `mainText: <título>` e `subText: <detalhe>` como nomes acessíveis."""
+        auto = self.L.auto
+        for hwnd, _title, _cls in self._windows():
+            try:
+                root = auto.ControlFromHandle(hwnd)
+                main = root.Control(searchDepth=12, RegexName=r"^mainText: ")
+                if not main.Exists(0, 0):
+                    continue
+                sub = root.Control(searchDepth=12, RegexName=r"^subText: ")
+                sub_text = sub.Name[len("subText: "):] if sub.Exists(0, 0) else ""
+                return hwnd, main.Name[len("mainText: "):], sub_text, root
+            except Exception:  # noqa: BLE001 - janela fechando no meio da leitura
+                continue
+        return None
+
+    def _cancel_prompt(self, hwnd: int, root: Any) -> bool:
+        """Responde o diálogo SEM confirmar a saída: botão de cancelar/voltar (Invoke; clique travado se preciso) ou,
+        se o diálogo for uma janela própria, fecha só ele (fechar = cancelar no QML do CapCut). Nunca clica no botão de
+        confirmar."""
+        L = self.L
+        buttons = []
+        stack = [(root, 0)]
+        while stack:
+            ctrl, depth = stack.pop()
+            for child in ctrl.GetChildren():
+                if child.ControlTypeName == "ButtonControl" and (child.Name or "").strip():
+                    buttons.append(child)
+                if depth < 10:
+                    stack.append((child, depth + 1))
+        cancel = next((b for b in buttons if (b.Name or "").strip().casefold() in EXIT_PROMPT_CANCEL), None)
+        if cancel is not None:
+            try:
+                cancel.GetPattern(L.auto.PatternId.InvokePattern).Invoke()
+                self._sleep(1.0)
+                if not self._exit_prompt():
+                    return True
+            except Exception:  # noqa: BLE001 - Invoke nem sempre funciona nos itens QML; tenta o clique travado
+                pass
+            try:
+                self._safe_click(cancel, hwnd)
+                self._sleep(1.0)
+                if not self._exit_prompt():
+                    return True
+            except CapCutError:
+                pass
+        cls = L.auto.ControlFromHandle(hwnd).ClassName or ""
+        if not cls.startswith((CLS_HOME, CLS_EDITOR)):
+            L.win32gui.PostMessage(hwnd, WM_CLOSE, 0, 0)
+            self._sleep(1.0)
+            return not self._exit_prompt()
+        return False
+
+    def _close_gracefully(self, post_close: Callable[[], None], done: Callable[[], bool], what: str,
+                          timeout: float) -> bool:
+        """Pede o fechamento e espera `done`. Se o CapCut perguntar se quer sair com uma tarefa em andamento, NÃO
+        confirma: cancela o aviso, espera e pede de novo a cada EXIT_RETRY_SECONDS, até `task_timeout`. Nunca força.
+        False = o CapCut continua aberto (tarefa não terminou no prazo)."""
+        post_close()
+        deadline = time.monotonic() + timeout
+        task_deadline: float | None = None
+        next_retry = time.monotonic() + CLOSE_REPEAT_SECONDS
+        while True:
+            if done():
+                return True
+            prompt = self._exit_prompt()
+            now = time.monotonic()
+            if prompt:
+                hwnd, title, detail, root = prompt
+                if task_deadline is None:
+                    task_deadline = now + self.task_timeout
+                    logger.info("CapCut pediu confirmação ao %s (%s / %s): aguardando a tarefa terminar, sem forçar",
+                                what, title, detail)
+                self.exit_prompt_seen = f"{title} {detail}".strip()
+                self._cancel_prompt(hwnd, root)
+                next_retry = time.monotonic() + EXIT_RETRY_SECONDS
+            elif now >= next_retry:
+                # Pede de novo (sem confirmar nada): o 1º pedido pode só ter levado do editor à tela inicial, ou a
+                # tarefa avisada pode ter terminado.
+                post_close()
+                next_retry = now + (EXIT_RETRY_SECONDS if task_deadline is not None else CLOSE_REPEAT_SECONDS)
+            limit = task_deadline if task_deadline is not None else deadline
+            if now >= limit:
+                return False
+            time.sleep(1.0)
+
     def close_project(self, timeout: float = 30) -> None:
         editor = self._find_window(CLS_EDITOR)
-        if editor:
-            self.L.win32gui.PostMessage(editor, WM_CLOSE, 0, 0)
-            self._wait(lambda: self._find_window(CLS_HOME) or not self._owned(capcut_only=True), timeout,
-                       "fechar o projeto")
+        if not editor:
+            return
+
+        def post_close() -> None:
+            if self.L.win32gui.IsWindow(editor):
+                self.L.win32gui.PostMessage(editor, WM_CLOSE, 0, 0)
+
+        ok = self._close_gracefully(
+            post_close, lambda: bool(self._find_window(CLS_HOME)) or not self._owned(capcut_only=True),
+            "fechar o projeto", timeout)
+        if not ok:
+            if self.exit_prompt_seen:
+                self.warnings.append("O CapCut ficou aberto: avisou que uma tarefa ainda estava em andamento "
+                                     f"({self.exit_prompt_seen}). Ele não foi forçado a fechar.")
+                return
+            raise UiTimeout("O CapCut não respondeu a tempo (fechar o projeto).")
 
     def shutdown(self, timeout: float = 40) -> None:
         """Fecha o CapCut que NÓS abrimos: só processos da árvore do lançador que iniciamos (PID pai + horário de
-        criação). WM_CLOSE nas janelas desses PIDs; `taskkill /F` em cada um deles só como último recurso. Um CapCut
-        aberto pelo dono por fora nunca é tocado."""
+        criação), com WM_CLOSE nas janelas desses PIDs. NUNCA força (sem taskkill): se o CapCut avisar que há tarefa
+        em andamento, espera ela terminar (até `task_timeout`) e, se não terminar, deixa o CapCut aberto com aviso. Um
+        CapCut aberto pelo dono por fora nunca é tocado."""
         if not self._launched:
             return
-        apps = self._owned(capcut_only=True)
-        if not apps:
+        if not self._owned(capcut_only=True):
             self._launched = False
             return
-        try:
-            for hwnd, _title, _cls in self._windows(apps):
-                self.L.win32gui.PostMessage(hwnd, WM_CLOSE, 0, 0)
-        except CapCutError:
-            pass
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not self._owned(capcut_only=True):
-                self._launched = False
-                return
-            time.sleep(1.0)
-        for pid in sorted(self._owned()):
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+        def post_close() -> None:
+            try:
+                prompt = self._exit_prompt()
+                for hwnd, _title, _cls in self._windows(self._owned(capcut_only=True)):
+                    if not (prompt and prompt[0] == hwnd):
+                        self.L.win32gui.PostMessage(hwnd, WM_CLOSE, 0, 0)
+            except CapCutError:
+                pass
+
+        closed = self._close_gracefully(post_close, lambda: not self._owned(capcut_only=True), "fechar o CapCut",
+                                        timeout)
+        if not closed:
+            detail = (f"avisou que uma tarefa ainda estava em andamento ({self.exit_prompt_seen})"
+                      if self.exit_prompt_seen else "não fechou no prazo")
+            self.warnings.append(f"O CapCut ficou aberto: {detail}. Ele não foi forçado a fechar; a fila espera até "
+                                 "ele ser fechado.")
+            logger.warning("CapCut: não fechou (%s); deixado aberto, sem forçar", detail)
         self._launched = False

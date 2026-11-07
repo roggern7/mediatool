@@ -274,7 +274,7 @@ class FakeLibs:
         self.win32gui, self.win32process, self.auto = Gui, Proc, Auto
 
 
-def test_shutdown_only_closes_and_kills_our_process_tree(tmp_path, monkeypatch):
+def test_shutdown_only_closes_our_process_tree_and_never_kills(tmp_path, monkeypatch):
     base = fake_capcut(tmp_path)
     inst = install_mod.detect({"MEDIA_TOOL_CAPCUT_ROOT": str(base)})
     table = [P(4, 0, "explorer.exe", 10), P(100, 4, "CapCut.exe", 1000)]
@@ -298,8 +298,8 @@ def test_shutdown_only_closes_and_kills_our_process_tree(tmp_path, monkeypatch):
     c._libs = FakeLibs({11: 200, 22: 400})
     c.shutdown(timeout=0)
     assert c._libs.posted == [(11, ctl.WM_CLOSE)], "WM_CLOSE só na janela do nosso processo"
-    assert killed == [["taskkill", "/PID", "200", "/F"], ["taskkill", "/PID", "300", "/F"]]
-    assert all("400" not in args for args in killed)
+    assert killed == [], "nunca força o fechamento (sem taskkill)"
+    assert any("ficou aberto" in w and "não foi forçado" in w for w in c.warnings)
     # o nosso já saiu e só o do dono está aberto: nada a fechar
     killed.clear()
     c._launched = True
@@ -360,3 +360,71 @@ def test_click_until_accepts_window_that_opened_late(tmp_path):
     c._safe_click = lambda *_a: (_ for _ in ()).throw(ctl.ForegroundLost("x"))
     with pytest.raises(ctl.ForegroundLost):
         c._click_until(object(), 1, lambda: None, "abrir a exportação", per_try=0.2)
+
+
+def _prompt_controller(tmp_path, monkeypatch, *, task_seconds):
+    """Controlador com CapCut 'aberto' que mostra 'Confirmar saída? Uma tarefa está em andamento' enquanto a tarefa
+    dura `task_seconds` (relógio falso). Registra cancelamentos e pedidos de fechamento; nada de confirmar."""
+    base = fake_capcut(tmp_path)
+    inst = install_mod.detect({"MEDIA_TOOL_CAPCUT_ROOT": str(base)})
+    c = ctl.CapCutController(inst, state_dir=tmp_path / "state", running=lambda: [], processes=lambda: [])
+    clock = {"t": 0.0}
+    monkeypatch.setattr(ctl.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(ctl.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(c, "_sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(ctl, "EXIT_RETRY_SECONDS", 5.0)
+    c.task_timeout = 60.0
+    state = {"open": True, "prompt": False, "closes": 0, "cancels": 0}
+
+    def post_close():
+        state["closes"] += 1
+        if clock["t"] < task_seconds:
+            state["prompt"] = True  # tarefa em andamento: o CapCut pergunta
+        else:
+            state["open"] = False  # tarefa acabou: fecha normalmente
+
+    def cancel(_hwnd, _root):
+        state["cancels"] += 1
+        state["prompt"] = False
+        return True
+
+    monkeypatch.setattr(c, "_exit_prompt",
+                        lambda: (7, "Confirmar saída?", "Uma tarefa está em andamento. Deseja sair?", None)
+                        if state["prompt"] else None)
+    monkeypatch.setattr(c, "_cancel_prompt", cancel)
+    return c, state, post_close, clock
+
+
+def test_exit_prompt_is_cancelled_and_close_retried_after_task_ends(tmp_path, monkeypatch):
+    c, state, post_close, clock = _prompt_controller(tmp_path, monkeypatch, task_seconds=20)
+    ok = c._close_gracefully(post_close, lambda: not state["open"], "fechar o CapCut", timeout=40)
+    assert ok is True and not state["open"]
+    assert state["cancels"] >= 1, "o aviso foi respondido com CANCELAR (nunca confirmar a saída)"
+    assert state["closes"] >= 2, "pediu para fechar de novo depois que a tarefa terminou"
+    assert clock["t"] >= 20, "esperou a tarefa terminar"
+    assert "Uma tarefa está em andamento" in c.exit_prompt_seen
+
+
+def test_close_is_repeated_without_prompt_until_capcut_exits(tmp_path, monkeypatch):
+    """Sem aviso: o 1º WM_CLOSE só leva do editor à tela inicial; o pedido é repetido até o CapCut sair."""
+    c, state, _post_close, clock = _prompt_controller(tmp_path, monkeypatch, task_seconds=0)
+    monkeypatch.setattr(ctl, "CLOSE_REPEAT_SECONDS", 5.0)
+    calls = {"n": 0}
+
+    def post_close():
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            state["open"] = False  # 1º pedido: editor -> tela inicial; 2º: sai
+
+    ok = c._close_gracefully(post_close, lambda: not state["open"], "fechar o CapCut", timeout=40)
+    assert ok is True and calls["n"] == 2 and clock["t"] < 40
+
+
+def test_exit_prompt_task_never_ends_leaves_capcut_open_without_forcing(tmp_path, monkeypatch):
+    killed: list = []
+    monkeypatch.setattr(ctl.subprocess, "run", lambda args, **_k: killed.append(args))
+    c, state, post_close, clock = _prompt_controller(tmp_path, monkeypatch, task_seconds=10_000)
+    ok = c._close_gracefully(post_close, lambda: not state["open"], "fechar o CapCut", timeout=40)
+    assert ok is False and state["open"], "tarefa não terminou no prazo: CapCut continua aberto"
+    assert 60 <= clock["t"] < 70, "respeita o prazo da tarefa, não o prazo curto do fechamento"
+    assert killed == []

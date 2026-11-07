@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from app.integrations.capcut.errors import CapCutBusy, CapCutCancelled, CapCutEr
 from app.integrations.capcut.finalize import (
     MSG_OUTPUT_WRITE,
     discard_recorded_exports,
+    export_problems,
     finalize_output,
     probe_dict,
     record_export,
@@ -61,6 +63,25 @@ def _prune_work_dir(work_dir: Path) -> None:
         work_dir.rmdir()
     except OSError:
         pass
+
+
+def wait_export_complete(path: Path, *, expected_duration: float, cancel: threading.Event,
+                         timeout: float = 180.0, interval: float = 2.0) -> None:
+    """Espera o MP4 exportado ficar finalizado e íntegro (`export_problems` vazio). Não ficou no prazo:
+    CapCutError('output_invalid', transitório) sem fechar nada às pressas."""
+    deadline = time.monotonic() + timeout
+    problems: list[str] = []
+    while True:
+        if cancel.is_set():
+            raise CapCutCancelled()
+        problems = export_problems(path, expected_duration=expected_duration)
+        if not problems:
+            return
+        if time.monotonic() >= deadline:
+            raise CapCutError("output_invalid", "O vídeo exportado pelo CapCut não ficou íntegro: "
+                              + "; ".join(problems) + ".", transient=True)
+        if cancel.wait(interval):
+            raise CapCutCancelled()
 
 
 def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: StageCallback,
@@ -177,6 +198,9 @@ def process_video(spec: CapCutJobSpec, *, cancel: threading.Event, on_stage: Sta
         exported = Path(controller.export(options))
         warnings.extend(getattr(controller, "warnings", []) or [])
         created = bool(getattr(controller, "last_export_created", False))
+        # Só fecha o projeto/CapCut depois de o MP4 estar FINALIZADO e íntegro (o CapCut pode ainda estar gravando).
+        stage("exporting", None, "Conferindo se o MP4 foi finalizado")
+        wait_export_complete(exported, expected_duration=info.duration, cancel=cancel)
         controller.close_project()
         controller.shutdown()
         stage("exporting", 1.0, None)
