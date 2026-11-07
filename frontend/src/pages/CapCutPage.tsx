@@ -212,6 +212,12 @@ function StatusSection({
               Fila {status.queue.paused ? "pausada" : "ativa"}: {formatCount(status.queue.running)} em andamento,{" "}
               {formatCount(status.queue.pending)} na fila, {formatCount(status.queue.waiting)} aguardando o CapCut,{" "}
               {formatCount(status.queue.failed)} com erro.
+              {status.queue.paused && status.queue.pause_reason ? (
+                <>
+                  <br />
+                  <strong>{status.queue.pause_reason}</strong>
+                </>
+              ) : null}
             </span>
             <button
               type="button"

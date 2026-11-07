@@ -1851,7 +1851,7 @@ enfileirar só vai para o log e não muda o resultado do download.
 | POST | /api/capcut/jobs/{id}/retry | | `Job` (`failed`/`cancelled` -> `pending`, `attempts = 0`, transcrição mantida); 409 `capcut_job_not_retryable` |
 | GET | /api/capcut/jobs/{id}/file | | o vídeo legendado (download); só arquivo dentro do `output_dir` do job: 403 `not_allowed`; 404 `capcut_output_not_found` |
 | POST | /api/capcut/jobs/{id}/reveal | | `{ok: true}`: abre o Explorer com o arquivo selecionado; mesmos erros do `file` e os de abrir no sistema |
-| POST | /api/capcut/queue/pause, /api/capcut/queue/resume | | `{paused}`; pausar não interrompe o job em andamento |
+| POST | /api/capcut/queue/pause, /api/capcut/queue/resume | | `{paused}`; pausar não interrompe o job em andamento. `GET /status` traz `queue.pause_reason` quando a pausa foi automática (o dono tentou abrir o CapCut durante a exportação isolada); retomar limpa o motivo |
 
 ## 9. Processor (`media_processor`)
 

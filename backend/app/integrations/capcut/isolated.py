@@ -441,17 +441,45 @@ class IsolatedControllerProxy:
 
     export_mode = "isolated"
 
-    def __init__(self, desktop: Any, worker: DesktopThread, controller: Any):
+    def __init__(self, desktop: Any, worker: DesktopThread, controller: Any,
+                 processes: Callable[[], list[install_mod.ProcessInfo]] | None = None, poll: float = 1.0):
         self._desktop = desktop
         self._worker = worker
         self._controller = controller
         self._closed = False
+        self._processes = processes or install_mod.process_table
+        self._poll = poll
+        self._watch_stop = threading.Event()
+        self._watcher: threading.Thread | None = None
+        self.user_capcut_attempt = False  # alguém abriu outro CapCut.exe durante a sessão (fora da nossa árvore)
+
+    def _watch(self, since: int) -> None:
+        """Vigia, sem tocar em nada, se aparece um CapCut.exe FORA da árvore da nossa sessão criado depois do launch:
+        é o dono tentando abrir o CapCut (instância única: o pedido vai para a nossa instância oculta)."""
+        while not self._watch_stop.wait(self._poll):
+            try:
+                table = list(self._processes())
+                tree = install_mod.track_tree(table, dict(getattr(self._controller, "_tree", {}) or {}))
+            except Exception:  # noqa: BLE001 - vigia é só aviso
+                continue
+            for proc in table:
+                if (proc.name.lower() == install_mod.PROCESS_NAME.lower() and proc.pid not in tree
+                        and proc.created is not None and proc.created > since):
+                    if not self.user_capcut_attempt:
+                        logger.info("CapCut isolado: outro CapCut foi aberto durante a exportação (pid %s)", proc.pid)
+                    self.user_capcut_attempt = True
 
     def _call(self, name: str, *args: Any, **kwargs: Any) -> Any:
         return self._worker.call(getattr(self._controller, name), *args, **kwargs)
 
     def launch(self, timeout: float = 30) -> int:
-        return self._call("launch", timeout)
+        pid = self._call("launch", timeout)
+        if self._watcher is None:
+            since = max((c for c in (getattr(self._controller, "_tree", {}) or {}).values() if c), default=0)
+            self._watcher = threading.Thread(target=self._watch, args=(since,), name="capcut-isolated-watch",
+                                             daemon=True)
+            self._watcher.start()
+        return pid
 
     def wait_home(self, timeout: float = 90) -> int:
         return self._call("wait_home", timeout)
@@ -486,6 +514,9 @@ class IsolatedControllerProxy:
         if self._closed:
             return
         self._closed = True
+        self._watch_stop.set()
+        if self._watcher is not None:
+            self._watcher.join(5)
         self._worker.stop()
         self._desktop.close()
 
@@ -538,11 +569,20 @@ def recover_leftover(install: CapCutInstall | None, *, state_dir: Path, cancel: 
         try:
             iso = {pid_of(h) for h in desktop.windows()} & pids
             normal = {pid_of(h) for h in (default_windows or default_desktop_windows)()} & pids
+            table = list((processes or install_mod.process_table)())
         except Exception:  # noqa: BLE001 - sem como provar que é nosso: não toca
             logger.info("CapCut isolado: não foi possível conferir as janelas do CapCut aberto", exc_info=True)
             return []
         if not iso or normal:
             return []
+        # Só é nosso a árvore de processos de quem tem janela na área isolada; qualquer outro CapCut em execução (ex.
+        # o do dono, mesmo sem janela na área normal) faz a sobra NÃO ser tocada: quem chama trata como capcut_busy.
+        created = {p.pid: p.created for p in table}
+        tree = install_mod.track_tree(table, {pid: created[pid] for pid in iso if created.get(pid) is not None})
+        if pids - set(tree):
+            logger.info("CapCut isolado: há CapCut fora da árvore da área isolada; a sobra não será tocada")
+            return []
+        pids = pids & set(tree)
         logger.info("CapCut isolado: CapCut com todas as janelas na área isolada (sobra); fechando com segurança")
         if progress is not None:
             progress("Fechando o CapCut que ficou aberto na área isolada")

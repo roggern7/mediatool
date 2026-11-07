@@ -428,3 +428,17 @@ def test_exit_prompt_task_never_ends_leaves_capcut_open_without_forcing(tmp_path
     assert ok is False and state["open"], "tarefa não terminou no prazo: CapCut continua aberto"
     assert 60 <= clock["t"] < 70, "respeita o prazo da tarefa, não o prazo curto do fechamento"
     assert killed == []
+
+
+def test_cancel_does_not_abort_the_safe_close(tmp_path, monkeypatch):
+    """Cancelado no meio da exportação: o fechamento seguro vai até o fim mesmo com o cancelamento pedido (no real, o
+    cancelamento abortava o fechamento e o CapCut ficava aberto com rascunho e vídeo intermediário sobrando)."""
+    c, state, post_close, clock = _prompt_controller(tmp_path, monkeypatch, task_seconds=20)
+    monkeypatch.setattr(c, "_sleep", ctl.CapCutController._sleep.__get__(c))  # _sleep original, com cancelamento
+    c.cancel.set()
+    with pytest.raises(ctl.CapCutCancelled):
+        c._sleep(0.1)  # fora do fechamento, o cancelamento interrompe
+    c._closing = True
+    ok = c._close_gracefully(post_close, lambda: not state["open"], "fechar o CapCut", timeout=40)
+    assert ok is True and not state["open"], "fechou mesmo com o cancelamento pedido"
+    assert state["cancels"] >= 1, "o aviso de tarefa em andamento foi cancelado, sem confirmar a saída"

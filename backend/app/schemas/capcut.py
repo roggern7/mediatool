@@ -71,6 +71,7 @@ class QueueCounts(BaseModel):
     completed: int
     cancelled: int
     paused: bool
+    pause_reason: str | None = None  # ex.: o dono tentou abrir o CapCut durante a exportação isolada
 
 
 class IsolatedModeInfo(BaseModel):

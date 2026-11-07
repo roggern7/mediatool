@@ -40,6 +40,12 @@ class CapCutJobSpec:
     export_mode: str = "isolated"
 
 
+# Aviso marcado: durante a exportação isolada alguém tentou abrir o CapCut (instância única: o pedido foi absorvido
+# pela instância oculta da automação). O runner pausa a fila ao ver este texto, para liberar o CapCut para o dono.
+USER_CAPCUT_NOTICE = ("Você tentou abrir o CapCut durante a exportação. O CapCut só abre uma vez, então a fila foi "
+                      "pausada ao fim deste vídeo para liberar o CapCut para você. Retome a fila quando terminar.")
+
+
 @dataclass
 class CapCutResult:
     output_path: Path
