@@ -1662,4 +1662,13 @@ class ImportRunner:
             params=batch["params"] if process else None,
             **kwargs,
         )
+        if job_id is not None and existing is not None and role == "original" and existing["media_type"] == "video":
+            # Já baixado antes, numa importação com "Edição CapCut": entra no lote também (sem vínculo, nada).
+            try:
+                from app.services import capcut_service
+
+                capcut_service.enqueue_linked(self.ctx, existing["id"], batch["id"])
+            except Exception:  # noqa: BLE001 - a importação segue; a edição é um extra
+                logger.warning("Lote %s: não foi possível pôr a mídia %s no lote da Edição CapCut", batch["id"],
+                               existing["id"], exc_info=True)
         return job_id is not None
