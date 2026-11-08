@@ -550,7 +550,14 @@ def create_jobs(ctx: AppContext, media_ids: list[int], *, style_id: int | None =
 
 
 def enqueue_after_download(ctx: AppContext, media_id: int, batch_id: int | None) -> int | None:
-    """Mídia nova baixada: com "legendar automaticamente" ligado, um job `auto`. Retorna o id criado (ou None)."""
+    """Mídia nova baixada. Importação vinculada a um lote da Edição CapCut ("Edição CapCut" após baixar): o vídeo
+    entra nesse lote (e o "legendar automaticamente" não cria um segundo job). Sem vínculo: com "legendar
+    automaticamente" ligado, um job `auto`. Retorna o id criado (ou None)."""
+    from app.services import capcut_batch_service
+
+    linked = capcut_batch_service.linked_batch_id(ctx, import_batch_id=batch_id) if batch_id is not None else None
+    if linked is not None:
+        return capcut_batch_service.add_import_video(ctx, linked, media_id, batch_id)
     if not _stored(ctx)["auto_after_download"]:
         return None
     result = create_jobs(ctx, [media_id], origin="auto", batch_id=batch_id)

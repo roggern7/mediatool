@@ -34,12 +34,13 @@ function plan(preview: ProfilesPreview, choice: PostProcessing, form: EditForm =
 }
 
 describe("escolha do pós-processamento", () => {
-  it("três opções exclusivas; o padrão é só baixar", () => {
+  it("quatro opções exclusivas; o padrão é só baixar", () => {
     expect(POST_PROCESSING_DEFAULT).toBe("none");
     expect(POST_PROCESSING_OPTIONS.map((o) => o.label)).toEqual([
       "Só baixar",
       "Processar com preset",
       "Editar após baixar",
+      "Edição CapCut",
     ]);
   });
 

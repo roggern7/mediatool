@@ -569,7 +569,7 @@ mesmo lote de edição (reaberto) e `edit_job_id` passa a apontar para ele. "Ten
 mesma regra. Concluídos nunca são refeitos.
 
 Status derivado (contagens: `pending`/`waiting` sem pausa individual; `held` = na fila com pausa individual): sem job
-aberto, `cancelled` (cancelamento pedido ou todos cancelados), `completed_with_errors` (algum com erro ou cancelado)
+aberto, `importing` (lote de uma importação ainda ativa, ver "Lote da importação" abaixo), `cancelled` (cancelamento pedido ou todos cancelados), `completed_with_errors` (algum com erro ou cancelado)
 ou `completed`; com job aberto, `cancelled` (cancelamento em andamento), `running` (há job em execução), `paused`
 (lote pausado ou só restam jobs com pausa individual) ou `running`. `finished_at` é gravado quando não resta job
 aberto e limpo quando volta a ter (executor ao fim de cada job, ações da API e recuperação no startup). `progress` =
@@ -609,8 +609,46 @@ o que estava visível e para saber quem tem job do CapCut aberto); vídeos com j
 para exclusão. A exclusão comum só pula mídia com job do worker em andamento ou exportação aberta (não olha os jobs do
 CapCut), por isso o filtro fica na página.
 
-Testes: `tests/test_capcut_library_view.py` (visão da lista do seletor), `tests/test_capcut_batches.py` (processador
-do CapCut falso e worker com o processor falso) e
+### Lote da importação ("Edição CapCut" após baixar)
+
+Na Importação, o pós-processamento "Edição CapCut" (campo `capcut` de `POST /api/imports`, `/imports/start` com
+`post_processing: "capcut"`, `/import-groups` e `/import-links`; contrato em `docs/CONTRACTS.md` 8.9) manda cada vídeo
+novo baixado para um lote desta página. Sem migração: o vínculo fica em `app_state` e a origem no `options` do lote.
+
+- Pedido: `capcut = {mode, caption?, edit?, name?}`, o mesmo formato de `POST /batches` sem a seleção (`media_ids`,
+  `filter`, `include_done`). Exclusivo com o preset e com `edit` (422 `capcut_with_post_processing`). A configuração é
+  validada na criação da importação pela mesma função do lote da página (`capcut_batch_service.prepare`), com os
+  mesmos erros (`edit_required`, `edit_no_changes`, `style_not_found`, `preset_not_found`, `invalid_preset`...), antes
+  de criar qualquer lote. Na importação unificada, "Somente capas" e "Somente fotos" ignoram a escolha (nada é
+  editado), e a exportação automática "editados"/"ambos" é recusada (422 `auto_export_capcut`: os editados ficam no
+  lote da Edição CapCut, não na exportação da importação).
+- Criação (na mesma transação da importação): UM lote `capcut_batches` vazio por pedido (perfil, grupo e links da
+  importação unificada dividem o mesmo), nome padrão "Importação dd/mm HH:MM" ou `name`, pasta `Lote <id>` e o mesmo
+  instantâneo de `options` do lote da página, mais `selection = {"import": true}`, `source = {"kind": "import",
+  "batch_ids": [...], "group_id": n|null}` e `job_options` (as opções completas dos jobs, com o modelo de legenda;
+  fora da resposta da API). Vínculos em `app_state`: `capcut_import_link:batch:<id>` para cada lote de importação
+  avulso (perfil único e links) e `capcut_import_link:group:<id>` para o grupo (vale para todos os filhos, inclusive
+  os criados depois). Valor = id do lote CapCut. A resposta da criação traz `capcut_batch_id`.
+- Vídeo novo baixado (`pipeline._queue_capcut` -> `capcut_service.enqueue_after_download`): se o lote de importação
+  do job (ou o grupo dele) tem vínculo, `capcut_batch_service.add_import_video` adiciona o vídeo pelo mesmo caminho de
+  `create_batch` por vídeo (`_add_video`: job `process` da edição nos modos com edição + job do CapCut, `origin =
+  auto`, `batch_id` = lote de importação). O lote de edição (`batches`) é criado no primeiro vídeo que precisa dele
+  (e reaberto se a edição dos anteriores já terminou). Pulados: lote CapCut inexistente, removido do histórico ou com
+  cancelamento pedido; mídia que não é vídeo original (foto, capa); mídia com job CapCut aberto. Duplicatas e
+  reaproveitados nunca passam pelo gancho. Com vínculo, o "legendar automaticamente após o download" NÃO cria outro
+  job; sem vínculo, tudo continua como antes.
+- Status `importing` ("Aguardando downloads"): sem job aberto, sem cancelamento pedido e com algum lote vinculado
+  (`source.batch_ids` ou filho de `source.group_id`) ainda `listing` ou `running`. Vale no `GET /batches/{id}` e no
+  filtro `status=importing`. A importação terminou sem nenhum vídeo novo: o lote fica `completed` com 0 vídeos.
+- Cancelamento independente: cancelar o lote CapCut (aceito também em `importing`, sem vídeo) não cancela a
+  importação, e cancelar a importação não cancela o lote CapCut. Depois de cancelado, os vídeos que ainda chegarem
+  não entram. "Reprocessar falhas" limpa o cancelamento do lote, e os vídeos seguintes voltam a entrar.
+- Página: a opção "Edição CapCut" mostra o mesmo formulário de configuração do lote (`BatchConfigForm`, com os mesmos
+  padrões, sem "Reprocessar vídeos já feitos") e o nome opcional. Criada a importação, a tela mostra "Os vídeos vão
+  para a Edição CapCut (lote N)" com o link `/edicao-capcut?lote=N`, que abre o lote no painel da página.
+
+Testes: `tests/test_import_capcut.py` (lote da importação), `tests/test_capcut_library_view.py` (visão da lista do
+seletor), `tests/test_capcut_batches.py` (processador do CapCut falso e worker com o processor falso) e
 `tests/test_capcut_batches_real.py` (modo só edição com FFmpeg real e vídeo sintético: duração com corte no início,
 velocidade e limite).
 

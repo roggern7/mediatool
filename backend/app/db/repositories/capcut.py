@@ -48,9 +48,18 @@ _BATCH_AGG = (
 )
 _OPEN_EXPR = ("(COALESCE(a.running, 0) + COALESCE(a.pending, 0) + COALESCE(a.waiting, 0) + COALESCE(a.held, 0)"
               " + COALESCE(a.review, 0))")
-# Status derivado do lote (docs/CAPCUT.md, "Lotes").
+# Lote vinculado a uma importação (`options.source`, docs/CAPCUT.md, "Lotes"): um dos lotes de importação, ou um
+# filho do grupo, ainda listando ou baixando.
+_IMPORT_ACTIVE_SQL = (
+    "EXISTS (SELECT 1 FROM batches ib WHERE ib.status IN ('listing', 'running')"
+    " AND (ib.id IN (SELECT value FROM json_each(b.options, '$.source.batch_ids'))"
+    " OR ib.group_id = json_extract(b.options, '$.source.group_id')))"
+)
+# Status derivado do lote (docs/CAPCUT.md, "Lotes"). `importing`: sem vídeo na fila, mas a importação vinculada
+# ainda pode trazer vídeos (não aparece como concluído com 0 vídeos).
 _BATCH_STATUS_SQL = (
-    f"CASE WHEN {_OPEN_EXPR} = 0 AND (b.cancel_requested = 1 OR (a.total > 0 AND a.cancelled = a.total))"
+    f"CASE WHEN {_OPEN_EXPR} = 0 AND b.cancel_requested = 0 AND {_IMPORT_ACTIVE_SQL} THEN 'importing'"
+    f" WHEN {_OPEN_EXPR} = 0 AND (b.cancel_requested = 1 OR (a.total > 0 AND a.cancelled = a.total))"
     " THEN 'cancelled'"
     f" WHEN {_OPEN_EXPR} = 0 AND COALESCE(a.failed, 0) + COALESCE(a.cancelled, 0) > 0 THEN 'completed_with_errors'"
     f" WHEN {_OPEN_EXPR} = 0 THEN 'completed'"

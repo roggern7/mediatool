@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { ApiError, api, messageOf } from "../api/client";
-import type { EditSettings, MediaChoice, UnifiedImportResult } from "../api/types";
+import type { CapCutImportSettings, EditSettings, MediaChoice, UnifiedImportResult } from "../api/types";
 import { ConfirmDialog, ErrorLine, Field, Spinner } from "./ui";
 import {
+  AUTO_EXPORT_CAPCUT_TEXT,
   AUTO_EXPORT_CHOICES,
   AUTO_EXPORT_NEEDS_PROCESSING_TEXT,
   autoExportNeedsProcessing,
@@ -103,6 +104,7 @@ export function ImportUnifiedForm({
   post,
   presetId,
   edit,
+  capcut = null,
   editProblem,
   onCreated,
   onError,
@@ -116,6 +118,8 @@ export function ImportUnifiedForm({
   post: PostProcessing;
   presetId: number | null;
   edit: EditSettings | null;
+  /** "Edição CapCut": configuração do lote (null nas outras escolhas). */
+  capcut?: CapCutImportSettings | null;
   editProblem: string | null;
   onCreated: (result: UnifiedImportResult) => void;
   onError: (err: unknown) => void;
@@ -131,8 +135,10 @@ export function ImportUnifiedForm({
   // "Nada — só consultar padrões": horário ligado e travado; sem pós-processamento, ZIP automático nem visualizações.
   const patternsOnly = media === "none";
   const effectivePost: PostProcessing = patternsOnly ? "none" : post;
-  // Capas e fotos nunca são processadas: sem versão editada para exportar.
-  const noEdited = (post: string) => post === "none" || media === "covers" || media === "photos";
+  // Capas e fotos nunca são processadas: sem versão editada para exportar. Na Edição CapCut, os editados ficam no
+  // lote dela (não na exportação da importação).
+  const noEdited = (post: string) => post === "none" || post === "capcut" || media === "covers" || media === "photos";
+  const autoExportText = post === "capcut" ? AUTO_EXPORT_CAPCUT_TEXT : AUTO_EXPORT_NEEDS_PROCESSING_TEXT;
   const [quantityMode, setQuantityMode] = useState<QuantityMode>("50");
   const [quantityText, setQuantityText] = useState("");
   const [periodMode, setPeriodMode] = useState<PeriodMode>("any");
@@ -172,7 +178,7 @@ export function ImportUnifiedForm({
     (onlyLinks ? PATTERNS_NEED_PROFILES_TEXT : null) ??
     (patternsOnly ? null : editProblem) ??
     (effectivePost === "preset" && presetId === null ? "Escolha um preset." : null) ??
-    (!patternsOnly && noEdited(post) && autoExportNeedsProcessing(autoExport) ? AUTO_EXPORT_NEEDS_PROCESSING_TEXT : null);
+    (!patternsOnly && noEdited(post) && autoExportNeedsProcessing(autoExport) ? autoExportText : null);
 
   async function send(confirmAll: boolean) {
     const body = unifiedBody({
@@ -186,6 +192,7 @@ export function ImportUnifiedForm({
       post: effectivePost,
       presetId,
       edit,
+      capcut,
       autoExport: patternsOnly ? "off" : autoExport,
       postTimes: patternsOnly || postTimes,
     });
@@ -433,9 +440,9 @@ export function ImportUnifiedForm({
               ))}
             </select>
           </Field>
-          {post === "none" ? (
+          {post === "none" || post === "capcut" ? (
             <div className={`small${autoExportNeedsProcessing(autoExport) ? " tone-err" : " muted"}`}>
-              {AUTO_EXPORT_NEEDS_PROCESSING_TEXT}
+              {autoExportText}
             </div>
           ) : null}
           {autoExport !== "off" ? (

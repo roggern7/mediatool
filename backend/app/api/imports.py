@@ -21,6 +21,7 @@ from app.schemas.batches import (
     HistoryHideResult,
     ImportGroupDetail,
     ImportGroupList,
+    ImportCreatedOut,
     ImportGroupRequest,
     ImportLinksOut,
     ImportLinksRequest,
@@ -34,7 +35,7 @@ from app.schemas.batches import (
     UnifiedImportRequest,
 )
 from app.schemas.instagram import ProfileInfoOut, ProfileRequest
-from app.services import import_history, import_service
+from app.services import capcut_batch_service, import_history, import_service
 from app.services.deadline import CallInProgress, DeadlineExceeded, run_with_deadline
 from app.services.instagram_gate import InstagramPaused
 from app.services.instagram_pause import ensure_not_paused, raise_paused
@@ -92,7 +93,7 @@ def instagram_profile(ctx: Ctx, body: ProfileRequest) -> dict[str, Any]:
     return asdict(info)
 
 
-@router.post("/imports", response_model=BatchOut, status_code=202)
+@router.post("/imports", response_model=ImportCreatedOut, status_code=202)
 def create_import(ctx: Ctx, body: ImportRequest) -> dict[str, Any]:
     batch_id = import_service.create_import(
         ctx,
@@ -104,8 +105,10 @@ def create_import(ctx: Ctx, body: ImportRequest) -> dict[str, Any]:
         edit=body.edit,
         min_views=body.min_views,
         posted_within_days=body.posted_within_days,
+        capcut=body.capcut,
     )
-    return batch_single(ctx, batch_id)
+    return {**batch_single(ctx, batch_id),
+            "capcut_batch_id": capcut_batch_service.linked_batch_id(ctx, import_batch_id=batch_id)}
 
 
 @router.post("/imports/classify", response_model=ClassifyOut)
@@ -146,9 +149,11 @@ def create_import_group(
         edit=body.edit,
         min_views=body.min_views,
         posted_within_days=body.posted_within_days,
+        capcut=body.capcut,
     )
     detail = group_detail(ctx, ctx.batches.get_group(group_id), children_limit=children_limit)
-    return {**detail, "skipped": skipped, "duplicates": duplicates}
+    return {**detail, "skipped": skipped, "duplicates": duplicates,
+            "capcut_batch_id": capcut_batch_service.linked_batch_id(ctx, group_id=group_id)}
 
 
 @router.get("/import-groups", response_model=ImportGroupList)
@@ -206,8 +211,9 @@ def create_import_links(ctx: Ctx, body: ImportLinksRequest) -> dict[str, Any]:
     if body.min_views is not None or body.posted_within_days is not None:
         raise AppError(422, "filters_profile_only", FILTERS_PROFILE_ONLY_MESSAGE)
     batch_id, duplicates = import_service.create_import_links(
-        ctx, links=body.links, preset_id=body.preset_id, process=body.process, edit=body.edit)
-    return {**batch_single(ctx, batch_id), "duplicates": duplicates}
+        ctx, links=body.links, preset_id=body.preset_id, process=body.process, edit=body.edit, capcut=body.capcut)
+    return {**batch_single(ctx, batch_id), "duplicates": duplicates,
+            "capcut_batch_id": capcut_batch_service.linked_batch_id(ctx, import_batch_id=batch_id)}
 
 
 @router.post("/imports/history/hide", response_model=HistoryHideResult)

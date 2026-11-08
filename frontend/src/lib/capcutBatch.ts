@@ -13,6 +13,7 @@ import type {
   CapCutBatchSummary,
   CapCutCaptioned,
   CapCutEstimate,
+  CapCutImportSettings,
   CapCutJob,
   CapCutLibraryItem,
   CapCutOptionsPatch,
@@ -66,6 +67,7 @@ export function nextMode(mode: CapCutBatchMode, step: 1 | -1): CapCutBatchMode {
 }
 
 export const BATCH_STATUS_LABEL: Record<CapCutBatchStatus, string> = {
+  importing: "Aguardando downloads",
   running: "Em andamento",
   paused: "Pausado",
   review: "Aguardando revisão",
@@ -95,6 +97,7 @@ export function batchTone(status: CapCutBatchStatus): Tone {
     case "completed_with_errors":
       return "err";
     case "running":
+    case "importing":
       return "accent";
     case "paused":
     case "review":
@@ -401,6 +404,38 @@ export function buildBatchRequest(plan: BatchPlan): CapCutBatchCreate {
   return body;
 }
 
+/** Configuração do lote sem a seleção: o campo `capcut` dos pedidos de importação ("Edição CapCut" após baixar). */
+export type BatchConfigPlan = Omit<BatchPlan, "selection" | "includeDone">;
+
+/** Campo `capcut` da importação: o mesmo corpo de `buildBatchRequest`, sem a seleção (e sem `include_done`). */
+export function buildImportCapcut(plan: BatchConfigPlan): CapCutImportSettings {
+  const body = buildBatchRequest({ ...plan, selection: EMPTY_SELECTION, includeDone: false });
+  const out: CapCutImportSettings = { mode: body.mode };
+  if (body.name) out.name = body.name;
+  if (body.caption) out.caption = body.caption;
+  if (body.edit) out.edit = body.edit;
+  return out;
+}
+
+/** Problema da configuração da importação (a validação da edição de `planBlocker`, sem a seleção), ou null. */
+export function configBlocker(plan: BatchConfigPlan): string | null {
+  if (modeHasEdit(plan.mode)) {
+    const problem = validateBatchEdit(plan.edit);
+    if (problem) return problem;
+  }
+  return modeHasCaption(plan.mode) && !plan.exportForm ? "Carregando as configurações de exportação…" : null;
+}
+
+/** Origem do lote criado por uma importação: "Da importação (lote 12)", "Da importação (grupo 3 e lote 14)". */
+export function batchSourceText(batch: Pick<CapCutBatch, "source">): string | null {
+  const source = batch.source;
+  if (!source || source.kind !== "import") return null;
+  const parts: string[] = [];
+  if (source.group_id !== null) parts.push(`grupo ${source.group_id}`);
+  if (source.batch_ids.length) parts.push(`${source.batch_ids.length === 1 ? "lote" : "lotes"} ${source.batch_ids.join(", ")}`);
+  return parts.length ? `Da importação (${parts.join(" e ")})` : "Da importação";
+}
+
 /** Primeiro problema do pedido (seleção e edição), ou null. */
 export function planBlocker(plan: BatchPlan): string | null {
   return selectionBlocker(plan.selection) ?? (modeHasEdit(plan.mode) ? validateBatchEdit(plan.edit) : null);
@@ -568,8 +603,11 @@ export function zipLabel(batch: Pick<CapCutBatch, "counts">): string {
 }
 
 /** Lote com job aberto (em andamento ou pausado): não sai do histórico. */
-export function isBatchOpen(batch: Pick<CapCutBatch, "counts">): boolean {
-  return openCount(batch.counts) > 0;
+export function isBatchOpen(
+  batch: Pick<CapCutBatch, "counts"> & { status?: CapCutBatch["status"]; cancel_requested?: boolean },
+): boolean {
+  // Lote da importação aguardando downloads também conta (removê-lo faria os próximos vídeos se perderem).
+  return openCount(batch.counts) > 0 || (batch.status === "importing" && !batch.cancel_requested);
 }
 
 /** 2 s com algum lote em andamento; ocioso, os degraus de lib/polling. */
@@ -598,7 +636,8 @@ export function batchActions(
   return {
     pause: open && !batch.paused && !batch.cancel_requested,
     resume: open && batch.paused && !batch.cancel_requested,
-    cancel: open && !cancelling,
+    // Lote de importação aguardando downloads (sem vídeo ainda): cancelar fecha a entrada de vídeos.
+    cancel: (open && !cancelling) || (batch.status === "importing" && !batch.cancel_requested),
     retryFailed: batch.counts.failed + batch.counts.cancelled > 0 && !cancelling,
     zip: batch.counts.completed > 0,
     reveal: batch.output_exists,

@@ -281,17 +281,63 @@ def _default_name(ctx: AppContext, batch_id: int) -> str:
     return f"Lote {batch_id} · {local:%d/%m %H:%M}"
 
 
+def prepare(ctx: AppContext, mode: str, caption: Any, edit: BatchEdit | None) -> dict[str, Any]:
+    """Configuração validada de um lote (mesmas regras e erros para a página e para a importação): plano da edição,
+    opções dos jobs (com o modelo de legenda), instantâneo da legenda e resumo."""
+    if mode in EDIT_MODES and edit is None:
+        raise AppError(422, "edit_required", "Escolha as configurações da edição.")
+    plan = edit_plan(ctx, edit) if mode in EDIT_MODES else None
+    overrides = caption.overrides.model_dump(exclude_unset=True) if caption and caption.overrides else None
+    style_id = caption.style_id if caption is not None and mode in CAPTION_MODES else None
+    options = capcut_service._job_options(ctx, style_id, overrides)
+    job_options = dict(options)
+    if plan is not None:
+        job_options["edit_params"] = plan["params"]
+    summary = {
+        "style_name": options["style_name"] if mode in CAPTION_MODES else None,
+        "edit": plan["summary"] if plan is not None else None,
+        "resolution": options["resolution"] if mode in CAPTION_MODES else None,
+        "fps": options["fps"] if mode in CAPTION_MODES else None,
+        "bitrate": options["bitrate"] if mode in CAPTION_MODES else None,
+        "keep_audio": bool(options["keep_original_audio"]) if mode in CAPTION_MODES else None,
+        "highlight": bool(options["highlight"]) if mode in CAPTION_MODES else None,
+    }
+    return {"mode": mode, "plan": plan, "options": options, "job_options": job_options, "summary": summary,
+            "caption": {key: value for key, value in options.items() if key != "style"}}
+
+
+def _batch_options(prepared: dict[str, Any], folder: str, **extra: Any) -> dict[str, Any]:
+    mode = prepared["mode"]
+    return {"mode": mode, **extra, "output_dir": folder,
+            "caption": prepared["caption"] if mode in CAPTION_MODES else None,
+            "keep_original_audio": bool(prepared["options"]["keep_original_audio"]),
+            "edit": prepared["plan"], "summary": prepared["summary"]}
+
+
+def _create_edit_batch(ctx: AppContext, plan: dict[str, Any]) -> int:
+    return ctx.batches.create(source="library", status="running", preset_id=None, preset_name=EDIT_PRESET_NAME,
+                              params=plan["params"], process=True)
+
+
+def _add_video(ctx: AppContext, *, batch_id: int, media: dict[str, Any], mode: str, plan: dict[str, Any] | None,
+               job_options: dict[str, Any], edit_batch_id: int | None, max_attempts: int, origin: str = "manual",
+               import_batch_id: int | None = None) -> int:
+    """Um vídeo no lote: o job `process` da edição (modos com edição) e o job do CapCut ligado a ele."""
+    edit_job_id = None
+    if plan is not None:
+        edit_job_id = ctx.jobs.create_process(media=media, batch_id=edit_batch_id, preset_id=None,
+                                              preset_name=EDIT_PRESET_NAME, params=plan["params"])
+    return repo(ctx).create_job(media_id=media["id"], source_path=media["original_path"], options=job_options,
+                                max_attempts=max_attempts, origin=origin, batch_id=import_batch_id,
+                                capcut_batch_id=batch_id, mode=mode, edit_job_id=edit_job_id)
+
+
 def create_batch(ctx: AppContext, body: BatchCreate) -> dict[str, Any]:
     """Um job por vídeo; pula o que já está na fila e (sem `include_done`) o que já foi concluído no mesmo modo.
     Nada é gravado quando nenhum vídeo entra (422 `batch_empty`)."""
     mode = body.mode
-    if mode in EDIT_MODES and body.edit is None:
-        raise AppError(422, "edit_required", "Escolha as configurações da edição.")
-    plan = edit_plan(ctx, body.edit) if mode in EDIT_MODES else None
-    caption = body.caption
-    overrides = caption.overrides.model_dump(exclude_unset=True) if caption and caption.overrides else None
-    style_id = caption.style_id if caption is not None and mode in CAPTION_MODES else None
-    options = capcut_service._job_options(ctx, style_id, overrides)
+    prepared = prepare(ctx, mode, body.caption, body.edit)
+    plan = prepared["plan"]
     max_attempts = int(capcut_service._stored(ctx)["max_attempts"])
     if body.media_ids is not None:
         wanted = list(dict.fromkeys(body.media_ids))
@@ -321,45 +367,21 @@ def create_batch(ctx: AppContext, body: BatchCreate) -> dict[str, Any]:
                 chosen.append(media)
         if not chosen:
             raise AppError(422, "batch_empty", "Nenhum vídeo da seleção entrou no lote (todos foram pulados).")
-        job_options = dict(options)
-        if plan is not None:
-            job_options["edit_params"] = plan["params"]
-        snapshot_caption = {key: value for key, value in options.items() if key != "style"}
-        summary = {
-            "style_name": options["style_name"] if mode in CAPTION_MODES else None,
-            "edit": plan["summary"] if plan is not None else None,
-            "resolution": options["resolution"] if mode in CAPTION_MODES else None,
-            "fps": options["fps"] if mode in CAPTION_MODES else None,
-            "bitrate": options["bitrate"] if mode in CAPTION_MODES else None,
-            "keep_audio": bool(options["keep_original_audio"]) if mode in CAPTION_MODES else None,
-            "highlight": bool(options["highlight"]) if mode in CAPTION_MODES else None,
-        }
+        job_options = dict(prepared["job_options"])
         with ctx.db.transaction():
-            edit_batch_id = None
-            if plan is not None:
-                edit_batch_id = ctx.batches.create(
-                    source="library", status="running", preset_id=None, preset_name=EDIT_PRESET_NAME,
-                    params=plan["params"], process=True)
+            edit_batch_id = _create_edit_batch(ctx, plan) if plan is not None else None
             batch_id = repo(ctx).create_batch(name="", mode=mode, options={}, output_dir="",
                                               edit_batch_id=edit_batch_id)
-            folder = str(Path(options["output_dir"]) / f"Lote {batch_id}")
+            folder = str(Path(prepared["options"]["output_dir"]) / f"Lote {batch_id}")
             name = (body.name or "").strip() or _default_name(ctx, batch_id)
-            repo(ctx).update_batch(batch_id, name=name, output_dir=folder, options={
-                "mode": mode, "include_done": body.include_done, "output_dir": folder,
-                "selection": ({"media_ids": len(wanted)} if body.media_ids is not None
-                              else {"filter": body.filter.model_dump()}),
-                "caption": snapshot_caption if mode in CAPTION_MODES else None,
-                "keep_original_audio": bool(options["keep_original_audio"]),
-                "edit": plan, "summary": summary})
+            repo(ctx).update_batch(batch_id, name=name, output_dir=folder, options=_batch_options(
+                prepared, folder, include_done=body.include_done,
+                selection=({"media_ids": len(wanted)} if body.media_ids is not None
+                           else {"filter": body.filter.model_dump()})))
             job_options["output_dir"] = folder
             for media in chosen:
-                edit_job_id = None
-                if plan is not None:
-                    edit_job_id = ctx.jobs.create_process(media=media, batch_id=edit_batch_id, preset_id=None,
-                                                          preset_name=EDIT_PRESET_NAME, params=plan["params"])
-                repo(ctx).create_job(media_id=media["id"], source_path=media["original_path"], options=job_options,
-                                     max_attempts=max_attempts, origin="manual", batch_id=None,
-                                     capcut_batch_id=batch_id, mode=mode, edit_job_id=edit_job_id)
+                _add_video(ctx, batch_id=batch_id, media=media, mode=mode, plan=plan, job_options=job_options,
+                           edit_batch_id=edit_batch_id, max_attempts=max_attempts)
             if edit_batch_id is not None:
                 ctx.batches.sync_found(edit_batch_id)
     logger.info("Legendas CapCut: lote %s criado (%s, %s vídeo(s), %s pulado(s))", batch_id, mode, len(chosen),
@@ -368,6 +390,96 @@ def create_batch(ctx: AppContext, body: BatchCreate) -> dict[str, Any]:
         ctx.wake_worker()
     capcut_service._wake(ctx)
     return {"batch": get_batch(ctx, batch_id), "skipped": skipped}
+
+
+# ---- lote da importação ("Edição CapCut" após baixar) ---------------------------------------------------------------
+IMPORT_LINK_PREFIX = "capcut_import_link:"
+
+
+def _link_key(kind: str, ref: int) -> str:
+    return f"{IMPORT_LINK_PREFIX}{kind}:{int(ref)}"
+
+
+def create_import_batch(ctx: AppContext, prepared: dict[str, Any], *, name: str | None, batch_ids: list[int],
+                        group_id: int | None) -> int:
+    """Lote vazio vinculado à importação (chamado dentro da transação da criação dela): o instantâneo das opções e a
+    pasta de saída como em `create_batch`, sem jobs. O vínculo vai para `app_state` (um por lote de importação e um
+    pelo grupo, para os filhos). O lote de edição (`batches`) só é criado no primeiro vídeo (`add_import_video`)."""
+    mode = prepared["mode"]
+    with ctx.db.transaction():
+        batch_id = repo(ctx).create_batch(name="", mode=mode, options={}, output_dir="", edit_batch_id=None)
+        folder = str(Path(prepared["options"]["output_dir"]) / f"Lote {batch_id}")
+        local = export_time.resolve_zone(ctx.settings.timezone)(datetime.now(UTC))
+        source = {"kind": "import", "batch_ids": [int(item) for item in batch_ids], "group_id": group_id}
+        repo(ctx).update_batch(batch_id, name=(name or "").strip() or f"Importação {local:%d/%m %H:%M}",
+                               output_dir=folder, options=_batch_options(
+                                   prepared, folder, include_done=False, selection={"import": True}, source=source,
+                                   job_options={**prepared["job_options"], "output_dir": folder}))
+        for import_batch_id in batch_ids:
+            ctx.app_settings.set_state(_link_key("batch", import_batch_id), str(batch_id))
+        if group_id is not None:
+            ctx.app_settings.set_state(_link_key("group", group_id), str(batch_id))
+    logger.info("Legendas CapCut: lote %s criado vazio para a importação (%s; lotes %s, grupo %s)", batch_id, mode,
+                batch_ids, group_id)
+    return batch_id
+
+
+def _linked_id(ctx: AppContext, key: str) -> int | None:
+    raw = ctx.app_settings.get_state(key)
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def linked_batch_id(ctx: AppContext, *, import_batch_id: int | None = None,
+                    group_id: int | None = None) -> int | None:
+    """Lote CapCut vinculado ao lote de importação (ou ao grupo dele), ou None."""
+    if import_batch_id is not None:
+        found = _linked_id(ctx, _link_key("batch", import_batch_id))
+        if found is not None:
+            return found
+        if group_id is None:
+            batch = ctx.batches.get(import_batch_id)
+            group_id = batch.get("group_id") if batch is not None else None
+    return _linked_id(ctx, _link_key("group", group_id)) if group_id is not None else None
+
+
+def add_import_video(ctx: AppContext, capcut_batch_id: int, media_id: int, import_batch_id: int | None) -> int | None:
+    """Vídeo novo baixado por uma importação vinculada entra no lote (o mesmo caminho de `create_batch` por vídeo).
+    Pula: lote inexistente, removido ou cancelado; mídia que não é vídeo original; mídia com job CapCut aberto.
+    Retorna o id do job criado (ou None)."""
+    with capcut_service._create_lock:
+        batch = repo(ctx).get_batch(capcut_batch_id)
+        if batch is None or batch["hidden"] or batch["cancel_requested"]:
+            return None
+        media = ctx.media.get(media_id)
+        if (media is None or media["media_type"] != "video" or (media.get("role") or "original") == "cover"
+                or repo(ctx).open_media_ids([media_id])):
+            return None
+        options = batch["options"] or {}
+        plan = options.get("edit") if batch["mode"] in EDIT_MODES else None
+        with ctx.db.transaction():
+            edit_batch_id = batch["edit_batch_id"]
+            if plan is not None:
+                if edit_batch_id is None:
+                    edit_batch_id = _create_edit_batch(ctx, plan)
+                    repo(ctx).update_batch(capcut_batch_id, edit_batch_id=edit_batch_id)
+                else:
+                    ctx.batches.reopen(edit_batch_id)   # a edição dos vídeos anteriores pode já ter terminado
+            job_id = _add_video(ctx, batch_id=capcut_batch_id, media=media, mode=batch["mode"], plan=plan,
+                                job_options=dict(options.get("job_options") or {}), edit_batch_id=edit_batch_id,
+                                max_attempts=int(capcut_service._stored(ctx)["max_attempts"]), origin="auto",
+                                import_batch_id=import_batch_id)
+            if edit_batch_id is not None:
+                ctx.batches.sync_found(edit_batch_id)
+            repo(ctx).refresh_batch_finished(capcut_batch_id)
+    logger.info("Legendas CapCut: mídia %s entrou no lote %s (importação %s)", media_id, capcut_batch_id,
+                import_batch_id)
+    if plan is not None:
+        ctx.wake_worker()
+    capcut_service._wake(ctx)
+    return job_id
 
 
 # ---- apresentação ---------------------------------------------------------------------------------------------------
@@ -401,6 +513,8 @@ def batch_out(ctx: AppContext, batch: dict[str, Any]) -> dict[str, Any]:
         eta = max(0.0, per_video * open_count - running_for)
     finished = _parse(batch["finished_at"]) if open_count == 0 else None
     options = dict(batch["options"] or {})
+    options.pop("job_options", None)   # opções completas dos jobs do lote da importação (com o modelo de legenda)
+    source = options.get("source")
     return {
         **{key: batch[key] for key in ("id", "name", "mode", "status", "created_at", "output_dir")},
         "finished_at": batch["finished_at"] if open_count == 0 else None,
@@ -415,6 +529,7 @@ def batch_out(ctx: AppContext, batch: dict[str, Any]) -> dict[str, Any]:
         "current_job": capcut_service.job_out(current) if current is not None else None,
         "summary": dict(options.get("summary") or {}),
         "options": options,
+        "source": source if isinstance(source, dict) and source.get("kind") == "import" else None,
     }
 
 
@@ -467,7 +582,9 @@ def cancel_batch(ctx: AppContext, batch_id: int) -> dict[str, Any]:
     núcleo) e os jobs de edição ainda abertos pelo cancelamento de lote do worker. Concluídos ficam."""
     batch = _batch_or_404(ctx, batch_id)
     counts = batch["counts"]
-    if not counts["pending"] + counts["running"] + counts["waiting"] + counts["held"] + counts["review"]:
+    open_count = counts["pending"] + counts["running"] + counts["waiting"] + counts["held"] + counts["review"]
+    # Lote da importação ainda aguardando downloads: cancelar fecha a entrada de vídeos (a importação continua).
+    if not open_count and batch["status"] != "importing":
         raise AppError(409, "capcut_batch_finished", "O lote não tem vídeos na fila nem em andamento.")
     repo(ctx).update_batch(batch_id, cancel_requested=1)   # o executor para de pegar jobs do lote
     repo(ctx).cancel_idle_in_batch(batch_id)
@@ -502,10 +619,17 @@ def retry_failed(ctx: AppContext, batch_id: int) -> dict[str, Any]:
     return get_batch(ctx, batch_id)
 
 
-def hide_batch(ctx: AppContext, batch_id: int) -> None:
-    """Remove do histórico (os arquivos ficam); 409 com job aberto."""
-    _batch_or_404(ctx, batch_id)
+def _still_active(ctx: AppContext, batch_id: int) -> bool:
+    """Job aberto ou lote de importação ainda aguardando downloads (removê-lo faria os próximos vídeos se perderem)."""
     if repo(ctx).batch_jobs(batch_id, OPEN_STATUSES):
+        return True
+    return get_batch(ctx, batch_id)["status"] == "importing"
+
+
+def hide_batch(ctx: AppContext, batch_id: int) -> None:
+    """Remove do histórico (os arquivos ficam); 409 com job aberto ou aguardando downloads."""
+    _batch_or_404(ctx, batch_id)
+    if _still_active(ctx, batch_id):
         raise AppError(409, "capcut_batch_active", "O lote ainda tem vídeos na fila ou em andamento. Cancele antes.")
     repo(ctx).update_batch(batch_id, hidden=1)
 
@@ -522,7 +646,7 @@ def hide_batches(ctx: AppContext, batch_ids: list[int], everything: bool) -> dic
         batch = repo(ctx).get_batch(batch_id)
         if batch is None or batch.get("hidden"):
             continue
-        if repo(ctx).batch_jobs(batch_id, OPEN_STATUSES):
+        if _still_active(ctx, batch_id):
             active.append(batch_id)
             continue
         repo(ctx).update_batch(batch_id, hidden=1)

@@ -2,7 +2,7 @@
 // da resposta/erro da criação. Funções puras (a tela só liga os estados).
 
 import { errorMessageFor } from "../api/errors";
-import type { ContentType, EditSettings, InstagramProvider, ProfilesPreview } from "../api/types";
+import type { CapCutImportSettings, ContentType, EditSettings, InstagramProvider, ProfilesPreview } from "../api/types";
 import { skippedFrom, skippedNotice } from "./importGroup";
 import {
   type ImportPlan,
@@ -175,6 +175,8 @@ export function planFromPreview(
     processAfterDownload: boolean;
     presetId: number | null;
     edit?: EditSettings | null;
+    /** "Edição CapCut" (null nas outras escolhas). */
+    capcut?: CapCutImportSettings | null;
     /** Ausente = sem filtro (o corpo omite `min_views`). */
     minViews?: MinViewsChoice;
     /** Ausente = qualquer data (o corpo omite `posted_within_days`). */
@@ -191,6 +193,7 @@ export function planFromPreview(
     processAfterDownload: options.processAfterDownload,
     presetId: options.presetId,
     edit: options.edit,
+    capcut: options.capcut,
     minViews: options.minViews?.minViews ?? null,
     postedWithinDays: options.period?.ok ? options.period.days : null,
   });

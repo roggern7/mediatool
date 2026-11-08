@@ -24,7 +24,8 @@ MaxAttempts = Annotated[int, Field(strict=True, ge=1, le=10)]
 FolderText = Annotated[str, Field(max_length=1024)]
 MAX_JOB_MEDIA = 500
 CapCutMode = Literal["caption", "edit", "edit_caption"]
-BatchStatus = Literal["running", "paused", "review", "completed", "completed_with_errors", "cancelled"]
+# `importing` ("Aguardando downloads"): lote vinculado a uma importação ainda ativa e sem vídeo na fila.
+BatchStatus = Literal["importing", "running", "paused", "review", "completed", "completed_with_errors", "cancelled"]
 # Teto de vídeos por lote (o serviço responde 422 `batch_too_large`); o schema aceita mais para o erro ter a contagem.
 MAX_BATCH_MEDIA = 1000
 MAX_BATCH_IDS = 10_000
@@ -436,6 +437,16 @@ class BatchCreate(StrictModel):
         return self
 
 
+class ImportCapCut(StrictModel):
+    """Edição CapCut após baixar (pedidos de importação): o mesmo formato de `BatchCreate`, sem a seleção. Cria um
+    lote vazio vinculado à importação; cada vídeo novo baixado entra nele (docs/CAPCUT.md, "Lotes")."""
+
+    name: Annotated[SafeText, Field(max_length=120)] | None = None
+    mode: CapCutMode
+    caption: BatchCaption | None = None
+    edit: BatchEdit | None = None
+
+
 class BatchCounts(BaseModel):
     total: int
     pending: int
@@ -460,6 +471,12 @@ class BatchSummary(BaseModel):
     highlight: bool | None = None
 
 
+class BatchSource(BaseModel):
+    kind: Literal["import"]
+    batch_ids: list[int]
+    group_id: int | None = None
+
+
 class BatchOut(BaseModel):
     id: int
     name: str
@@ -479,6 +496,8 @@ class BatchOut(BaseModel):
     current_job: JobOut | None
     summary: BatchSummary
     options: dict[str, Any]
+    # Origem do lote: `{kind: "import", batch_ids, group_id}` no lote criado por uma importação; None no da página.
+    source: BatchSource | None = None
 
 
 class BatchesHide(StrictModel):
