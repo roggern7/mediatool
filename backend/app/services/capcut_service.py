@@ -564,6 +564,17 @@ def enqueue_after_download(ctx: AppContext, media_id: int, batch_id: int | None)
     return result["created"][0]["id"] if result["created"] else None
 
 
+def enqueue_linked(ctx: AppContext, media_id: int, batch_id: int | None) -> int | None:
+    """Vídeo reaproveitado (já baixado antes) numa importação vinculada a um lote da Edição CapCut: entra no lote.
+    Sem vínculo, nada (o "legendar automaticamente" é só para vídeo novo). Retorna o id criado (ou None)."""
+    from app.services import capcut_batch_service
+
+    linked = capcut_batch_service.linked_batch_id(ctx, import_batch_id=batch_id) if batch_id is not None else None
+    if linked is None:
+        return None
+    return capcut_batch_service.add_import_video(ctx, linked, media_id, batch_id)
+
+
 EDIT_DONE_STATUSES = ("completed", "failed", "cancelled")   # estados finais da tabela `jobs`
 REVIEW_WAIT_REASON = "review"   # job parado na revisão das legendas (docs/CAPCUT.md, "Fidelidade das legendas")
 MSG_EDITING = "Editando"

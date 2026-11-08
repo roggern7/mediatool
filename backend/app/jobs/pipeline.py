@@ -445,6 +445,8 @@ class JobExecutor:
         if media is None:
             media = self._ingest_new_or_duplicate()
         self._check_cancel()
+        if self.job.get("is_duplicate"):
+            self._queue_capcut_reused(media)
         if not self._download_only and not media.get("thumbnail_path"):
             self._ensure_thumbnail(media["id"], self._original_path(media))
         if self.job["params"] is None:
@@ -668,6 +670,20 @@ class JobExecutor:
         except Exception:  # noqa: BLE001 - o download já terminou bem; a legenda é um extra
             logger.warning("Job %s: não foi possível enfileirar a legenda CapCut da mídia %s", self.job_id, media_id,
                            exc_info=True)
+
+    def _queue_capcut_reused(self, media: dict[str, Any]) -> None:
+        """Vídeo já baixado antes, numa importação com "Edição CapCut": entra no lote também (quem importa de novo
+        com a Edição CapCut quer editar; verificado em 2026-11-08: um lote ficou vazio porque os 10 vídeos já
+        existiam). O "legendar automaticamente" global continua só para vídeo novo."""
+        if media.get("media_type") != "video" or (media.get("role") or "original") != "original":
+            return
+        try:
+            from app.services import capcut_service
+
+            capcut_service.enqueue_linked(self.ctx, media["id"], self.job.get("batch_id"))
+        except Exception:  # noqa: BLE001 - o download já terminou bem; a edição é um extra
+            logger.warning("Job %s: não foi possível pôr a mídia %s no lote da Edição CapCut", self.job_id,
+                           media.get("id"), exc_info=True)
 
     def _download(self, downloader, item: RemoteMedia, temp_dir: Path) -> Path:
         """Vídeo com fluxos separados (lote por link): vídeo + áudio + junção sem recodificar; em falha de conteúdo

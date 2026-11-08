@@ -97,20 +97,39 @@ def test_import_without_videos_ends_completed_empty(harness, tmp_path):
     assert (final["status"], final["counts"]["total"]) == ("completed", 0)
 
 
-def test_duplicate_and_reused_video_do_not_enter(harness, tmp_path):
+def test_reused_video_enters_new_capcut_batch_unless_already_queued(harness, tmp_path):
+    """Importar de novo com "Edição CapCut" edita de novo os vídeos já baixados (caso real 2026-11-08: o lote
+    "bianca-01" ficou vazio porque os 10 vídeos já existiam). Só fica fora o vídeo que já está na fila do CapCut."""
     harness.downloader.items = [remote("VDUP", media_type="video")]
     first = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
     harness.run_all()
     assert len(_cjobs(harness)) == 1
-    # O job aberto é cancelado antes, para a regra "já está na fila" não esconder um disparo indevido.
+    # ainda na fila do CapCut: a nova importação não cria um segundo job para o mesmo vídeo
+    busy = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
+    harness.run_all()
+    assert len(_cjobs(harness)) == 1 and _cbatch(harness, busy["capcut_batch_id"])["counts"]["total"] == 0
     job_id = harness.ctx.db.scalar("SELECT id FROM capcut_jobs")
     assert harness.client.post(f"/api/capcut/jobs/{job_id}/cancel").json()["status"] == "cancelled"
     again = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
     harness.run_all()
     assert harness.batch(again["id"])["status"] == "completed"
-    assert len(_cjobs(harness)) == 1
-    assert _cbatch(harness, again["capcut_batch_id"])["counts"]["total"] == 0
+    assert len(_cjobs(harness)) == 2, "o vídeo reaproveitado entrou no lote novo"
+    assert _cbatch(harness, again["capcut_batch_id"])["counts"]["total"] == 1
     assert first["capcut_batch_id"] != again["capcut_batch_id"]
+
+
+def test_reused_video_without_link_does_not_trigger_auto_caption(harness, tmp_path):
+    """O "legendar automaticamente" global continua só para vídeo novo."""
+    harness.client.put("/api/capcut/settings", json={"auto_after_download": True})
+    harness.downloader.items = [remote("VAUTO", media_type="video")]
+    harness.import_profile()
+    harness.run_all()
+    assert len(_cjobs(harness)) == 1
+    job_id = harness.ctx.db.scalar("SELECT id FROM capcut_jobs")
+    harness.client.post(f"/api/capcut/jobs/{job_id}/cancel")
+    harness.import_profile()
+    harness.run_all()
+    assert len(_cjobs(harness)) == 1
 
 
 def test_cover_photo_and_busy_media_are_skipped(harness, tmp_path):
@@ -228,6 +247,19 @@ def test_links_import_with_capcut(harness_factory, tmp_path):
     assert _cbatch(h, capcut_id)["status"] == "importing"
     drive(h, closed(h, created["id"]))
     assert [job["capcut_batch_id"] for job in _cjobs(h)] == [capcut_id]
+
+
+def test_links_reimport_of_downloaded_videos_enters_new_batch(harness_factory, tmp_path):
+    """Caso real (2026-11-08, "bianca-01"): importar por links vídeos já baixados com "Edição CapCut" deixava o lote
+    vazio. Agora eles entram (o anterior já terminou)."""
+    h, _ = links_app(harness_factory, {"VIDLINK002": video("VIDLINK002")})
+    first = create_links(h, [link("VIDLINK002")], capcut=_capcut(tmp_path / "s", mode="caption"))
+    drive(h, closed(h, first["id"]))
+    job_id = h.ctx.db.scalar("SELECT id FROM capcut_jobs")
+    h.client.post(f"/api/capcut/jobs/{job_id}/cancel")
+    again = create_links(h, [link("VIDLINK002")], capcut=_capcut(tmp_path / "s", mode="caption"))
+    drive(h, closed(h, again["id"]))
+    assert _cbatch(h, again["capcut_batch_id"])["counts"]["total"] == 1
 
 
 # ---- convivência com o automático e cancelamento ---------------------------------------------------------------------
