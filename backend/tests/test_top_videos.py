@@ -179,6 +179,7 @@ def install(harness, tab: ReelsTab, thumbs: dict | None = None) -> list[str]:
         harness.ctx, thumb_fetcher=thumb,
         http_factory=lambda: InstagramWebHttp.anonymous(transport=httpx.MockTransport(handler_of(tab)),
                                                         gate=harness.ctx.instagram_gate))
+    harness.ctx.top_videos._sleep_gap = False   # sem o espaço de 6-9 s entre páginas nos testes
     return fetched
 
 
@@ -233,7 +234,7 @@ def test_thumbnail_that_is_not_an_image_is_refused(harness):
 
 @pytest.mark.parametrize("payload", [{"profile": "perfil_teste", "top": 0}, {"profile": "perfil_teste", "top": 51},
                                      {"profile": "perfil_teste", "scan_limit": 11},
-                                     {"profile": "perfil_teste", "scan_limit": 601},
+                                     {"profile": "perfil_teste", "scan_limit": 3001},
                                      {"profile": "https://www.instagram.com/p/ABCDEF/"}, {"profile": ""}])
 def test_invalid_input_is_refused_before_any_request(harness, payload):
     tab = ReelsTab(pages_of([1]))
@@ -256,7 +257,7 @@ def test_paused_instagram_refuses_the_search_without_requests(harness):
     assert tab.requests == 0
 
 
-def test_429_fails_the_search_and_pauses_instagram(harness):
+def test_429_fails_the_search_and_cools_down_only_top_videos(harness):
     tab = ReelsTab(pages_of([1], [2]), responses={1: httpx.Response(429, text="{}", headers={
         "content-type": "application/json"})})
     install(harness, tab)
@@ -264,9 +265,11 @@ def test_429_fails_the_search_and_pauses_instagram(harness):
     assert body["status"] == "failed" and body["error_code"] == "rate_limited" and body["error_message"]
     assert [item["views"] for item in body["items"]] == [1], "o que foi lido antes do 429 continua na lista"
     assert (body["scanned"], body["pages"]) == (1, 1)
-    assert harness.ctx.worker.pause_state()[0] is not None, "429 aplica a pausa global, como na importação"
+    assert harness.ctx.worker.pause_state()[0] is None, "429 do Top vídeos NÃO pausa downloads e importações"
+    assert "Downloads e importações continuam" in body["error_message"]
     again = harness.client.post("/api/top-videos", json={"profile": "perfil_teste"})
-    assert again.status_code == 409 and again.json()["code"] == "instagram_paused"
+    assert again.status_code == 409 and again.json()["code"] == "top_videos_cooldown"
+    assert tab.requests == 2, "durante a espera, nenhuma requisição nova"
 
 
 def test_pause_published_during_the_search_fails_it(harness):
@@ -339,3 +342,76 @@ def test_only_the_most_recent_searches_are_kept(harness):
         finished(harness, ids[-1])
     assert harness.client.get(f"/api/top-videos/{ids[0]}").status_code == 404
     assert harness.client.get(f"/api/top-videos/{ids[-1]}").status_code == 200
+
+
+def test_pages_are_spaced_between_requests(harness, monkeypatch):
+    """Ritmo da paginação sem login: 6-9 s entre páginas (a 2 s o Instagram devolveu 429 em 2026-11-08)."""
+    from app.services import top_videos as mod
+
+    tab = ReelsTab(pages_of([5], [7], [9]))
+    install(harness, tab)
+    harness.ctx.top_videos._sleep_gap = True
+    monkeypatch.setattr(mod, "PAGE_GAP_S", (0.2, 0.2))
+    started = mod.time.monotonic()
+    body = finished(harness, harness.client.post("/api/top-videos", json={"profile": "perfil_teste"}).json()["id"])
+    assert body["status"] == "completed" and body["pages"] == 3
+    assert mod.time.monotonic() - started >= 0.4, "duas pausas entre as três páginas"
+
+
+
+# ---- fonte com a sessão (aba Reels das importações) ------------------------------------------------------------------
+class FakeSessionReader:
+    def __init__(self, items=None, error=None):
+        self.items, self.error, self.calls = items or [], error, 0
+
+    def iter_reels_post_times(self, username, *, limit, cancel=None):
+        self.calls += 1
+        for item in self.items[:limit]:
+            yield item
+        if self.error is not None:
+            raise self.error
+
+
+def install_session(harness, tab: ReelsTab, reader: FakeSessionReader) -> None:
+    install(harness, tab, thumbs={})
+    harness.ctx.top_videos._use_session = True
+    harness.ctx.downloader_factory = lambda: reader
+
+
+def session_items(views: list[int]) -> list[dict]:
+    return [{"code": f"S{i:03d}", "play_count": v, "taken_at": f"2026-11-0{1 + i % 8}T10:00:00Z", "pinned": i == 0}
+            for i, v in enumerate(views)]
+
+
+def test_session_source_ranks_all_scanned_reels_without_anonymous_pagination(harness):
+    """Caso real (2026-11-08): a paginação sem login levou 429 na 2ª página e o "top" saiu só dos 12 mais novos.
+    Com a sessão, a busca lê todos os Reels pedidos; da aba sem login só sai a 1ª página (miniaturas)."""
+    reader = FakeSessionReader(session_items([5, 900, 30, 7000, 12, 450] * 5))
+    tab = ReelsTab(pages_of([1], [2]))
+    install_session(harness, tab, reader)
+    body = finished(harness, harness.client.post("/api/top-videos", json={"profile": "perfil_teste", "top": 3,
+                                                                          "scan_limit": 30}).json()["id"])
+    assert body["status"] == "completed" and body["scanned"] == 30
+    assert [item["views"] for item in body["items"]] == [7000, 7000, 7000]
+    assert reader.calls == 1 and tab.requests <= 1, "sem paginação sem login"
+
+
+def test_session_missing_falls_back_to_anonymous_tab(harness):
+    from app.integrations.instagram.downloader import InstagramError
+
+    reader = FakeSessionReader(error=InstagramError("session_missing"))
+    tab = ReelsTab(pages_of([3, 9]))
+    install_session(harness, tab, reader)
+    body = finished(harness, harness.client.post("/api/top-videos", json={"profile": "perfil_teste"}).json()["id"])
+    assert body["status"] == "completed" and [i["views"] for i in body["items"]] == [9, 3]
+
+
+def test_429_with_session_keeps_partial_and_uses_the_global_pause(harness):
+    from app.integrations.instagram.downloader import InstagramError
+
+    reader = FakeSessionReader(session_items([100, 300]), error=InstagramError("rate_limited"))
+    install_session(harness, ReelsTab(pages_of([1])), reader)
+    body = finished(harness, harness.client.post("/api/top-videos", json={"profile": "perfil_teste"}).json()["id"])
+    assert body["status"] == "failed" and body["error_code"] == "rate_limited"
+    assert [i["views"] for i in body["items"]] == [300, 100], "o que já foi lido continua"
+    assert harness.ctx.worker.pause_state()[0] is not None, "bloqueio com a sessão protege a conta (pausa global)"

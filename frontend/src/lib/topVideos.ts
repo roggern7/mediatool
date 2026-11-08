@@ -18,7 +18,22 @@ import { parseProfileInput } from "./profile";
 export const TOP_DEFAULT = 10;
 export const TOP_MAX = 50;
 export const SCAN_DEFAULT = 120;
-export const SCAN_OPTIONS = [60, 120, 300, 600] as const;
+export const SCAN_OPTIONS = [60, 120, 300, 600, 3000] as const;
+/** "Todos os Reels do perfil": o backend para quando a aba acaba (teto de 3.000). */
+export const SCAN_ALL = 3000;
+
+export function scanOptionLabel(n: number): string {
+  return n === SCAN_ALL ? `Todos os Reels do perfil (até 3.000, ${scanTimeText(n)})` : `${n} Reels (${scanTimeText(n)})`;
+}
+
+/** Tempo aproximado da busca: 1 página a cada 12 Reels, ~7,5 s entre páginas (ritmo que evita bloqueio). */
+export function scanTimeText(scanLimit: number): string {
+  const pages = Math.max(1, Math.ceil(scanLimit / 12));
+  const seconds = (pages - 1) * 7.5 + 2;
+  if (seconds < 60) return "menos de 1 min";
+  const minutes = Math.round(seconds / 60);
+  return `~${minutes} min`;
+}
 /** Intervalo entre as leituras do andamento da busca. */
 export const TOP_POLL_MS = 1_000;
 
@@ -70,8 +85,11 @@ export function scanProgressText(scanned: number): string {
 export function topResultSummary(search: TopVideosSearch): string {
   const found = search.items.length;
   const base = scanProgressText(search.scanned);
-  if (search.status === "cancelled") return `Busca cancelada • ${base} • ${found} no ranking parcial`;
-  if (search.status === "failed") return `Busca interrompida • ${base} • ${found} no ranking parcial`;
+  // Parcial = só os Reels MAIS RECENTES lidos até parar: o top pode estar errado (caso real 2026-11-08: 429 depois
+  // da 1ª página e o "top 10" saiu dos 12 mais novos).
+  const partial = `ranking PARCIAL: só os ${formatCount(search.scanned)} Reels mais recentes foram analisados, os mais vistos podem não estar aqui`;
+  if (search.status === "cancelled") return `Busca cancelada • ${partial}`;
+  if (search.status === "failed") return `Busca interrompida • ${partial}`;
   if (found === 0) return `${base} • nenhum Reel com contagem de visualizações`;
   return `${base} • ${found === 1 ? "1 vídeo" : `${found} vídeos`} com mais visualizações`;
 }

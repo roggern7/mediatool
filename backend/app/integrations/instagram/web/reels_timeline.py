@@ -117,6 +117,19 @@ def _kind(node: Mapping) -> str:
         else "reel"
 
 
+def _thumbnail(node: Mapping) -> dict:
+    """Capa do Reel (só para a tela do Top vídeos; URL assinada da CDN, nunca em log): ``image_versions2`` ou
+    ``display_uri``. Ausente = chave omitida (o formato do item não muda para quem não usa)."""
+    candidates = (node.get("image_versions2") or {}).get("candidates") if isinstance(node.get("image_versions2"),
+                                                                                       Mapping) else None
+    url = candidates[0].get("url") if isinstance(candidates, list) and candidates and isinstance(candidates[0],
+                                                                                                  Mapping) else None
+    url = url or node.get("display_uri")
+    if isinstance(url, str) and url.startswith("https://") and len(url) <= 4096:
+        return {"thumbnail_url": url}
+    return {}
+
+
 def _item(node: Mapping, code: str, user_id: str | None = None) -> dict:
     pinned = node.get(PINNED_FIELD)
     in_grid = node.get("is_in_profile_grid")
@@ -134,6 +147,7 @@ def _item(node: Mapping, code: str, user_id: str | None = None) -> dict:
         "pk": pk_text if pk_text.isascii() and pk_text.isdigit() else None,
         "play_count": _int_or_none(node.get("play_count")),
         "media_type": _int_or_none(node.get("media_type")),
+        **_thumbnail(node),
     }
 
 

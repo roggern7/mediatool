@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TopVideoItem, TopVideosSearch } from "../api/types";
 import {
   buildTopDownloadRequest,
+  scanTimeText,
   buildTopRequest,
   formatViews,
   resolveTopCount,
@@ -142,7 +143,7 @@ describe("topResultSummary", () => {
   it("resume o resultado", () => {
     expect(topResultSummary(search)).toBe("120 Reels analisados • 1 vídeo com mais visualizações");
     expect(topResultSummary({ ...search, items: [] })).toBe("120 Reels analisados • nenhum Reel com contagem de visualizações");
-    expect(topResultSummary({ ...search, status: "cancelled" })).toBe("Busca cancelada • 120 Reels analisados • 1 no ranking parcial");
+    expect(topResultSummary({ ...search, status: "cancelled" })).toBe("Busca cancelada • ranking PARCIAL: só os 120 Reels mais recentes foram analisados, os mais vistos podem não estar aqui");
   });
 });
 
@@ -160,7 +161,7 @@ describe("topResultView", () => {
 
   it("falha no meio mostra o aviso e a lista parcial, que continua baixável", () => {
     expect(topResultView(base)).toEqual({ error: "O Instagram limitou as consultas.", showList: true, showEmpty: false });
-    expect(topResultSummary(base)).toBe("Busca interrompida • 24 Reels analisados • 2 no ranking parcial");
+    expect(topResultSummary(base)).toBe("Busca interrompida • ranking PARCIAL: só os 24 Reels mais recentes foram analisados, os mais vistos podem não estar aqui");
     expect(
       topDownloadBlocker({ sessionOk: true, paused: false, submitting: false, items: base.items, process: false, presetId: null }),
     ).toBeNull();
@@ -178,5 +179,14 @@ describe("topResultView", () => {
     expect(topResultView({ ...base, status: "completed", items: [] })).toEqual({ error: null, showList: false, showEmpty: true });
     expect(topResultView({ ...base, status: "running" })).toEqual({ error: null, showList: false, showEmpty: false });
     expect(topResultView(null).showList).toBe(false);
+  });
+});
+
+describe("tempo da busca", () => {
+  it("estima pelo ritmo de ~7,5 s por página", () => {
+    expect(scanTimeText(12)).toBe("menos de 1 min");
+    expect(scanTimeText(60)).toBe("menos de 1 min");
+    expect(scanTimeText(120)).toBe("~1 min");
+    expect(scanTimeText(600)).toBe("~6 min");
   });
 });
