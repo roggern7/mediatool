@@ -333,6 +333,8 @@ class CapCutLinkOut(BaseModel):
     running: int
     failed: int
     review: int
+    queue_ahead: int = 0
+    queue_wait_seconds: float | None = None
 
 
 class BatchOut(BaseModel):

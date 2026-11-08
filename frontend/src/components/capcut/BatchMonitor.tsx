@@ -24,6 +24,7 @@ import {
   batchProgress,
   batchSummaryText,
   batchTone,
+  queueAheadText,
   zipLabel,
   formatEta,
   isBatchRunning,
@@ -194,6 +195,9 @@ export function BatchMonitor({
       <p className="small" aria-live="polite" style={{ margin: "6px 0 0" }}>
         {batchCountsText(b.counts)}
         {isBatchRunning(b) ? ` · tempo restante ${etaText}` : ""}
+        {queueAheadText(b.queue_ahead, b.queue_wait_seconds) ? (
+          <strong> · {queueAheadText(b.queue_ahead, b.queue_wait_seconds)}</strong>
+        ) : null}
         {b.cancel_requested && b.status !== "cancelled" ? " · cancelando…" : ""}
       </p>
 

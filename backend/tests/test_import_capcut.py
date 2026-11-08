@@ -97,19 +97,13 @@ def test_import_without_videos_ends_completed_empty(harness, tmp_path):
     assert (final["status"], final["counts"]["total"]) == ("completed", 0)
 
 
-def test_reused_video_enters_new_capcut_batch_unless_already_queued(harness, tmp_path):
+def test_reused_video_enters_new_capcut_batch(harness, tmp_path):
     """Importar de novo com "Edição CapCut" edita de novo os vídeos já baixados (caso real 2026-11-08: o lote
-    "bianca-01" ficou vazio porque os 10 vídeos já existiam). Só fica fora o vídeo que já está na fila do CapCut."""
+    "bianca-01" ficou vazio porque os 10 vídeos já existiam), mesmo que ainda estejam na fila de outro lote."""
     harness.downloader.items = [remote("VDUP", media_type="video")]
     first = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
     harness.run_all()
     assert len(_cjobs(harness)) == 1
-    # ainda na fila do CapCut: a nova importação não cria um segundo job para o mesmo vídeo
-    busy = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
-    harness.run_all()
-    assert len(_cjobs(harness)) == 1 and _cbatch(harness, busy["capcut_batch_id"])["counts"]["total"] == 0
-    job_id = harness.ctx.db.scalar("SELECT id FROM capcut_jobs")
-    assert harness.client.post(f"/api/capcut/jobs/{job_id}/cancel").json()["status"] == "cancelled"
     again = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
     harness.run_all()
     assert harness.batch(again["id"])["status"] == "completed"
@@ -325,3 +319,20 @@ def test_import_batch_shows_linked_capcut_progress(harness, tmp_path):
     assert any(item["id"] == batch["id"] and item["capcut"] for item in listed)
     plain = harness.import_profile(profile="outro")
     assert harness.client.get(f"/api/batches/{plain['id']}").json()["capcut"] is None
+
+
+def test_video_queued_in_other_batch_is_edited_in_both_and_queue_position_shows(harness, tmp_path):
+    """Escolha do dono (2026-11-08): vídeo já na fila de OUTRO lote entra no lote novo também (editado nos dois).
+    O lote que espera atrás mostra quantos vídeos vêm antes (para não parecer travado)."""
+    harness.downloader.items = [remote("VQ1", media_type="video"), remote("VQ2", media_type="video")]
+    first = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
+    harness.run_all()
+    again = harness.import_profile(capcut=_capcut(tmp_path / "s", mode="caption"))
+    harness.run_all()
+    assert _cbatch(harness, first["capcut_batch_id"])["counts"]["total"] == 2
+    second = _cbatch(harness, again["capcut_batch_id"])
+    assert second["counts"]["total"] == 2, "os 2 entram também no lote novo"
+    assert second["queue_ahead"] == 2, "os 2 do primeiro lote vêm antes"
+    listed = harness.client.get(f"/api/batches/{again['id']}").json()["capcut"]
+    assert listed["queue_ahead"] == 2
+    assert _cbatch(harness, first["capcut_batch_id"])["queue_ahead"] == 0

@@ -207,6 +207,8 @@ export interface CapCutLink {
   running: number;
   failed: number;
   review: number;
+  queue_ahead?: number;
+  queue_wait_seconds?: number | null;
 }
 
 export interface Batch {
@@ -1479,6 +1481,10 @@ export interface CapCutBatch {
   progress: number;
   per_video_seconds: number | null;
   eta_seconds: number | null;
+  /** Vídeos de outros lotes antes do próximo deste (nada deste lote rodando agora). */
+  queue_ahead?: number;
+  /** Estimativa até este lote começar. */
+  queue_wait_seconds?: number | null;
   elapsed_seconds: number | null;
   current_job: CapCutJob | null;
   summary: CapCutBatchSummary;

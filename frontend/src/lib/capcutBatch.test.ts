@@ -3,6 +3,7 @@ import type { CapCutBatch, CapCutBatchCounts, CapCutSettings, PresetParams } fro
 import {
   BATCH_MODE_LABEL,
   capcutLinkText,
+  queueAheadText,
   hiddenText,
   zipLabel,
   BATCH_MODE_OPTIONS,
@@ -519,6 +520,18 @@ describe("selo da importação com Edição CapCut", () => {
     );
     expect(capcutLinkText({ ...link, running: 0, review: 2, failed: 1 })).toBe(
       "Edição CapCut: 3 de 10 prontos · 2 para revisar · 1 com erro",
+    );
+  });
+});
+
+describe("posição na fila", () => {
+  it("mostra quantos vídeos vêm antes e a espera", () => {
+    expect(queueAheadText(0, null)).toBeNull();
+    expect(queueAheadText(7, 600)).toBe("na fila: 7 vídeos de outros lotes antes (~10 min)");
+    expect(queueAheadText(1, null)).toBe("na fila: 1 vídeo de outros lotes antes");
+    const link = { batch_id: 1, status: "running", total: 3, completed: 0, running: 0, failed: 0, review: 0 };
+    expect(capcutLinkText({ ...link, queue_ahead: 7, queue_wait_seconds: 600 })).toBe(
+      "Edição CapCut: 0 de 3 prontos · na fila: 7 vídeos de outros lotes antes (~10 min)",
     );
   });
 });
