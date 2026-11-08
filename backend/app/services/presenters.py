@@ -175,6 +175,43 @@ def _group_state(batch: dict[str, Any]) -> str | None:
     return "active"
 
 
+def _capcut_summary(ctx: AppContext, capcut_id: int) -> dict[str, Any] | None:
+    try:
+        from app.services import capcut_batch_service
+
+        batch = capcut_batch_service.get_batch(ctx, capcut_id)
+    except Exception:  # noqa: BLE001 - falha ao ler nunca derruba a lista de importações
+        return None
+    counts = batch["counts"]
+    return {"batch_id": capcut_id, "status": batch["status"], "total": counts["total"],
+            "completed": counts["completed"], "running": counts["running"], "failed": counts["failed"],
+            "review": counts.get("review", 0)}
+
+
+def capcut_links(ctx: AppContext, *, batch_ids: list[int] = (), group_ids: list[int] = ()) -> dict[str, Any]:
+    """Andamento dos lotes CapCut vinculados a vários lotes/grupos de importação com UMA consulta ao app_state (e uma
+    leitura por lote CapCut distinto, quase sempre 0 ou 1): {"batch:<id>"|"group:<id>": resumo}. Sem N+1 em grupos com
+    centenas de perfis."""
+    from app.services.capcut_batch_service import import_links
+
+    wanted = [f"batch:{i}" for i in dict.fromkeys(batch_ids)]
+    wanted += [f"group:{g}" for g in dict.fromkeys(g for g in group_ids if g is not None)]
+    if not wanted:
+        return {}
+    index = import_links(ctx)   # em memória: nenhuma consulta quando não há vínculo
+    summaries: dict[int, Any] = {}
+    out: dict[str, Any] = {}
+    for key in wanted:
+        capcut_id = index.get(key)
+        if capcut_id is None:
+            continue
+        if capcut_id not in summaries:
+            summaries[capcut_id] = _capcut_summary(ctx, capcut_id)
+        if summaries[capcut_id] is not None:
+            out[key] = summaries[capcut_id]
+    return out
+
+
 def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Grupos de importação com agregados derivados dos filhos (duas consultas para a lista inteira)."""
     stats = ctx.batches.group_aggregates([g["id"] for g in groups])
@@ -183,6 +220,7 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
     auto_rows = {row["id"]: row for row in with_requests(ctx, groups)}
     autos = exports_for(ctx, list(auto_rows.values()))
     post_counts = ctx.batches.group_post_times_counts([g["id"] for g in groups if g.get("post_times")])
+    group_links = capcut_links(ctx, group_ids=[g["id"] for g in groups])
     result = []
     for group in groups:
         row = stats.get(group["id"], {})
@@ -222,6 +260,7 @@ def groups_out(ctx: AppContext, groups: list[dict[str, Any]]) -> list[dict[str, 
             "listing_dropped_total": int(row.get("dropped", 0)),
             "views_filter": _group_views_filter(group, row),
             "last_export": _last_export(exports.get(group["id"])),
+            "capcut": group_links.get(f"group:{group['id']}"),
         })
     return result
 
@@ -243,6 +282,10 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
     auto_rows = {row["id"]: row for row in with_requests(ctx, batches)}
     autos = exports_for(ctx, list(auto_rows.values()))
     post_counts = ctx.batches.post_times_counts([b["id"] for b in batches if b.get("post_times")])
+    # Só lotes avulsos: o filho de grupo mostra o lote CapCut no nível do grupo (sem consulta extra por página de
+    # filhos, que tem orçamento fixo de consultas).
+    links = capcut_links(ctx, batch_ids=[b["id"] for b in batches
+                                         if b["source"] == "instagram_import" and not b.get("group_id")])
     result = []
     for batch in batches:
         row = stats.get(batch["id"], {})
@@ -317,6 +360,8 @@ def batches_out(ctx: AppContext, batches: list[dict[str, Any]], *, with_jobs: bo
         data["progress"] = {"found": found, **progress,
                             "filtered": _type_filtered(batch) + sum(int(views.get(k) or 0) for k in _FILTERED_VERDICTS)}
         data["counts"] = counts
+        if batch["source"] == "instagram_import":
+            data["capcut"] = links.get(f"batch:{batch['id']}")
         if with_jobs:
             jobs, truncated = ctx.jobs.recent_for_batch(batch["id"], MAX_EMBEDDED_JOBS)
             data["jobs"] = jobs_out(ctx, jobs)

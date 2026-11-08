@@ -198,8 +198,21 @@ export interface BatchProgress {
   filtered?: number;
 }
 
+/** Andamento do lote da Edição CapCut vinculado à importação (processamento "Edição CapCut"). */
+export interface CapCutLink {
+  batch_id: number;
+  status: string;
+  total: number;
+  completed: number;
+  running: number;
+  failed: number;
+  review: number;
+}
+
 export interface Batch {
   id: number;
+  /** Lote da Edição CapCut vinculado; null/ausente sem vínculo. */
+  capcut?: CapCutLink | null;
   source: "instagram_import" | "library";
   source_profile: string | null;
   content_type: ContentType | null;
@@ -307,6 +320,39 @@ export interface ImportLinksRequest {
   capcut?: CapCutImportSettings | null;
 }
 
+/** Top vídeos de um perfil (POST /api/top-videos): busca em segundo plano na aba Reels sem login. */
+export interface TopVideosRequest {
+  profile: string;
+  /** Quantos devolver (1 a 50). */
+  top: number;
+  /** Quantos Reels mais recentes analisar (12 a 600). */
+  scan_limit: number;
+}
+
+export type TopVideosStatus = "running" | "completed" | "failed" | "cancelled";
+
+export interface TopVideoItem {
+  code: string;
+  url: string;
+  views: number;
+  /** Horário aproximado (derivado do id do Reel), ISO UTC. */
+  posted_at: string | null;
+  pinned: boolean;
+  /** Rota do próprio app que serve a miniatura; null = sem miniatura. */
+  thumbnail_url: string | null;
+}
+
+export interface TopVideosSearch {
+  id: string;
+  profile: string;
+  status: TopVideosStatus;
+  scanned: number;
+  pages: number;
+  items: TopVideoItem[];
+  error_code: string | null;
+  error_message: string | null;
+}
+
 export type GroupChildState = "waiting" | "active" | "attention" | "completed" | "failed" | "cancelled";
 
 /** Contrato: docs/CONTRACTS.md, seção 8.1. */
@@ -333,6 +379,8 @@ export interface GroupProfiles {
 
 export interface ImportGroup {
   id: number;
+  /** Lote da Edição CapCut vinculado ao grupo; null/ausente sem vínculo. */
+  capcut?: CapCutLink | null;
   content_type: ContentType;
   /** Por perfil; null = "Todos". */
   requested_limit: number | null;

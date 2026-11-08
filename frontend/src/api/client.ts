@@ -42,6 +42,8 @@ import type {
   BatchLinks,
   ImportGroupRequest,
   ImportLinksRequest,
+  TopVideosRequest,
+  TopVideosSearch,
   ImportRequest,
   InstagramStatus,
   Job,
@@ -258,6 +260,11 @@ export const api = {
       body: req,
       timeoutMs: SLOW_TIMEOUT_MS,
     }),
+  /** Top vídeos: começa a busca em segundo plano (aba Reels sem login); acompanhe por `topVideos`. */
+  startTopVideos: (req: TopVideosRequest) => request<{ id: string }>("POST", "/top-videos", { body: req }),
+  topVideos: (id: string) => request<TopVideosSearch>("GET", `/top-videos/${encodeURIComponent(id)}`),
+  cancelTopVideos: (id: string) =>
+    request<TopVideosSearch>("POST", `/top-videos/${encodeURIComponent(id)}/cancel`),
   /** Importação unificada: classifica as entradas (perfis, publicações, inválidas), sem efeitos. */
   classifyImport: (body: ClassifyRequest, signal?: AbortSignal) =>
     request<ClassifyResult>("POST", "/imports/classify", { body, signal }),

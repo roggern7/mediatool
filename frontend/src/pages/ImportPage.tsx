@@ -95,6 +95,7 @@ import { BatchNotice } from "../components/BatchNotice";
 import { BatchLinksPanel } from "../components/BatchLinksPanel";
 import { ImportGroupPanel } from "../components/ImportGroupPanel";
 import { ImportLinksForm } from "../components/ImportLinksForm";
+import { TopVideosPanel } from "../components/TopVideosPanel";
 import { ImportUnifiedForm } from "../components/ImportUnifiedForm";
 import { alreadyDownloadedNote, analyzedPostsText, createdText, isPatternsOnly } from "../lib/importUnified";
 import { PostTimesReportButton } from "../components/PostTimesReportButton";
@@ -112,6 +113,7 @@ import {
   type BatchExportForm,
   DEFAULT_BATCH_EDIT,
   buildImportCapcut,
+  capcutLinkText,
   configBlocker,
   exportFormFrom,
 } from "../lib/capcutBatch";
@@ -128,7 +130,7 @@ const RECENT_ROWS = 8;
 
 type Recent = RecentEntry<ImportGroup, Batch>;
 type Selection = { kind: "batch" | "group"; id: number };
-type ImportMode = "unified" | "profile" | "links" | "patterns";
+type ImportMode = "unified" | "profile" | "links" | "patterns" | "top";
 
 // "Links e perfis" (importação unificada) é a tela padrão; "Por perfil" e "Por link" continuam como antes.
 const IMPORT_MODES: { id: ImportMode; label: string }[] = [
@@ -136,6 +138,7 @@ const IMPORT_MODES: { id: ImportMode; label: string }[] = [
   { id: "profile", label: "Por perfil" },
   { id: "links", label: "Por link" },
   { id: "patterns", label: "Consultar padrões" },
+  { id: "top", label: "Top vídeos" },
 ];
 
 function defaultPresetId(presets: Preset[] | undefined, configured: number | null | undefined): number | null {
@@ -185,6 +188,8 @@ export function ImportPage() {
   const [ccName, setCcName] = useState("");
   // Lote da Edição CapCut da última importação criada com "Edição CapCut" (aviso com o link).
   const [capcutBatchId, setCapcutBatchId] = useState<number | null>(null);
+  // Aba "Top vídeos": id da última busca (fica ao trocar de aba; o resultado volta pelo GET).
+  const [topSearchId, setTopSearchId] = useState<string | null>(null);
   const processAfter = post === "preset";
   const [submitting, setSubmitting] = useState(false);
   const [lookup, setLookup] = useState<{ username: string; info: ProfileInfo } | null>(null);
@@ -453,7 +458,7 @@ export function ImportPage() {
     settings.reload();
   }
 
-  // Vale para os dois modos (por perfil e por link). Uma escolha só: o lote tem um único pós-processamento.
+  // Vale para todos os modos (perfil, link e Top vídeos). Uma escolha só: o lote tem um único pós-processamento.
   const processingBlock = (
     <div style={{ marginTop: 16 }}>
       <div className="field-label" id="imp-post-label" style={{ marginBottom: 6 }}>
@@ -893,6 +898,27 @@ export function ImportPage() {
               </button>
             </div>
           </form>
+        ) : mode === "top" ? (
+          <TopVideosPanel
+            sessionOk={sessionOk}
+            paused={paused}
+            post={post}
+            process={processAfter}
+            presetId={presetId}
+            edit={postOptions.edit}
+            capcut={postOptions.capcut}
+            editProblem={editProblem}
+            processing={processingBlock}
+            searchId={topSearchId}
+            onSearchId={setTopSearchId}
+            onCreated={(batch) => {
+              // Como no modo por link: o lote criado abre no acompanhamento (com "Ver na Fila").
+              setSelected({ kind: "batch", id: batch.id });
+              setCapcutBatchId(batch.capcut_batch_id ?? null);
+              revealCreated();
+            }}
+            onFailed={settings.reload}
+          />
         ) : (
           <ImportLinksForm
             text={linksText}
@@ -1174,6 +1200,15 @@ function BatchPanel({
         <button type="button" className="btn btn-sm btn-ghost" onClick={() => navigate(queueForBatch(batch.id))}>
           Ver na Fila
         </button>
+        {batch.capcut ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={() => navigate(capcutForBatch(batch.capcut!.batch_id))}
+          >
+            {capcutLinkText(batch.capcut)}
+          </button>
+        ) : null}
         <PostTimesReportButton
           target={{ kind: "batch", id: batch.id }}
           postTimes={batch.post_times}
@@ -1398,6 +1433,21 @@ function RecentTable({
                     <Pill tone={batchToneOf(entry.batch)}>{batchLabel(entry.batch)}</Pill>
                   ) : null}
                   {note ? <div className="muted small">{note}</div> : null}
+                  {item.capcut ? (
+                    <div className="small" style={{ marginTop: 4 }}>
+                      <button
+                        type="button"
+                        className="link-btn"
+                        title="Abrir o lote na Edição CapCut"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(capcutForBatch(item.capcut!.batch_id));
+                        }}
+                      >
+                        {capcutLinkText(item.capcut)}
+                      </button>
+                    </div>
+                  ) : null}
                 </td>
                 <td className="num">{formatCount(patternsOnly ? (item.post_times_count ?? 0) : p.found)}</td>
                 <td className="num muted">{patternsOnly ? "-" : formatCount(p.downloaded)}</td>

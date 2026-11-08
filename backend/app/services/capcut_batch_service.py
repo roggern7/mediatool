@@ -400,6 +400,34 @@ def _link_key(kind: str, ref: int) -> str:
     return f"{IMPORT_LINK_PREFIX}{kind}:{int(ref)}"
 
 
+# Índice em memória dos vínculos importação -> lote CapCut ({"batch:<id>"|"group:<id>": id do lote}), lido do banco
+# uma vez por processo e atualizado na criação: a lista do Importar mostra o andamento sem consulta extra por página
+# (as rotas de grupo têm orçamento fixo de consultas).
+_link_index: dict[str, dict[str, int]] = {}
+_link_index_lock = threading.Lock()
+
+
+def import_links(ctx: AppContext) -> dict[str, int]:
+    scope = str(ctx.settings.data_dir)
+    with _link_index_lock:
+        if scope not in _link_index:
+            index: dict[str, int] = {}
+            for row in ctx.db.fetchall("SELECT key, value FROM app_state WHERE key LIKE ?", (f"{IMPORT_LINK_PREFIX}%",)):
+                try:
+                    index[row["key"][len(IMPORT_LINK_PREFIX):]] = int(row["value"])
+                except (TypeError, ValueError):
+                    continue
+            _link_index[scope] = index
+        return _link_index[scope]
+
+
+def _remember_link(ctx: AppContext, kind: str, ref: int, batch_id: int) -> None:
+    with _link_index_lock:
+        index = _link_index.get(str(ctx.settings.data_dir))
+        if index is not None:
+            index[f"{kind}:{int(ref)}"] = int(batch_id)
+
+
 def create_import_batch(ctx: AppContext, prepared: dict[str, Any], *, name: str | None, batch_ids: list[int],
                         group_id: int | None) -> int:
     """Lote vazio vinculado à importação (chamado dentro da transação da criação dela): o instantâneo das opções e a
@@ -417,8 +445,10 @@ def create_import_batch(ctx: AppContext, prepared: dict[str, Any], *, name: str 
                                    job_options={**prepared["job_options"], "output_dir": folder}))
         for import_batch_id in batch_ids:
             ctx.app_settings.set_state(_link_key("batch", import_batch_id), str(batch_id))
+            _remember_link(ctx, "batch", import_batch_id, batch_id)
         if group_id is not None:
             ctx.app_settings.set_state(_link_key("group", group_id), str(batch_id))
+            _remember_link(ctx, "group", group_id, batch_id)
     logger.info("Legendas CapCut: lote %s criado vazio para a importação (%s; lotes %s, grupo %s)", batch_id, mode,
                 batch_ids, group_id)
     return batch_id

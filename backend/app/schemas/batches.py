@@ -324,6 +324,17 @@ class ViewsFilterOut(BaseModel):
     pending: int = 0
 
 
+class CapCutLinkOut(BaseModel):
+    """Andamento do lote da Edição CapCut vinculado à importação ("Edição CapCut" no processamento)."""
+    batch_id: int
+    status: str
+    total: int
+    completed: int
+    running: int
+    failed: int
+    review: int
+
+
 class BatchOut(BaseModel):
     id: int
     source: Literal["instagram_import", "library"]
@@ -376,6 +387,8 @@ class BatchOut(BaseModel):
     import_mode: Literal["profile", "links"] | None = None
     # Só em lote por link: quantos links há e em que estado (lista: GET /api/batches/{id}/links).
     links: BatchLinks | None = None
+    # Lote da Edição CapCut vinculado (processamento "Edição CapCut"); None sem vínculo.
+    capcut: CapCutLinkOut | None = None
     # Grupo de importação (vários perfis): None em lotes avulsos e antigos. `group_position` é 1-based.
     group_id: int | None = None
     group_position: int | None = None
@@ -447,6 +460,8 @@ class ImportGroupOut(BaseModel):
     media_set: MediaChoice | None = None
     # Última exportação para pasta CONCLUÍDA do grupo inteiro (None se nunca foi exportado).
     last_export: LastExport | None = None
+    # Lote da Edição CapCut vinculado ao grupo; None sem vínculo.
+    capcut: CapCutLinkOut | None = None
 
 
 class ImportGroupList(BaseModel):

@@ -278,3 +278,18 @@ def test_batch_waiting_downloads_cannot_be_removed_from_history(harness, tmp_pat
     assert svc.hide_batches(harness.ctx, [batch_id], False) == {"hidden": 0, "active": [batch_id]}
     r = harness.client.delete(f"/api/capcut/batches/{batch_id}")
     assert r.status_code == 409
+
+
+def test_import_batch_shows_linked_capcut_progress(harness, tmp_path):
+    """A lista do Importar mostra o andamento do lote CapCut vinculado (senão parece que nada está sendo editado)."""
+    harness.downloader.items = [remote("VIDP", media_type="video")]
+    batch = harness.import_profile(capcut=_capcut(tmp_path / "s"))
+    view = harness.client.get(f"/api/batches/{batch['id']}").json()
+    assert view["capcut"]["batch_id"] == batch["capcut_batch_id"] and view["capcut"]["status"] == "importing"
+    harness.run_all()
+    view = harness.client.get(f"/api/batches/{batch['id']}").json()
+    assert view["capcut"]["total"] == 1
+    listed = harness.client.get("/api/batches", params={"limit": 5}).json()["items"]
+    assert any(item["id"] == batch["id"] and item["capcut"] for item in listed)
+    plain = harness.import_profile(profile="outro")
+    assert harness.client.get(f"/api/batches/{plain['id']}").json()["capcut"] is None

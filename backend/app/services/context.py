@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from app.jobs.import_runner import ImportRunner
     from app.jobs.profile_analysis_runner import ProfileAnalysisRunner
     from app.jobs.worker import Worker
+    from app.services.top_videos import TopVideosService
 
 
 @dataclass
@@ -81,6 +82,8 @@ class AppContext:
     # Legendas CapCut: executor (um job por vez) e processador injetável (testes); None = `process_video` do núcleo
     # `app.integrations.capcut`, importado só na hora de usar.
     capcut_runner: CapCutRunner | None = None
+    # Top vídeos (aba Importar): buscas em memória (app.services.top_videos), montado em `app.main.build_context`.
+    top_videos: TopVideosService | None = None
     capcut_processor: Callable[..., Any] | None = None
 
     def wake_worker(self) -> None:
