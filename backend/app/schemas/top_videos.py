@@ -10,7 +10,8 @@ from app.schemas.common import StrictModel
 class TopVideosRequest(StrictModel):
     profile: str = Field(min_length=1, max_length=512)
     top: int = Field(default=10, ge=1, le=50)
-    scan_limit: int = Field(default=120, ge=12, le=600)
+    # 3000 = "Todos os Reels do perfil" na tela (para quando a aba acabar antes)
+    scan_limit: int = Field(default=120, ge=12, le=3000)
 
 
 class TopVideosCreatedOut(BaseModel):

@@ -8,6 +8,7 @@ import { interpretLinksStartError } from "../lib/importLinks";
 import {
   SCAN_DEFAULT,
   SCAN_OPTIONS,
+  scanOptionLabel,
   TOP_DEFAULT,
   TOP_MAX,
   TOP_POLL_MS,
@@ -229,7 +230,7 @@ export function TopVideosPanel({
             >
               {SCAN_OPTIONS.map((n) => (
                 <option key={n} value={n}>
-                  {n} Reels
+                  {scanOptionLabel(n)}
                 </option>
               ))}
             </select>
@@ -237,7 +238,7 @@ export function TopVideosPanel({
         </div>
         <div className="muted small" style={{ marginTop: 8 }}>
           Lê a aba Reels do perfil sem usar a sua sessão, do mais novo para o mais antigo (uma consulta a cada 12
-          Reels), e mostra os que têm mais visualizações. Reels fixados entram e aparecem marcados.
+          Reels, devagar de propósito para o Instagram não bloquear), e mostra os que têm mais visualizações. Reels fixados entram e aparecem marcados.
         </div>
         <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
           <button type="submit" className="btn btn-primary" disabled={running || paused || !choice.ok}>
