@@ -125,6 +125,14 @@ def recover_capcut_jobs(ctx: AppContext) -> int:
     return resumed
 
 
+def _is_com_error(exc: BaseException) -> bool:
+    try:
+        from _ctypes import COMError
+    except ImportError:  # fora do Windows
+        return False
+    return isinstance(exc, COMError)
+
+
 def release_models_memory() -> None:
     """Libera os modelos de transcrição e o alinhador carregados (voltam a carregar no próximo job)."""
     try:
@@ -499,6 +507,12 @@ class CapCutRunner:
         if cancel_requested or code == CANCELLED_CODE:
             self._finish_cancelled(job_id)
             return
+        if (not isinstance(code, str) or not code) and _is_com_error(exc):
+            # Erro COM do UI Automation (a tela do CapCut mudou no meio da leitura): passageiro, tenta de novo.
+            logger.warning("Legendas CapCut: erro passageiro de leitura da tela no job %s", job_id, exc_info=exc)
+            code = "capcut_ui_glitch"
+            exc = SimpleNamespace(code=code, transient=True,
+                                  message="A tela do CapCut mudou durante a leitura. Uma nova tentativa vai ser feita.")
         if not isinstance(code, str) or not code:
             logger.error("Legendas CapCut: falha inesperada no job %s", job_id, exc_info=exc)
             self._fail(job_id, "unexpected_error", MSG_UNEXPECTED)

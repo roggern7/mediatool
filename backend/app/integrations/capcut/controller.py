@@ -217,6 +217,15 @@ def _libs() -> Any:
     return libs
 
 
+def is_com_error(exc: BaseException) -> bool:
+    """Erro COM do UI Automation (``_ctypes.COMError``): a árvore de controles mudou no meio da leitura."""
+    try:
+        from _ctypes import COMError
+    except ImportError:  # fora do Windows
+        return False
+    return isinstance(exc, COMError)
+
+
 class CapCutController:
     """Uma sessão do CapCut aberta por nós. Não mexe em CapCut aberto por outra pessoa/sessão."""
 
@@ -319,9 +328,18 @@ class CapCutController:
         return next((h for h, _t, cls in self._windows() if cls.startswith(prefix)), None)
 
     def _control(self, hwnd: int, name: str, depth: int = 12, timeout: float = 5.0) -> Any:
-        root = self.L.auto.ControlFromHandle(hwnd)
-        ctrl = root.Control(searchDepth=depth, Name=name)
-        return ctrl if ctrl.Exists(timeout, 0.25) else None
+        """Controle pelo nome acessível, ou None. Erro COM ao percorrer a árvore = a tela mudou no meio da leitura
+        (verificado em 2026-11-08: a janela de exportação fechando enquanto era lida derrubou um job com "erro
+        inesperado"); conta como "ainda não apareceu" e quem chama olha de novo na próxima volta."""
+        try:
+            root = self.L.auto.ControlFromHandle(hwnd)
+            ctrl = root.Control(searchDepth=depth, Name=name)
+            return ctrl if ctrl.Exists(timeout, 0.25) else None
+        except Exception as exc:  # noqa: BLE001 - só o erro COM passageiro vira None
+            if is_com_error(exc):
+                logger.info("CapCut: a tela mudou durante a leitura de %r (erro COM passageiro); nova leitura", name)
+                return None
+            raise
 
     # ------------------------------------------------------------------ uso do PC pelo dono
     def _mark_injected(self) -> None:

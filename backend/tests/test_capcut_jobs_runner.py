@@ -383,3 +383,29 @@ def test_stop_waits_long_enough_for_capcut_shutdown():
 
     assert inspect.signature(CapCutRunner.stop).parameters["timeout"].default == capcut_runner.STOP_TIMEOUT_SECONDS
     assert 40 < capcut_runner.STOP_TIMEOUT_SECONDS <= 50
+
+
+def test_com_error_from_ui_automation_is_retried_not_failed(harness, tmp_path):
+    """Caso real (2026-11-08): COMError do UI Automation com a janela de exportação fechando derrubava o job com
+    "erro inesperado" na 1ª tentativa. Agora é passageiro: volta para a fila e usa as tentativas restantes."""
+    import os
+
+    import pytest as _pytest
+    if os.name != "nt":
+        _pytest.skip("COMError só no Windows")
+    from _ctypes import COMError
+
+    from capcut_jobs_fakes import FakeCapCutProcessor, add_media
+    from app.jobs.capcut_runner import CapCutRunner
+    from app.services import capcut_service
+
+    processor = FakeCapCutProcessor()
+    processor.errors = [COMError(-2147467259, "Erro não especificado", (None, None, None, 0, None))]
+    harness.ctx.capcut_processor = processor
+    runner = CapCutRunner(harness.ctx)
+    media_id = add_media(harness, name="com")
+    r = harness.client.post("/api/capcut/jobs", json={"media_ids": [media_id], "overrides": {"output_dir": str(tmp_path)}})
+    job_id = r.json()["created"][0]["id"]
+    runner.run_next()
+    job = capcut_service.repo(harness.ctx).get_job(job_id)
+    assert job["status"] == "pending" and job["error_code"] == "capcut_ui_glitch" and job["attempts"] == 1
