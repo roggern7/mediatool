@@ -198,8 +198,21 @@ export interface BatchProgress {
   filtered?: number;
 }
 
+/** Andamento do lote da Edição CapCut vinculado à importação (processamento "Edição CapCut"). */
+export interface CapCutLink {
+  batch_id: number;
+  status: string;
+  total: number;
+  completed: number;
+  running: number;
+  failed: number;
+  review: number;
+}
+
 export interface Batch {
   id: number;
+  /** Lote da Edição CapCut vinculado; null/ausente sem vínculo. */
+  capcut?: CapCutLink | null;
   source: "instagram_import" | "library";
   source_profile: string | null;
   content_type: ContentType | null;
@@ -333,6 +346,8 @@ export interface GroupProfiles {
 
 export interface ImportGroup {
   id: number;
+  /** Lote da Edição CapCut vinculado ao grupo; null/ausente sem vínculo. */
+  capcut?: CapCutLink | null;
   content_type: ContentType;
   /** Por perfil; null = "Todos". */
   requested_limit: number | null;

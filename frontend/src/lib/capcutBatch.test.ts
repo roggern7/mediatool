@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CapCutBatch, CapCutBatchCounts, CapCutSettings, PresetParams } from "../api/types";
 import {
   BATCH_MODE_LABEL,
+  capcutLinkText,
   hiddenText,
   zipLabel,
   BATCH_MODE_OPTIONS,
@@ -506,5 +507,18 @@ describe("botão do ZIP", () => {
   it("lote terminado baixa todos; em andamento, só os concluídos", () => {
     expect(zipLabel({ counts })).toBe("Baixar todos (ZIP)");
     expect(zipLabel({ counts: { ...counts, completed: 2, pending: 1 } })).toBe("Baixar 2 concluídos (ZIP)");
+  });
+});
+
+describe("selo da importação com Edição CapCut", () => {
+  const link = { batch_id: 6, status: "running", total: 10, completed: 3, running: 1, failed: 0, review: 0 };
+  it("mostra o andamento", () => {
+    expect(capcutLinkText(link)).toBe("Edição CapCut: 3 de 10 prontos · editando agora");
+    expect(capcutLinkText({ ...link, status: "importing", total: 0, completed: 0, running: 0 })).toBe(
+      "Edição CapCut: aguardando downloads",
+    );
+    expect(capcutLinkText({ ...link, running: 0, review: 2, failed: 1 })).toBe(
+      "Edição CapCut: 3 de 10 prontos · 2 para revisar · 1 com erro",
+    );
   });
 });

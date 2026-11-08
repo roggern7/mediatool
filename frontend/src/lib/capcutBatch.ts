@@ -602,6 +602,16 @@ export function zipLabel(batch: Pick<CapCutBatch, "counts">): string {
   return isBatchOpen(batch) ? `Baixar ${n} concluídos (ZIP)` : `Baixar todos (ZIP)`;
 }
 
+/** Selo da importação com "Edição CapCut": "Edição CapCut: 3 de 10 prontos · editando" (abre o lote). */
+export function capcutLinkText(link: { status: string; total: number; completed: number; running: number; failed: number; review: number }): string {
+  if (link.status === "importing" && link.total === 0) return "Edição CapCut: aguardando downloads";
+  const parts = [`Edição CapCut: ${formatCount(link.completed)} de ${formatCount(link.total)} prontos`];
+  if (link.running > 0) parts.push("editando agora");
+  if (link.review > 0) parts.push(`${formatCount(link.review)} para revisar`);
+  if (link.failed > 0) parts.push(`${formatCount(link.failed)} com erro`);
+  return parts.join(" · ");
+}
+
 /** Lote com job aberto (em andamento ou pausado): não sai do histórico. */
 export function isBatchOpen(
   batch: Pick<CapCutBatch, "counts"> & { status?: CapCutBatch["status"]; cancel_requested?: boolean },
