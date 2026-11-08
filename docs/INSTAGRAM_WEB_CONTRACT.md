@@ -749,6 +749,19 @@ lote para); se a aba contém TODOS os Reels do perfil (Reel fora dela vira "sem 
   `VIEWS_FILTER_ENABLED = false` no frontend esconde o campo e os contadores). O código da aba Reels continua no
   lugar e testado com o interruptor ligado.
 
+### Top vídeos de um perfil: `web/top_reels.py`
+
+Lê a mesma aba Reels SEM login (`_ProfileReelsTab`, subclasse de `ReelsViews`; mesmas requisições, `before_request`
+e portão) do mais novo para o mais antigo, até `scan_limit` Reels ou `has_next_page` false, e ordena por `play_count`.
+Campos do nó usados além dos da contagem: `display_uri` (miniatura; só `https://`, validada de novo pelo downloader de
+CDN, que aceita só `*.cdninstagram.com`/`*.fbcdn.net`; ausente -> sem miniatura), `like_and_view_counts_disabled`
+(contagem oculta: fora do ranking) e `pk` (horário estimado, `reel_taken_at_from_pk`). Diferente do filtro da
+importação, aqui o perfil pode não existir: 404 -> `profile_not_found`; documento sem a conexão é lido pela regra de
+`profile_snapshot.parse_profile_document` (rota de erro -> `profile_not_found`; privado ou escondido de visitantes ->
+`profile_private`); o resto continua `contract_changed`, com mensagem própria. NÃO VERIFICADO no real: `display_uri`
+(existe no nó observado em 2026-10-29, mas a URL não foi baixada), aba de perfil privado/restrito e paginação longa
+(a paginação anônima recebeu 429 no teste de 2026-10-29: buscas acima de 12 Reels podem falhar com `rate_limited`).
+
 ### Período de postagem e publicações fixadas
 
 O período usa `taken_at` do nó da listagem (verificado presente em 2026-10-28). Fixação no perfil:

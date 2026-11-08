@@ -72,8 +72,10 @@ class ReelsViews:
     trecho de listagem (cursor, LSD e cookies anônimos ficam em memória e somem com ele)."""
 
     def __init__(self, http: Any, username: str, *, before_request: Callable[[], bool],
-                 overrides: Mapping[str, str] | None = None, env: Mapping[str, str] | None = None) -> None:
+                 overrides: Mapping[str, str] | None = None, env: Mapping[str, str] | None = None,
+                 on_node: Callable[[Mapping], None] | None = None) -> None:
         self._http = http
+        self._on_node = on_node   # Top vídeos: recebe cada nó lido (com ``code``), na ordem da aba
         self._username = username
         self._before = before_request
         self._spec = resolve_spec(REELS_TAB_CONNECTION, overrides or {}, env)
@@ -110,6 +112,20 @@ class ReelsViews:
             else:
                 self._first_page()
 
+    def fetch_next(self) -> bool:
+        """Lê a próxima página da aba (a 1a na primeira chamada), passando por ``before_request``. False = a aba já
+        terminou ou a operação foi cancelada (``cancelled = True``)."""
+        if self._started and not self._has_next:
+            return False
+        if not self._before():
+            self.cancelled = True
+            return False
+        if self._started:
+            self._next_page()
+        else:
+            self._first_page()
+        return not self.cancelled
+
     # ---------------------------------------------------------------- páginas
 
     def _first_page(self) -> None:
@@ -127,6 +143,9 @@ class ReelsViews:
             raise error
         html = resp.text or ""
         del resp
+        self._read_document(html)
+
+    def _read_document(self, html: str) -> None:
         _, _, envelopes = _load_scripts(iter_json_scripts(html), USER_FIELD)
         _, lsd = _first(html, _LSD_MARKERS)
         del html
@@ -218,6 +237,8 @@ class ReelsViews:
                 continue
             self._views[code] = _count(node.get("play_count"))
             added += 1
+            if self._on_node is not None:
+                self._on_node(node)
             pinned = node.get(PINNED_FIELD)
             pk = _pk(node.get("pk"))
             if pk is not None and not (isinstance(pinned, list) and pinned):

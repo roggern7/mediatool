@@ -60,6 +60,7 @@ from app.services.settings_service import (
     instagram_provider,
 )
 from app.services.storage import Storage
+from app.services.top_videos import TopVideosService
 from app.services.upload_service import UPLOAD_PATH
 
 logger = logging.getLogger("media_tool")
@@ -153,6 +154,7 @@ def build_context(
     ctx.export_runner = ExportRunner(ctx)
     ctx.profile_runner = ProfileAnalysisRunner(ctx)
     ctx.capcut_runner = CapCutRunner(ctx)
+    ctx.top_videos = TopVideosService(ctx)
     return ctx
 
 
@@ -217,6 +219,7 @@ def create_app(
         try:
             yield
         finally:
+            ctx.top_videos.stop()
             ctx.capcut_runner.stop()
             ctx.profile_runner.stop()
             ctx.export_runner.stop()

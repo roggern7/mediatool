@@ -331,6 +331,7 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET | /api/health | | `{status:"ok", version, time}` |
 | GET | /api/diagnostics | | `Diagnostics` |
 | POST/GET | /api/profile-analyses | seção 8.8 | Análise de Perfis |
+| POST/GET | /api/top-videos | seção 8.10 | Top vídeos de um perfil (aba Importar) |
 | GET/PUT/POST/DELETE | /api/capcut/* | seção 8.9 | Edição CapCut |
 | GET | /api/presets | | `Preset[]` |
 | POST | /api/presets | `{name, params}` | `Preset` 201 |
@@ -1761,6 +1762,47 @@ guarda o número com Posts exato = Não. Status: Ativa, Privada, Restrita, Indis
 consultado (interrompida). Indisponível: Posts, Posts exato, Views, Reels somados, Stories e Destaques = "Não verificado",
 com Data e Horário reais. Cancelado e Não consultado: no CSV/XLSX, "Não consultado" por coluna e Data/Horário vazios; no
 HTML, uma célula `colspan=4`, a pill de Status e uma célula `colspan=2`, todas com texto.
+
+### 8.10 Top vídeos de um perfil
+
+Aba "Top vídeos" do Importar: os Reels com mais visualizações entre os últimos N de um perfil, para baixar um, alguns
+ou todos. A busca roda em segundo plano (uma por vez, thread própria) e fica só em memória: as 10 mais recentes; um
+reinício do app apaga todas (o `GET` passa a responder 404). Código: `app/services/top_videos.py`,
+`app/integrations/instagram/web/top_reels.py`, `app/api/top_videos.py`.
+
+| Método | Caminho | Corpo / query | Resposta |
+|---|---|---|---|
+| POST | /api/top-videos | `{profile: "@user"\|user\|URL do perfil, top?: 1..50 (10), scan_limit?: 12..600 (120)}` | `{id}` 202 (`id`: 32 caracteres hexadecimais); 422 `invalid_input` (perfil inválido) ou validação; 409 `instagram_paused`\|`top_videos_in_progress` |
+| GET | /api/top-videos/{id} | | `TopVideos`; 404 `top_videos_not_found`; 422 id fora do formato |
+| POST | /api/top-videos/{id}/cancel | | `TopVideos` (o status muda para `cancelled` quando a thread para, antes da próxima requisição); 404 |
+| GET | /api/top-videos/{id}/thumb/{code} | | imagem (`image/jpeg`\|`png`\|`webp`, `cache-control: private, max-age=3600`); 404 `thumbnail_not_found` (sem miniatura) ou `top_videos_not_found`; 502 `thumbnail_unavailable` |
+
+```
+TopVideos: {id, profile /*usuário normalizado*/, status: "running"|"completed"|"failed"|"cancelled",
+  scanned /*Reels lidos da aba, até scan_limit*/, pages /*páginas lidas*/,
+  items: [{code, url /*https://www.instagram.com/reel/<code>/*/, views, posted_at /*ISO UTC estimado pelo pk, ou null*/,
+    pinned, thumbnail_url /*"/api/top-videos/<id>/thumb/<code>" ou null*/}] /*views decrescente; empate: o mais novo*/,
+  error_code, error_message}
+```
+
+- Fonte: a aba Reels do perfil SEM login (`web/reels_tab.py`, as mesmas requisições do filtro de visualizações
+  mínimas): 1 `GET /<usuario>/reels/` (12 Reels) e 1 `POST /api/graphql` a cada 12 Reels seguintes. Requisições por
+  busca: cerca de `ceil(scan_limit / 12)` (60 -> 5, 120 -> 10, 300 -> 25, 600 -> 50), menos se a aba acabar antes.
+  Nenhuma sessão é lida; a aba com a sessão não é usada (a resposta dela não foi verificada com visualizações).
+- Defesas: portão global (uma requisição por vez e intervalo), teto de páginas por hora das listagens antes de cada
+  requisição, pausa do Instagram conferida no início (409) e no portão (pausa publicada no meio -> `failed`
+  `instagram_paused`). Erro do Instagram aplica a mesma pausa global que a aba Reels aplica na importação
+  (`worker.pause_for`; 429 `rate_limited` pausa). Cancelado ou com falha no meio: `items` traz o ranking do que
+  já foi lido (`scanned`/`pages` corretos); na falha, `status` `failed` com `error_code`/`error_message`.
+- Erros (`error_code`): `profile_not_found` (404 ou rota de erro com 200), `profile_private` (privado ou escondido de
+  visitantes sem login), `rate_limited`, `access_refused`, `contract_changed` (formato desconhecido), `network_error`,
+  `timeout`, `instagram_paused`, `internal_error`.
+- Ranking: `play_count` inteiro >= 0; Reel sem contagem ou com `like_and_view_counts_disabled` fica fora. Fixados
+  entram com `pinned: true`.
+- Miniatura: a URL da CDN (`display_uri` do nó) fica só no servidor; a rota baixa pelo downloader de CDN do app
+  (seção 5; até 2 MiB, só imagem) e guarda até 60 em memória. A tela nunca usa a CDN direto.
+- Baixar: o painel cria uma importação por links comum (`POST /api/import-links`, seção 8.3) com as `url` escolhidas e
+  o mesmo bloco de Processamento (`preset_id`/`process`, `edit` ou `capcut`).
 
 ### 8.9 Edição CapCut
 
