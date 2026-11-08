@@ -337,14 +337,14 @@ Mutações exigem header `X-Media-Tool-Client` não vazio (frontend envia `panel
 | GET/PUT/DELETE | /api/presets/{id} | PUT `{name?, params?}` | `Preset` / 204 (409 builtin) |
 | POST | /api/presets/{id}/duplicate | `{name?}` | `Preset` 201 |
 | POST | /api/instagram/profile | `{profile}` | `ProfileInfo` (preview); prazo 50 s no backend: 504 `timeout`; 429 `rate_limited`; 403 `action_blocked`/`access_refused`; 502 `contract_changed`/`unsupported_media`/`network_error`; 409 `profile_preview_in_progress`; 409 `instagram_paused` |
-| POST | /api/imports | `{profile, content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool}` (`limit: null` = "Todos", até o fim real do perfil; `content_type`: `all`\|`reels`\|`photos_carousels` e os antigos `posts`\|`videos`\|`images`; `process` padrão `false` = download-only; `preset_id` padrão `null`; `process: true` sem `preset_id` usa o preset padrão; `edit?: EditSettings\|null` = "Editar após baixar", seção 8.4) | `Batch` 202; 409 `session_missing`; 409 `instagram_paused`; 409 `profile_already_importing`; 422 `invalid_input`\|`edit_with_preset`\|`edit_no_changes` |
+| POST | /api/imports | `{profile, content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool}` (`limit: null` = "Todos", até o fim real do perfil; `content_type`: `all`\|`reels`\|`photos_carousels` e os antigos `posts`\|`videos`\|`images`; `process` padrão `false` = download-only; `preset_id` padrão `null`; `process: true` sem `preset_id` usa o preset padrão; `edit?: EditSettings\|null` = "Editar após baixar", seção 8.4; `capcut?: {mode, caption?, edit?, name?}\|null` = "Edição CapCut", seção 8.9) | `Batch` 202 (com `capcut_batch_id`: o lote da Edição CapCut vinculado ou null); 409 `session_missing`; 409 `instagram_paused`; 409 `profile_already_importing`; 422 `invalid_input`\|`edit_with_preset`\|`edit_no_changes`\|`capcut_with_post_processing`; erros da configuração `capcut` como em `POST /api/capcut/batches` |
 | POST | /api/import-groups/preview | `{entries?: string[], text?: string}` | `ProfilesPreview` (sem efeitos, sem Instagram); 422 `too_many_profiles` |
-| POST | /api/import-groups | `{profiles: string[], content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool, edit?: EditSettings\|null}`, query `children_limit` | `ImportGroupDetail` 202 (com `skipped`, `duplicates`); 422 `invalid_profiles`\|`no_profiles`\|`too_many_profiles`\|`edit_with_preset`\|`edit_no_changes`; 409 `profile_already_importing`\|`session_missing`\|`instagram_paused`; 404 `preset_not_found` |
+| POST | /api/import-groups | `{profiles: string[], content_type, limit: 1..1000000\|null, preset_id?\|null, process?: bool, edit?: EditSettings\|null, capcut?: {...}\|null}`, query `children_limit` | `ImportGroupDetail` 202 (com `skipped`, `duplicates`, `capcut_batch_id`); 422 `invalid_profiles`\|`no_profiles`\|`too_many_profiles`\|`edit_with_preset`\|`edit_no_changes`\|`capcut_with_post_processing`; 409 `profile_already_importing`\|`session_missing`\|`instagram_paused`; 404 `preset_not_found` |
 | GET | /api/import-groups | `limit`<=200, `before_id` | `{items: ImportGroup[], total, next_before_id}` |
 | GET | /api/import-groups/{id} | `children_limit`<=500 (100), `after_position` | `ImportGroupDetail`; 404 `group_not_found` |
 | POST | /api/import-groups/{id}/cancel | query `children_limit` | `ImportGroupDetail`; 409 `group_finished`; 404 `group_not_found` |
 | POST | /api/import-links/preview | `{entries?: string[], text?: string}` | `LinksPreview` `{valid: [{shortcode, url}], invalid: [{entry, reason}], duplicates}` (sem efeitos, sem Instagram); 422 `too_many_links` (seção 8.3) |
-| POST | /api/import-links | `{links: string[], preset_id?\|null, process?: bool, edit?: EditSettings\|null}` | `Batch` 202 (com `duplicates`); 422 `invalid_links`\|`no_links`\|`too_many_links`\|`edit_with_preset`\|`edit_no_changes`; 409 `session_missing`\|`instagram_paused`; 404 `preset_not_found` (seção 8.3) |
+| POST | /api/import-links | `{links: string[], preset_id?\|null, process?: bool, edit?: EditSettings\|null, capcut?: {...}\|null}` | `Batch` 202 (com `duplicates`, `capcut_batch_id`); 422 `invalid_links`\|`no_links`\|`too_many_links`\|`edit_with_preset`\|`edit_no_changes`\|`capcut_with_post_processing`; 409 `session_missing`\|`instagram_paused`; 404 `preset_not_found` (seção 8.3) |
 | POST | /api/imports/history/hide | `{batch_ids?: id[] (lotes avulsos), group_ids?: id[]}` OU `{all_finished: true}`, mais `delete_media?: bool`, `dry_run?: bool` (seção 8.1, "Histórico") | `{batches, groups, video_count, total_bytes, shared_count, dry_run, deleted: MediaDeleteResult\|null}` (`shared_count`: vídeos que também estão em outra importação ainda visível); 409 `import_in_progress`; 422 `batch_in_group`\|`validation_error`; 404 `batch_not_found`\|`group_not_found` |
 | GET | /api/batches | `limit, offset, source?=instagram_import\|library, group_id?, ungrouped?=true` | `{items: Batch[], total}` (padrão: todos os lotes, inclusive filhos de grupo) |
 | GET | /api/batches/{id} | | `Batch` + `jobs: Job[]` |
@@ -1536,8 +1536,10 @@ Builder A. Migration **0021** (aditiva). Serviço: `app.services.import_service.
   `max_views` (>= mínimo; só perfis; com `media` "photos" ou "all" E perfis na entrada = 422 `views_filter_media`; só
   links: aceito, filtros ignorados com aviso em `notes`), `auto_export` (`null` | `{content: "originals"|"edited"|
   "both"}`: exportação ZIP automática ao concluir, seção 8.7; "edited"/"both" com `post_processing: "none"` = 422
-  `auto_export_needs_processing`),
-  `post_processing` ("none"|"preset"|"edit"), `preset_id` (só com "preset"), `edit` (obrigatório com "edit").
+  `auto_export_needs_processing`; com "capcut" = 422 `auto_export_capcut`),
+  `post_processing` ("none"|"preset"|"edit"|"capcut"), `preset_id` (só com "preset"), `edit` (obrigatório com "edit"),
+  `capcut` (obrigatório com "capcut": `{mode, caption?, edit?, name?}`, UM lote da Edição CapCut para o pedido inteiro,
+  seção 8.9; resposta com `capcut_batch_id`, só presente quando criado).
   1 perfil -> lote avulso (`create_import`); 2+ perfis -> grupo (`create_import_group`); publicações -> um lote de links
   (`create_import_links`). Tudo é conferido antes de criar o primeiro lote (sessão 409 `session_missing`, pausa,
   provider, preset, edição). A criação do lote/grupo de perfis e do lote de links é UMA transação: falha na 2a
@@ -1836,8 +1838,21 @@ em `docs/CAPCUT.md`, "Lotes"; serviço `app/services/capcut_batch_service.py`): 
 (`ON DELETE SET NULL`; `batch_id` continua sendo o lote de download do automático), `mode` (padrão `caption`),
 `edit_job_id` (jobs.id da edição) e `held` (pausa individual). Jobs existentes: `caption`, sem lote, sem pausa. O
 executor só pega job sem `held`, de lote não pausado e sem cancelamento pedido, e com a edição em estado final. Status
-derivado do lote: `running`|`paused`|`review` (nenhum job em andamento nem na fila, algum aguardando revisão; não conta
+derivado do lote: `importing` (lote de importação ainda ativa, sem job aberto: "Aguardando downloads")|`running`|
+`paused`|`review` (nenhum job em andamento nem na fila, algum aguardando revisão; não conta
 como concluído)|`completed`|`completed_with_errors`|`cancelled`.
+
+Lote da importação ("Edição CapCut" após baixar; sem migração; regras em `docs/CAPCUT.md`, "Lote da importação"): o
+campo `capcut` de `POST /api/imports`, `/api/imports/start` (`post_processing: "capcut"`), `/api/import-groups` e
+`/api/import-links` = `{mode, caption?, edit?, name?}` (formato de `POST /api/capcut/batches` sem `media_ids`/
+`filter`/`include_done`). Exclusivo com `process`/`preset_id` e com `edit`: 422 `capcut_with_post_processing`.
+Configuração validada antes de criar qualquer lote, com os erros de `POST /api/capcut/batches` (`edit_required`,
+`edit_no_changes`, 404 `style_not_found`, 404 `preset_not_found`...). Cria um lote vazio (nome padrão "Importação
+dd/mm HH:MM"), com `options.source = {kind: "import", batch_ids, group_id}` e os vínculos em `app_state`
+(`capcut_import_link:batch:<id>` por lote de importação avulso, `capcut_import_link:group:<id>` pelo grupo; valor =
+id do lote CapCut). Cada vídeo original NOVO baixado por uma importação vinculada entra no lote (com o job de edição
+nos modos com edição; pula mídia com job CapCut aberto, lote cancelado ou removido); com vínculo, o
+`auto_after_download` não cria um segundo job. Cancelar o lote CapCut não cancela a importação e vice-versa.
 
 `Batch` = `{id, name, mode, status, paused, cancel_requested, created_at, finished_at, output_dir, output_exists,
 counts: {total, pending, running, waiting, held, completed, failed, cancelled, review} (pending/waiting sem os `held`;
@@ -1845,7 +1860,7 @@ counts: {total, pending, running, waiting, held, completed, failed, cancelled, r
 progress 0..100 (média dos jobs, concluído = 100), per_video_seconds, eta_seconds, elapsed_seconds (desde a criação até
 o fim ou agora), current_job: Job|null (o job em execução), summary: {style_name, edit, resolution, fps, bitrate,
 keep_audio, highlight} (campos de legenda/exportação null no modo `edit`; `edit` ex.: "Meu preset · 30 s · 1,2x ·
-nitidez · início em 5 s"), options}`. `Job` ganha `capcut_batch_id`, `mode`, `held`, `edit_job_id`, `edit_status`
+nitidez · início em 5 s"), options, source: {kind: "import", batch_ids, group_id}|null}`. `Job` ganha `capcut_batch_id`, `mode`, `held`, `edit_job_id`, `edit_status`
 (status do job de edição na tabela `jobs`) e `edit_progress` (0..100); enquanto espera a edição, `detail` = "Editando".
 
 Revisão das legendas (`docs/CAPCUT.md`, "Fidelidade das legendas"): `Job` ganha `needs_review` (status `waiting` com
@@ -1895,7 +1910,7 @@ hora de rodar descarta a transcrição e `options.review`.
 | GET | /api/capcut/batches/{id} | | `Batch`; 404 `capcut_batch_not_found` |
 | GET | /api/capcut/batches/{id}/jobs | `status?`, `limit` 1..200 (100), `offset` | `{items: Job[], total, counts}` (ordem da fila; `counts` = contagens do lote) |
 | POST | /api/capcut/batches/{id}/pause, /resume | | `Batch` (pausado: o job em execução termina; a edição no worker segue) |
-| POST | /api/capcut/batches/{id}/cancel | | `Batch` (abertos cancelados, o em execução pelo cancelamento individual; edições abertas canceladas; concluídos ficam; pausa individual zerada); 409 `capcut_batch_finished` sem job aberto (nada gravado) |
+| POST | /api/capcut/batches/{id}/cancel | | `Batch` (abertos cancelados, o em execução pelo cancelamento individual; edições abertas canceladas; concluídos ficam; pausa individual zerada); 409 `capcut_batch_finished` sem job aberto (nada gravado), exceto em `importing` (fecha a entrada de vídeos; a importação continua) |
 | POST | /api/capcut/batches/{id}/retry-failed | | `Batch` (`failed`/`cancelled` voltam para a fila sem pausa individual e o cancelamento do lote é limpo; edição com erro, cancelada, em cancelamento, apagada ou sem a rendition no disco é refeita num job novo); 409 `nothing_to_retry` |
 | POST | /api/capcut/batches/{id}/reveal | | `{ok: true}`: abre a pasta do lote no Explorer; 404 `batch_folder_not_found` (nenhum vídeo terminou) e os erros de abrir no sistema |
 | GET | /api/capcut/batches/{id}/zip | | `lote-<id>.zip` (sem compressão) com os MP4 concluídos que existem (temporário em `<data_dir>/tmp/capcut-lote-*.zip`, apagado depois do envio, na falha e no startup); 404 `batch_no_results`; 507 `export_no_space` (mesma conta de espaço do ZIP da exportação) |

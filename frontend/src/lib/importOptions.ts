@@ -1,17 +1,18 @@
-import type { ContentType, EditSettings, ImportGroupRequest, ImportRequest } from "../api/types";
+import type { CapCutImportSettings, ContentType, EditSettings, ImportGroupRequest, ImportRequest } from "../api/types";
 import { type EditForm, NO_CHANGES_TEXT, SPEED_MIN, toEditRequest, validateEditForm } from "./editSettings";
 import { formatCount } from "./format";
 
 /** Padrão da importação: somente baixar os originais. Não é salvo entre sessões. */
 export const PROCESS_AFTER_DOWNLOAD_DEFAULT = false;
 
-/** Pós-processamento da importação: uma escolha só por lote (preset OU edição, nunca os dois). */
-export type PostProcessing = "none" | "preset" | "edit";
+/** Pós-processamento da importação: uma escolha só por lote (preset, edição OU Edição CapCut). */
+export type PostProcessing = "none" | "preset" | "edit" | "capcut";
 export const POST_PROCESSING_DEFAULT: PostProcessing = "none";
 export const POST_PROCESSING_OPTIONS: { value: PostProcessing; label: string }[] = [
   { value: "none", label: "Só baixar" },
   { value: "preset", label: "Processar com preset" },
   { value: "edit", label: "Editar após baixar" },
+  { value: "capcut", label: "Edição CapCut" },
 ];
 
 /** Opções do pedido para a escolha da tela: preset só em "preset"; `edit` só em "edit" (configurações da Editar). */
@@ -76,6 +77,8 @@ interface ImportOptionsInput {
   presetId?: number | null;
   /** "Editar após baixar": manda `edit` com `process: false` e `preset_id: null` (exclusivo com o preset). */
   edit?: EditSettings | null;
+  /** "Edição CapCut": manda `capcut` com `process: false` e `preset_id: null` (exclusivo com o preset e `edit`). */
+  capcut?: CapCutImportSettings | null;
   /** Visualizações mínimas (só vídeos); null/ausente = sem filtro. */
   minViews?: number | null;
   /** Período de postagem: últimos N dias; null/ausente = qualquer data. */
@@ -92,6 +95,12 @@ function withFilters<T extends object>(body: T, input: ImportOptionsInput) {
 }
 
 function commonBody(input: ImportOptionsInput) {
+  if (input.capcut) {
+    return withFilters(
+      { content_type: input.content, limit: input.limit, preset_id: null, process: false, capcut: input.capcut },
+      input,
+    );
+  }
   if (input.edit) {
     return withFilters(
       { content_type: input.content, limit: input.limit, preset_id: null, process: false, edit: input.edit },

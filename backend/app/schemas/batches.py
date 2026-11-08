@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.integrations.instagram.downloader import MAX_IMPORT_LIMIT
+from app.schemas.capcut import ImportCapCut
 from app.schemas.common import PositiveId, StrictModel
 from app.schemas.edits import EditSettings
 from app.schemas.exports import LastExport
@@ -35,6 +36,9 @@ class ImportRequest(StrictModel):
     # "Editar após baixar": cada vídeo baixado ganha a versão editada (as mesmas configurações de POST /edits).
     # Exclusivo com o preset: `edit` junto com `process: true` ou `preset_id` = 422 `edit_with_preset`.
     edit: EditSettings | None = None
+    # "Edição CapCut" após baixar: cada vídeo novo baixado entra num lote da Edição CapCut criado com a importação
+    # (formato de POST /api/capcut/batches, sem a seleção). Exclusivo com o preset e com `edit` (422).
+    capcut: ImportCapCut | None = None
     min_views: ImportMinViews | None = None
     posted_within_days: ImportPostedWithinDays | None = None
 
@@ -65,6 +69,7 @@ class ImportGroupRequest(StrictModel):
     preset_id: PositiveId | None = None
     process: bool = Field(default=False, strict=True)
     edit: EditSettings | None = None   # aplicada a todos os lotes filhos
+    capcut: ImportCapCut | None = None   # um lote da Edição CapCut para o grupo inteiro
     min_views: ImportMinViews | None = None   # POR PERFIL
     posted_within_days: ImportPostedWithinDays | None = None   # o mesmo corte para todos os perfis
 
@@ -93,6 +98,7 @@ class ImportLinksRequest(StrictModel):
     preset_id: PositiveId | None = None
     process: bool = Field(default=False, strict=True)
     edit: EditSettings | None = None
+    capcut: ImportCapCut | None = None
     # Filtros só existem na importação por perfil: aceitos no schema apenas para responder 422 `filters_profile_only`
     # com mensagem clara (qualquer valor não nulo é recusado em api/imports.py).
     min_views: Any = None
@@ -154,9 +160,11 @@ class UnifiedImportRequest(ClassifyRequest):
     min_views: ImportMinViews | None = None
     max_views: ImportMinViews | None = None
     # Pós-processamento: vale para vídeos; capas e fotos só são baixadas.
-    post_processing: Literal["none", "preset", "edit"] = "none"
+    post_processing: Literal["none", "preset", "edit", "capcut"] = "none"
     preset_id: PositiveId | None = None
     edit: EditSettings | None = None
+    # "Edição CapCut" (só com post_processing "capcut"): um lote da Edição CapCut para o pedido inteiro.
+    capcut: ImportCapCut | None = None
     # Exportação ZIP automática ao concluir (migration 0023); null = sem exportação automática.
     auto_export: AutoExportRequest | None = None
     # "Puxar horário dos posts" (migration 0026): grava o horário de cada publicação listada nos perfis, para o
@@ -168,7 +176,8 @@ class UnifiedImportRequest(ClassifyRequest):
         if self.media == "none":
             if not self.post_times:
                 raise ValueError("\"Consultar padrões\" exige `post_times: true` (puxar horário dos posts).")
-            if self.post_processing != "none" or self.preset_id is not None or self.edit is not None:
+            if (self.post_processing != "none" or self.preset_id is not None or self.edit is not None
+                    or self.capcut is not None):
                 raise ValueError("Com \"Consultar padrões\" nada é baixado: o pós-processamento tem de ser "
                                  "\"none\".")
             if self.auto_export is not None:
@@ -179,6 +188,8 @@ class UnifiedImportRequest(ClassifyRequest):
             raise ValueError("O máximo de visualizações precisa ser maior ou igual ao mínimo.")
         if (self.post_processing == "edit") != (self.edit is not None):
             raise ValueError("`edit` só vale (e é obrigatório) com post_processing \"edit\".")
+        if (self.post_processing == "capcut") != (self.capcut is not None):
+            raise ValueError("`capcut` só vale (e é obrigatório) com post_processing \"capcut\".")
         if self.preset_id is not None and self.post_processing != "preset":
             raise ValueError("`preset_id` só vale com post_processing \"preset\".")
         return self
@@ -209,6 +220,8 @@ class UnifiedImportOut(BaseModel):
     skipped: list[SkippedProfile] = Field(default_factory=list)
     # Avisos sem erro (ex.: filtros de perfil ignorados nas publicações por link).
     notes: list[str] = Field(default_factory=list)
+    # Lote da Edição CapCut criado para o pedido (post_processing "capcut"); None sem ele.
+    capcut_batch_id: int | None = None
 
 
 class HistoryHideRequest(StrictModel):
@@ -378,7 +391,12 @@ class BatchOut(BaseModel):
     jobs_truncated: bool | None = None
 
 
-class ImportLinksOut(BatchOut):
+class ImportCreatedOut(BatchOut):
+    # Só na resposta da criação (POST /api/imports e /api/import-links): o lote da Edição CapCut vinculado (`capcut`).
+    capcut_batch_id: int | None = None
+
+
+class ImportLinksOut(ImportCreatedOut):
     # Só na resposta de POST /api/import-links: repetições removidas da lista enviada.
     duplicates: int = 0
 
@@ -444,3 +462,4 @@ class ImportGroupDetail(BaseModel):
     # Só na resposta da criação: perfis pulados (já tinham importação ativa) e repetições removidas da entrada.
     skipped: list[SkippedProfile] | None = None
     duplicates: int | None = None
+    capcut_batch_id: int | None = None   # só na criação com `capcut`

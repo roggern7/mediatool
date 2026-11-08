@@ -14,6 +14,7 @@ import {
 import {
   BATCH_MODE_LABEL,
   BATCH_STATUS_LABEL,
+  batchSourceText,
   batchActions,
   batchCountsText,
   batchEtaText,
@@ -179,6 +180,7 @@ export function BatchMonitor({
           </div>
           <div className="muted small">
             {formatDateTime(b.created_at)} · {batchSummaryText(b)}
+            {batchSourceText(b) ? ` · ${batchSourceText(b)}` : ""}
           </div>
         </div>
         <BatchButtons batch={b} can={can} busy={busy} onAction={(a) => (a === "cancel" ? setConfirmCancel(true) : void runBatch(a))} />

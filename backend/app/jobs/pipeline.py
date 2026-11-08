@@ -658,8 +658,9 @@ class JobExecutor:
         return self.ctx.media.get(media_id)
 
     def _queue_capcut(self, media_id: int) -> None:
-        """Legendas CapCut com "legendar automaticamente após o download" ligado: um job para o vídeo NOVO (duplicatas
-        e reaproveitados não passam aqui). Falha ao enfileirar nunca muda o resultado do download."""
+        """Legendas CapCut: importação vinculada a um lote da Edição CapCut (o vídeo entra nele) ou "legendar
+        automaticamente após o download" ligado: um job para o vídeo NOVO (duplicatas e reaproveitados não passam
+        aqui). Falha ao enfileirar nunca muda o resultado do download."""
         try:
             from app.services import capcut_service
 

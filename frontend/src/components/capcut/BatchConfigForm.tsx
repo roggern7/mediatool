@@ -54,8 +54,9 @@ export function BatchConfigForm({
   /** null enquanto as configurações salvas carregam. */
   exportForm: BatchExportForm | null;
   onExport: (next: BatchExportForm) => void;
-  includeDone: boolean;
-  onIncludeDone: (value: boolean) => void;
+  /** Sem `onIncludeDone` (importação: só vídeos novos), a opção de reprocessar não aparece. */
+  includeDone?: boolean;
+  onIncludeDone?: (value: boolean) => void;
 }) {
   const base = useId();
   const defaultStyle = styles?.find((s) => s.is_default);
@@ -117,11 +118,15 @@ export function BatchConfigForm({
         ) : null}
       </div>
 
-      <label className="row" style={{ gap: 8, marginTop: 12 }}>
-        <input type="checkbox" checked={includeDone} onChange={(e) => onIncludeDone(e.target.checked)} />
-        <span>{modeHasCaption(mode) ? "Reprocessar vídeos já legendados" : "Reprocessar vídeos já editados"}</span>
-      </label>
-      <div className="field-hint">Sem marcar, os vídeos já feitos neste modo e os que estão na fila ficam de fora.</div>
+      {onIncludeDone ? (
+        <>
+          <label className="row" style={{ gap: 8, marginTop: 12 }}>
+            <input type="checkbox" checked={includeDone ?? false} onChange={(e) => onIncludeDone(e.target.checked)} />
+            <span>{modeHasCaption(mode) ? "Reprocessar vídeos já legendados" : "Reprocessar vídeos já editados"}</span>
+          </label>
+          <div className="field-hint">Sem marcar, os vídeos já feitos neste modo e os que estão na fila ficam de fora.</div>
+        </>
+      ) : null}
     </div>
   );
 }

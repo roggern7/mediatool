@@ -2,7 +2,14 @@
 // montado a partir do preview do backend e os textos do lote por link. Funções puras (a tela só liga os estados).
 
 import { describeErrorCode } from "../api/errors";
-import type { BatchLink, BatchLinksSummary, EditSettings, ImportLinksRequest, LinksPreview } from "../api/types";
+import type {
+  BatchLink,
+  BatchLinksSummary,
+  CapCutImportSettings,
+  EditSettings,
+  ImportLinksRequest,
+  LinksPreview,
+} from "../api/types";
 import { formatCount } from "./format";
 import { canSubmitImport, invalidCountText } from "./importOptions";
 import { type StartBlocker, interpretStartError } from "./importStart";
@@ -142,9 +149,17 @@ export function linksStartBlocker(s: LinksStartState): StartBlocker | null {
  */
 export function buildLinksRequest(
   preview: LinksPreview | null,
-  options: { processAfterDownload: boolean; presetId: number | null; edit?: EditSettings | null },
+  options: {
+    processAfterDownload: boolean;
+    presetId: number | null;
+    edit?: EditSettings | null;
+    capcut?: CapCutImportSettings | null;
+  },
 ): ImportLinksRequest | null {
   if (preview === null || preview.valid.length === 0) return null;
+  if (options.capcut) {
+    return { links: preview.valid.map((link) => link.url), preset_id: null, process: false, capcut: options.capcut };
+  }
   if (options.edit) {
     return { links: preview.valid.map((link) => link.url), preset_id: null, process: false, edit: options.edit };
   }

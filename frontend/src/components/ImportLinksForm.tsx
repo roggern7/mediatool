@@ -1,6 +1,6 @@
 import { type ReactNode, useDeferredValue, useMemo, useState } from "react";
 import { ApiError, api } from "../api/client";
-import type { Batch, EditSettings } from "../api/types";
+import type { Batch, CapCutImportSettings, EditSettings } from "../api/types";
 import { formatCount } from "../lib/format";
 import { invalidCountText, startLabel } from "../lib/importOptions";
 import {
@@ -37,6 +37,7 @@ export function ImportLinksForm({
   process,
   presetId,
   edit,
+  capcut = null,
   editProblem,
   processing,
   onCreated,
@@ -52,10 +53,12 @@ export function ImportLinksForm({
   presetId: number | null;
   /** "Editar após baixar": configurações da edição (null nas outras escolhas) e problema do formulário. */
   edit: EditSettings | null;
+  /** "Edição CapCut": configuração do lote (null nas outras escolhas). */
+  capcut?: CapCutImportSettings | null;
   editProblem: string | null;
   /** Bloco "Processamento" da tela, o mesmo do modo por perfil. */
   processing: ReactNode;
-  onCreated: (batch: Batch) => void;
+  onCreated: (batch: Batch & { capcut_batch_id?: number | null }) => void;
   onFailed: () => void;
 }) {
   const toast = useToast();
@@ -88,7 +91,7 @@ export function ImportLinksForm({
   const summary = linksStartSummary(preview);
 
   async function submit() {
-    const body = buildLinksRequest(preview, { processAfterDownload: process, presetId, edit });
+    const body = buildLinksRequest(preview, { processAfterDownload: process, presetId, edit, capcut });
     if (!canSubmit || !body) return;
     setSubmitting(true);
     try {
@@ -188,7 +191,7 @@ export function ImportLinksForm({
       <div className="row" style={{ marginTop: 16, flexWrap: "wrap" }}>
         <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
           {submitting ? <Spinner /> : null}
-          {startLabel({ process, invalid: invalidCount, edit: edit !== null })}
+          {startLabel({ process, invalid: invalidCount, edit: edit !== null || capcut !== null })}
         </button>
       </div>
     </form>

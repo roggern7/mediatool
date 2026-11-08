@@ -36,7 +36,9 @@ import {
   toggleOne,
   videoCount,
 } from "../lib/capcutBatch";
+import { batchIdFromSearch } from "../lib/batchRoute";
 import { nextPollMs } from "../lib/polling";
+import { useSearch } from "../lib/router";
 import { useDebounced } from "../lib/useDebounced";
 import { useQuery } from "../lib/useQuery";
 import { useToast } from "../lib/toast";
@@ -125,7 +127,14 @@ export function CapCutPage() {
   const [result, setResult] = useState<{ text: string; skipped: string | null; error: boolean } | null>(null);
 
   // Etapa 4: lote em destaque e histórico.
-  const [shown, setShown] = useState<Shown>(undefined);
+  // `?lote=N` (ex.: aviso da Importação com "Edição CapCut") abre aquele lote no painel.
+  const urlBatchId = batchIdFromSearch(useSearch());
+  const [shown, setShown] = useState<Shown>(urlBatchId ?? undefined);
+  const [seenUrlBatchId, setSeenUrlBatchId] = useState(urlBatchId);
+  if (seenUrlBatchId !== urlBatchId) {
+    setSeenUrlBatchId(urlBatchId);
+    if (urlBatchId !== null) setShown(urlBatchId);
+  }
   const [newBatchId, setNewBatchId] = useState<number | null>(null);
   const resultsRef = useRef<HTMLElement>(null);
   const [historyVersion, setHistoryVersion] = useState(0);

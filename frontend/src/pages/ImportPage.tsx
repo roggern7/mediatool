@@ -4,6 +4,7 @@ import { ApiError, api, messageOf } from "../api/client";
 import { describeErrorCode } from "../api/errors";
 import type {
   Batch,
+  CapCutBatchMode,
   ContentType,
   HistoryHideResult,
   ImportGroup,
@@ -103,7 +104,17 @@ import { ImportExportBar } from "../components/ExportPanel";
 import { batchExportOffer, libraryPathForProfile } from "../lib/exportFolder";
 import { listingDropped, listingDroppedSuffix, needsAttention } from "../lib/batchState";
 import { navigate, ROUTES } from "../lib/router";
-import { queueForBatch } from "../lib/batchRoute";
+import { capcutForBatch, queueForBatch } from "../lib/batchRoute";
+import { BatchConfigForm } from "../components/capcut/BatchConfigForm";
+import {
+  type BatchConfigPlan,
+  type BatchEditForm,
+  type BatchExportForm,
+  DEFAULT_BATCH_EDIT,
+  buildImportCapcut,
+  configBlocker,
+  exportFormFrom,
+} from "../lib/capcutBatch";
 import { POLL_STEPS_MS, nextPollMs } from "../lib/polling";
 import { useDebounced } from "../lib/useDebounced";
 import { useQuery } from "../lib/useQuery";
@@ -166,6 +177,14 @@ export function ImportPage() {
   // Só estado da tela: toda visita começa em "Só baixar".
   const [post, setPost] = useState<PostProcessing>(POST_PROCESSING_DEFAULT);
   const [editForm, setEditForm] = useState<EditForm>(DEFAULT_EDIT_FORM);
+  // "Edição CapCut": a mesma configuração (e os mesmos padrões) da página Edição CapCut.
+  const [ccMode, setCcMode] = useState<CapCutBatchMode>("caption");
+  const [ccStyleId, setCcStyleId] = useState<number | null>(null);
+  const [ccEdit, setCcEdit] = useState<BatchEditForm>(DEFAULT_BATCH_EDIT);
+  const [ccExportDraft, setCcExportDraft] = useState<BatchExportForm | null>(null);
+  const [ccName, setCcName] = useState("");
+  // Lote da Edição CapCut da última importação criada com "Edição CapCut" (aviso com o link).
+  const [capcutBatchId, setCapcutBatchId] = useState<number | null>(null);
   const processAfter = post === "preset";
   const [submitting, setSubmitting] = useState(false);
   const [lookup, setLookup] = useState<{ username: string; info: ProfileInfo } | null>(null);
@@ -230,8 +249,27 @@ export function ImportPage() {
   const lastTest = settings.data?.instagram.last_test ?? null;
   const lastView = lastTest ? describeSessionTest(lastTest) : null;
   const presetId = presetChoice ?? defaultPresetId(presets.data, settings.data?.default_preset_id);
-  const editProblem = editProblemOf(post, editForm);
-  const postOptions = postProcessingOptions(post, presetId, editForm);
+  const wantCapcut = post === "capcut";
+  const ccSettings = useQuery(wantCapcut ? "capcut-settings" : "capcut-settings:off", () =>
+    wantCapcut ? api.capcutSettings() : Promise.resolve(undefined),
+  );
+  const ccStyles = useQuery(wantCapcut ? "capcut-styles:import" : "capcut-styles:off", () =>
+    wantCapcut ? api.capcutStyles() : Promise.resolve(undefined),
+  );
+  const ccPlan: BatchConfigPlan = {
+    mode: ccMode,
+    name: ccName,
+    styleId: ccStyleId,
+    exportForm: ccExportDraft ?? (ccSettings.data ? exportFormFrom(ccSettings.data) : null),
+    edit: ccEdit,
+  };
+  const capcutProblem = wantCapcut ? configBlocker(ccPlan) : null;
+  // O problema da edição ou da Edição CapCut bloqueia o envio nos três modos (como o de "Editar após baixar").
+  const editProblem = editProblemOf(post, editForm) ?? capcutProblem;
+  const postOptions = {
+    ...postProcessingOptions(post, presetId, editForm),
+    capcut: wantCapcut ? buildImportCapcut(ccPlan) : null,
+  };
   const providerProblem = providerBlocker(
     settings.data?.instagram_provider,
     content,
@@ -312,16 +350,21 @@ export function ImportPage() {
       if (plan.kind === "single") {
         const batch = await api.createImport(plan.body);
         setSelected({ kind: "batch", id: batch.id });
+        setCapcutBatchId(batch.capcut_batch_id ?? null);
         toast.push(
           "ok",
-          post === "edit"
+          post === "capcut"
+            ? `Download de @${plan.body.profile} iniciado; os vídeos vão para a Edição CapCut.`
+            : post === "edit"
             ? `Download e edição de @${plan.body.profile} iniciados.`
             : processAfter
             ? `Download e processamento de @${plan.body.profile} iniciados.`
             : `Download dos originais de @${plan.body.profile} iniciado.`,
         );
       } else {
-        const created = interpretGroupCreated(await api.createImportGroup(plan.body));
+        const detail = await api.createImportGroup(plan.body);
+        const created = interpretGroupCreated(detail);
+        setCapcutBatchId(detail.capcut_batch_id ?? null);
         setSelected({ kind: "group", id: created.groupId });
         if (created.notice) setStartNotice({ groupId: created.groupId, text: created.notice });
         toast.push("ok", created.message);
@@ -396,6 +439,7 @@ export function ImportPage() {
     const first = result.group_id ?? result.batch_ids[0] ?? null;
     if (first !== null) setSelected({ kind: result.group_id !== null ? "group" : "batch", id: first });
     setStartNotice({ groupId: null, text: createdText(result) });
+    setCapcutBatchId(result.capcut_batch_id ?? null);
     toast.push("ok", "Importação iniciada.");
     setLookup(null);
     revealCreated();
@@ -456,6 +500,41 @@ export function ImportPage() {
           </Field>
         </div>
       ) : null}
+      {wantCapcut ? (
+        <div style={{ marginTop: 10 }}>
+          {ccSettings.error ? <ErrorLine message={ccSettings.error} onRetry={ccSettings.reload} /> : null}
+          {ccStyles.error ? <ErrorLine message={ccStyles.error} onRetry={ccStyles.reload} /> : null}
+          <BatchConfigForm
+            mode={ccMode}
+            onMode={setCcMode}
+            styles={ccStyles.data}
+            styleId={ccStyleId}
+            onStyle={setCcStyleId}
+            onEditStyles={() => navigate(ROUTES.captions)}
+            presets={presets.data}
+            edit={ccEdit}
+            onEdit={setCcEdit}
+            exportForm={ccPlan.exportForm}
+            onExport={setCcExportDraft}
+          />
+          <div style={{ marginTop: 10, maxWidth: 360 }}>
+            <Field label="Nome do lote (opcional)" htmlFor="imp-capcut-name" hint="Vazio: “Importação” com a data e a hora.">
+              <input
+                id="imp-capcut-name"
+                className="input"
+                maxLength={120}
+                value={ccName}
+                onChange={(e) => setCcName(e.target.value)}
+              />
+            </Field>
+          </div>
+          {capcutProblem ? (
+            <div className="field-error" role="alert" style={{ marginTop: 8 }}>
+              {capcutProblem}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {post === "edit" ? (
         <div style={{ marginTop: 10 }}>
           <EditSettingsForm form={editForm} onChange={setEditForm} />
@@ -467,7 +546,9 @@ export function ImportPage() {
         </div>
       ) : null}
       <div className="muted small" style={{ marginTop: 8 }}>
-        {post === "edit"
+        {wantCapcut
+          ? "Os originais são baixados e cada vídeo novo entra num lote da Edição CapCut, criado agora com estas configurações. Fotos e capas são só baixadas. Acompanhe na página Edição CapCut."
+          : post === "edit"
           ? "Os originais são baixados e cada vídeo ganha uma versão editada com estas configurações, como na página Editar. Fotos são só baixadas. Os originais ficam guardados."
           : processAfter
             ? "Os originais são baixados e, em seguida, processados com o preset escolhido. Os originais ficam guardados."
@@ -540,6 +621,7 @@ export function ImportPage() {
             post={post}
             presetId={presetId}
             edit={postOptions.edit}
+            capcut={postOptions.capcut}
             editProblem={editProblem}
             onCreated={unifiedCreated}
             onError={unifiedFailed}
@@ -796,7 +878,7 @@ export function ImportPage() {
                 aria-describedby={providerProblem ? "imp-provider-note" : undefined}
               >
                 {submitting ? <Spinner /> : null}
-                {startLabel({ process: processAfter, invalid: invalidCount, edit: post === "edit" })}
+                {startLabel({ process: processAfter, invalid: invalidCount, edit: post === "edit" || post === "capcut" })}
               </button>
               <span className="grow" />
               <button
@@ -820,11 +902,13 @@ export function ImportPage() {
             process={processAfter}
             presetId={presetId}
             edit={postOptions.edit}
+            capcut={postOptions.capcut}
             editProblem={editProblem}
             processing={processingBlock}
             onCreated={(batch) => {
               // Lista enviada: o campo é limpo e o lote criado abre no acompanhamento, como no modo por perfil.
               setSelected({ kind: "batch", id: batch.id });
+              setCapcutBatchId(batch.capcut_batch_id ?? null);
               setLinksText("");
               revealCreated();
             }}
@@ -833,6 +917,24 @@ export function ImportPage() {
         )}
       </div>
 
+      {capcutBatchId !== null ? (
+        <div className="alert ok" role="status" style={{ marginTop: 12 }}>
+          <span className="grow">Os vídeos vão para a Edição CapCut (lote {capcutBatchId}).</span>
+          <a
+            className="btn btn-sm"
+            href={capcutForBatch(capcutBatchId)}
+            onClick={(e) => {
+              e.preventDefault();
+              navigate(capcutForBatch(capcutBatchId));
+            }}
+          >
+            Abrir na Edição CapCut
+          </a>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => setCapcutBatchId(null)}>
+            Fechar
+          </button>
+        </div>
+      ) : null}
       {mode !== "links" && startNotice && startNotice.groupId === null ? (
         <div className="alert warn" role="status" style={{ marginTop: 12 }}>
           <span className="grow">{startNotice.text}</span>

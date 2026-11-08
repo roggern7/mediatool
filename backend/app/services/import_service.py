@@ -11,6 +11,7 @@ from app.core.errors import AppError, not_found
 from app.db.connection import utc_now
 from app.integrations.instagram.composite import web_only
 from app.integrations.instagram.validation import parse_post_link, parse_profile_input, post_path_kind
+from app.schemas.capcut import ImportCapCut
 from app.schemas.edits import EditSettings
 from app.services import edit_service
 from app.services.context import AppContext
@@ -60,6 +61,36 @@ def check_edit(edit: EditSettings | None, *, process: bool, preset_id: int | Non
     if process or preset_id is not None:
         raise AppError(422, "edit_with_preset", EDIT_WITH_PRESET_MESSAGE)
     edit_service.ensure_changes(edit)
+
+
+CAPCUT_WITH_POST_PROCESSING_MESSAGE = (
+    "Escolha um só pós-processamento: \"Edição CapCut\" não vale junto com \"Processar com preset\" nem com "
+    "\"Editar após baixar\"."
+)
+
+
+def check_capcut(ctx: AppContext, capcut: ImportCapCut | None, *, process: bool, preset_id: int | None,
+                 edit: EditSettings | None) -> dict[str, Any] | None:
+    """"Edição CapCut" após baixar: exclusiva com o preset e com `edit`; a configuração é validada como em
+    POST /api/capcut/batches (mesmos erros: `edit_no_changes`, `style_not_found`, `preset_not_found`...). Retorna a
+    configuração pronta para `capcut_batch_service.create_import_batch` (None sem `capcut`)."""
+    if capcut is None:
+        return None
+    if process or preset_id is not None or edit is not None:
+        raise AppError(422, "capcut_with_post_processing", CAPCUT_WITH_POST_PROCESSING_MESSAGE)
+    from app.services import capcut_batch_service
+
+    return capcut_batch_service.prepare(ctx, capcut.mode, capcut.caption, capcut.edit)
+
+
+def _create_capcut_batch(ctx: AppContext, capcut: ImportCapCut | None, prepared: dict[str, Any] | None, *,
+                         batch_ids: list[int], group_id: int | None) -> int | None:
+    if prepared is None or capcut is None:
+        return None
+    from app.services import capcut_batch_service
+
+    return capcut_batch_service.create_import_batch(ctx, prepared, name=capcut.name, batch_ids=batch_ids,
+                                                    group_id=group_id)
 
 
 def post_processing(
@@ -153,14 +184,16 @@ def create_import(
     edit: EditSettings | None = None, min_views: int | None = None, posted_within_days: int | None = None,
     max_views: int | None = None, media_role: str = "original", media_set: str | None = None,
     auto_export_content: str | None = None, post_times: bool = False, patterns_only: bool = False,
+    capcut: ImportCapCut | None = None,
 ) -> int:
     # `limit=None` = "Todos": a listagem vai até o fim real do perfil (docs/BATCH_ROBUSTNESS.md, seção 0.1).
     # `min_views`: filtro de visualizações mínimas (só vídeos; None = desligado). `posted_within_days`: período de
     # postagem (últimos N dias; None = qualquer data); o corte é calculado AGORA e gravado no lote.
     # `max_views` (migration 0021): máximo de visualizações; `media_role="cover"`: "Somente capas".
     # `media_set` (migration 0023): tipo de mídia da importação unificada; `auto_export_content`: exportação ZIP
-    # automática ao concluir.
+    # automática ao concluir. `capcut`: lote da Edição CapCut vinculado (cada vídeo novo baixado entra nele).
     check_edit(edit, process=process, preset_id=preset_id)
+    prepared = check_capcut(ctx, capcut, process=process, preset_id=preset_id, edit=edit)
     ensure_provider_supports(ctx, content_type, limit, min_views, posted_within_days, max_views,
                              covers=media_role == "cover" or media_set in COVER_SETS)
     try:
@@ -189,6 +222,7 @@ def create_import(
             **fields,
             **filter_fields(min_views, posted_within_days, max_views),
         )
+        _create_capcut_batch(ctx, capcut, prepared, batch_ids=[batch_id], group_id=None)
     logger.info("Lote %s criado: importação de %s (%s, limite %s%s)", batch_id, username, content_type, limit,
                 _filters_log(min_views, posted_within_days, max_views, media_role))
     ctx.wake_import_runner()
@@ -264,13 +298,14 @@ def create_import_group(
     process: bool, edit: EditSettings | None = None, min_views: int | None = None,
     posted_within_days: int | None = None, max_views: int | None = None, media_role: str = "original",
     media_set: str | None = None, auto_export_content: str | None = None, post_times: bool = False,
-    patterns_only: bool = False,
+    patterns_only: bool = False, capcut: ImportCapCut | None = None,
 ) -> tuple[int, list[dict[str, str]], int]:
     """Uma importação pai e um lote filho por perfil (na ordem da lista; `limit`, `min_views` e o período valem POR
     PERFIL). Retorna (id do grupo, perfis pulados por já terem importação ativa, repetições removidas). Com `edit`, o
     grupo e todos os filhos são lotes de Edição. O corte do período é calculado UMA vez, na criação, e o mesmo vale
-    para todos os filhos."""
+    para todos os filhos. Com `capcut`, um lote da Edição CapCut vinculado ao grupo (vale para todos os filhos)."""
     check_edit(edit, process=process, preset_id=preset_id)
+    prepared = check_capcut(ctx, capcut, process=process, preset_id=preset_id, edit=edit)
     ensure_provider_supports(ctx, content_type, limit, min_views, posted_within_days, max_views,
                              covers=media_role == "cover" or media_set in COVER_SETS)
     valid, invalid, duplicates = parse_profile_entries(profiles)
@@ -307,6 +342,7 @@ def create_import_group(
         for position, username in enumerate(pending, start=1):
             ctx.batches.create(source="instagram_import", status="listing", source_profile=username,
                                group_id=group_id, group_position=position, **fields)
+        _create_capcut_batch(ctx, capcut, prepared, batch_ids=[], group_id=group_id)
     logger.info("Grupo %s criado: %s perfis (%s, limite por perfil %s%s; %s pulados)", group_id, len(pending),
                 content_type, limit, _filters_log(min_views, posted_within_days, max_views, media_role), len(skipped))
     ctx.wake_import_runner()
@@ -358,13 +394,14 @@ def parse_link_entries(entries: list[str]) -> tuple[list[dict[str, str]], list[d
 def create_import_links(
     ctx: AppContext, *, links: list[str], preset_id: int | None, process: bool, edit: EditSettings | None = None,
     content_type: str = "all", media_role: str = "original", media_set: str | None = None,
-    auto_export_content: str | None = None,
+    auto_export_content: str | None = None, capcut: ImportCapCut | None = None,
 ) -> tuple[int, int]:
     """Um lote de importação por link (`import_mode = 'links'`) com todos os links da lista, na ordem colada.
     Retorna (id do lote, repetições removidas). Nenhuma requisição ao Instagram aqui: o import runner resolve um
     link por vez. `content_type="videos"` (importação unificada): só os vídeos das publicações resolvidas viram job
     (os demais itens contam como filtrados); `media_role="cover"`: a capa de cada vídeo (só método web)."""
     check_edit(edit, process=process, preset_id=preset_id)
+    prepared = check_capcut(ctx, capcut, process=process, preset_id=preset_id, edit=edit)
     if ((media_role == "cover" or media_set in COVER_SETS)
             and instagram_provider(ctx.app_settings, ctx.settings) == "gallery_dl"):
         raise AppError(422, "not_supported_by_provider", COVERS_WEB_ONLY_MESSAGE)
@@ -392,6 +429,7 @@ def create_import_links(
             **fields,
         )
         ctx.batches.add_links(batch_id, [(link["shortcode"], link["url"]) for link in valid])
+        _create_capcut_batch(ctx, capcut, prepared, batch_ids=[batch_id], group_id=None)
     logger.info("Lote %s criado: importação por link (%s links, %s%s)", batch_id, len(valid), content_type,
                 ", só capas" if media_role == "cover" else "")
     ctx.wake_import_runner()
@@ -431,6 +469,11 @@ CONFIRM_ALL_MESSAGE = (
 VIEWS_FILTER_MEDIA_MESSAGE = (
     "O filtro de visualizações só vale para vídeos: escolha \"Somente vídeos\", \"Somente capas\" ou \"Vídeos e "
     "capas\", ou desligue o filtro."
+)
+
+AUTO_EXPORT_CAPCUT_MESSAGE = (
+    "Com a Edição CapCut, os vídeos editados ficam no lote da Edição CapCut (baixe o ZIP por lá). Na exportação "
+    "automática da importação, escolha só os originais."
 )
 
 AUTO_EXPORT_NEEDS_PROCESSING_MESSAGE = (
@@ -580,15 +623,20 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
     auto_export = req.auto_export.content if getattr(req, "auto_export", None) is not None else None
     # Exportar "editados"/"ambos" sem pós-processamento: não haveria versão editada para exportar.
     # "Somente capas"/"Somente fotos" nunca são processadas: também não haveria versão editada.
-    if auto_export in ("edited", "both") and (req.post_processing == "none" or covers):
+    if auto_export in ("edited", "both") and req.post_processing == "capcut" and not covers:
+        raise AppError(422, "auto_export_capcut", AUTO_EXPORT_CAPCUT_MESSAGE)
+    if auto_export in ("edited", "both") and (req.post_processing in ("none", "capcut") or covers):
         raise AppError(422, "auto_export_needs_processing", AUTO_EXPORT_NEEDS_PROCESSING_MESSAGE)
     process = req.post_processing == "preset" and not covers
     preset_id = req.preset_id if process else None
     edit = req.edit if req.post_processing == "edit" and not covers else None
+    # "Edição CapCut": UM lote da Edição CapCut para o pedido inteiro (perfil, grupo e links), criado no fim.
+    capcut = getattr(req, "capcut", None) if req.post_processing == "capcut" and not covers else None
     filters = ({"min_views": req.min_views, "max_views": req.max_views, "posted_within_days": req.posted_within_days}
                if profiles else {})
     # Conferências de todos os lotes antes de criar o primeiro.
     check_edit(edit, process=process, preset_id=preset_id)
+    prepared = check_capcut(ctx, capcut, process=process, preset_id=preset_id, edit=edit)
     if profiles:
         ensure_provider_supports(ctx, content_type, req.limit, req.min_views, req.posted_within_days, req.max_views,
                                  covers=with_covers)
@@ -624,6 +672,7 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
             batch_ids.append(links_batch_id)
         if multipart:
             ctx.batches.create_request(auto_export_content=auto_export, batch_ids=batch_ids, group_id=group_id)
+        capcut_batch_id = _create_capcut_batch(ctx, capcut, prepared, batch_ids=batch_ids, group_id=group_id)
     # As criações acordam o runner ainda dentro da transação (ele pode não ter visto os lotes): acorda de novo.
     ctx.wake_import_runner()
     notes: list[str] = []
@@ -635,9 +684,12 @@ def start_unified(ctx: AppContext, req: Any) -> dict[str, Any]:
         notes.append(PATTERNS_LINKS_IGNORED_NOTE)
     logger.info("Importação unificada: %s perfis, %s publicações, %s inválidas, mídia %s", len(profiles), len(links),
                 len(classified["invalid"]), req.media)
-    return {"batch_ids": batch_ids, "group_id": group_id, "links_batch_id": links_batch_id,
-            "profiles": len(profiles), "links": len(links), "invalid": classified["invalid"],
-            "duplicates": classified["duplicates"], "skipped": skipped, "notes": notes}
+    result = {"batch_ids": batch_ids, "group_id": group_id, "links_batch_id": links_batch_id,
+              "profiles": len(profiles), "links": len(links), "invalid": classified["invalid"],
+              "duplicates": classified["duplicates"], "skipped": skipped, "notes": notes}
+    if capcut_batch_id is not None:   # só com "Edição CapCut" (a resposta da extensão fica igual sem ela)
+        result["capcut_batch_id"] = capcut_batch_id
+    return result
 
 
 def cancel_group(ctx: AppContext, group_id: int) -> None:

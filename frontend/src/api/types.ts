@@ -303,6 +303,8 @@ export interface ImportLinksRequest {
   process: boolean;
   /** "Editar após baixar" (as mesmas configurações de POST /api/edits); exclusivo com `process`/`preset_id`. */
   edit?: EditSettings | null;
+  /** "Edição CapCut" após baixar: lote da Edição CapCut vinculado; exclusivo com `process`/`preset_id`/`edit`. */
+  capcut?: CapCutImportSettings | null;
 }
 
 export type GroupChildState = "waiting" | "active" | "attention" | "completed" | "failed" | "cancelled";
@@ -373,6 +375,8 @@ export interface ImportGroupDetail {
   /** Só na criação. */
   skipped?: SkippedProfile[] | null;
   duplicates?: number | null;
+  /** Só na criação com `capcut`: o lote da Edição CapCut vinculado. */
+  capcut_batch_id?: number | null;
 }
 
 export interface ImportGroupList {
@@ -566,6 +570,8 @@ export interface ImportRequest {
   process: boolean;
   /** "Editar após baixar" (as mesmas configurações de POST /api/edits); exclusivo com `process`/`preset_id`. */
   edit?: EditSettings | null;
+  /** "Edição CapCut" após baixar: lote da Edição CapCut vinculado; exclusivo com `process`/`preset_id`/`edit`. */
+  capcut?: CapCutImportSettings | null;
   /** Visualizações mínimas (só Reels/Vídeos). A chave é OMITIDA sem filtro: o corpo fica igual ao de antes. */
   min_views?: number;
   /** Período de postagem: últimos N dias (1 a 3650). Omitida = qualquer data. */
@@ -581,6 +587,8 @@ export interface ImportGroupRequest {
   process: boolean;
   /** "Editar após baixar" (as mesmas configurações de POST /api/edits); aplicada a todos os perfis; exclusivo com `process`/`preset_id`. */
   edit?: EditSettings | null;
+  /** "Edição CapCut" após baixar: lote da Edição CapCut vinculado; exclusivo com `process`/`preset_id`/`edit`. */
+  capcut?: CapCutImportSettings | null;
   /** Por perfil; omitida sem filtro. */
   min_views?: number;
   /** O mesmo corte para todos os perfis; omitida = qualquer data. */
@@ -614,9 +622,11 @@ export interface UnifiedImportRequest {
   posted_within_days?: number;
   min_views?: number;
   max_views?: number;
-  post_processing: "none" | "preset" | "edit";
+  post_processing: "none" | "preset" | "edit" | "capcut";
   preset_id?: number;
   edit?: EditSettings;
+  /** Só com post_processing "capcut": um lote da Edição CapCut para o pedido inteiro. */
+  capcut?: CapCutImportSettings;
   /** Exportação ZIP automática ao concluir; ausente = sem ela. */
   auto_export?: { content: AutoExportContent };
   /** Puxar horário dos posts (relatório de padrões); obrigatório com `media: "none"`. Ausente = false. */
@@ -634,6 +644,8 @@ export interface UnifiedImportResult {
   skipped?: SkippedProfile[];
   /** Avisos sem erro (ex.: filtros de perfil ignorados nas publicações por link). Ausente em backends antigos. */
   notes?: string[];
+  /** Lote da Edição CapCut criado para o pedido (post_processing "capcut"). */
+  capcut_batch_id?: number | null;
 }
 
 export type MediaView = "all" | "originals" | "processed";
@@ -1315,6 +1327,8 @@ export interface CapCutJobsCreated {
 /** caption = só legendas; edit = só edição (não abre o CapCut); edit_caption = edição e depois legendas. */
 export type CapCutBatchMode = "caption" | "edit" | "edit_caption";
 export type CapCutBatchStatus =
+  /** Lote de uma importação ainda ativa, sem vídeo na fila ("Aguardando downloads"). */
+  | "importing"
   | "running"
   | "paused"
   | "review"
@@ -1358,6 +1372,16 @@ export interface CapCutBatchCreate {
   include_done?: boolean;
   caption?: { style_id?: number | null; overrides?: CapCutOptionsPatch };
   edit?: CapCutBatchEditSettings;
+}
+
+/** "Edição CapCut" após baixar (pedidos de importação): o formato de CapCutBatchCreate sem a seleção. */
+export type CapCutImportSettings = Pick<CapCutBatchCreate, "name" | "mode" | "caption" | "edit">;
+
+/** Origem do lote: criado por uma importação (lotes e/ou grupo vinculados). */
+export interface CapCutBatchSource {
+  kind: "import";
+  batch_ids: number[];
+  group_id: number | null;
 }
 
 export type CapCutBatchSkipReason =
@@ -1411,6 +1435,8 @@ export interface CapCutBatch {
   current_job: CapCutJob | null;
   summary: CapCutBatchSummary;
   options: Record<string, unknown>;
+  /** null (ou ausente em backends antigos) no lote criado pela página. */
+  source?: CapCutBatchSource | null;
 }
 
 export interface CapCutBatchCreated {

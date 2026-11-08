@@ -226,7 +226,8 @@ export const api = {
 
   lookupProfile: (profile: string) =>
     request<ProfileInfo>("POST", "/instagram/profile", { body: { profile }, timeoutMs: INSTAGRAM_TIMEOUT_MS }),
-  createImport: (req: ImportRequest) => request<Batch>("POST", "/imports", { body: req }),
+  createImport: (req: ImportRequest) =>
+    request<Batch & { capcut_batch_id?: number | null }>("POST", "/imports", { body: req }),
 
   /** Pré-validação da lista de perfis: sem efeitos e sem requisição ao Instagram. */
   previewProfiles: (entries: string[], signal?: AbortSignal) =>
@@ -253,7 +254,10 @@ export const api = {
     request<LinksPreview>("POST", "/import-links/preview", { body: { entries }, signal }),
   /** Importação por link: `links` são as URLs normalizadas do preview. A resposta é o lote criado. */
   createLinksImport: (req: ImportLinksRequest) =>
-    request<Batch & { duplicates?: number }>("POST", "/import-links", { body: req, timeoutMs: SLOW_TIMEOUT_MS }),
+    request<Batch & { duplicates?: number; capcut_batch_id?: number | null }>("POST", "/import-links", {
+      body: req,
+      timeoutMs: SLOW_TIMEOUT_MS,
+    }),
   /** Importação unificada: classifica as entradas (perfis, publicações, inválidas), sem efeitos. */
   classifyImport: (body: ClassifyRequest, signal?: AbortSignal) =>
     request<ClassifyResult>("POST", "/imports/classify", { body, signal }),

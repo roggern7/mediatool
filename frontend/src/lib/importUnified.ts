@@ -5,6 +5,7 @@ import type {
   AutoExport,
   AutoExportContent,
   BatchProgress,
+  CapCutImportSettings,
   ClassifyResult,
   EditSettings,
   MediaChoice,
@@ -95,6 +96,11 @@ export const AUTO_EXPORT_CHOICES: { value: AutoExportChoice; label: string }[] =
 export function autoExportNeedsProcessing(choice: AutoExportChoice): boolean {
   return choice === "edited" || choice === "both";
 }
+
+/** Mesmo texto do backend (422 `auto_export_capcut`). */
+export const AUTO_EXPORT_CAPCUT_TEXT =
+  "Com a Edição CapCut, os vídeos editados ficam no lote da Edição CapCut (baixe o ZIP por lá). Na exportação " +
+  "automática da importação, escolha só os originais.";
 
 export const AUTO_EXPORT_NEEDS_PROCESSING_TEXT =
   "“Editados” e “Originais e editados” exigem processar ou editar depois de baixar. Escolha um pós-processamento " +
@@ -190,6 +196,8 @@ export interface UnifiedForm {
   post: PostProcessing;
   presetId: number | null;
   edit: EditSettings | null;
+  /** "Edição CapCut" (só com post "capcut"). */
+  capcut?: CapCutImportSettings | null;
   /** Exportação ZIP automática ao concluir ("off" ou ausente = não exportar). */
   autoExport?: AutoExportChoice;
   /** Puxar horário dos posts (sempre ligado com "none"). */
@@ -219,6 +227,7 @@ export function unifiedBody(form: UnifiedForm): UnifiedImportRequest | null {
   }
   if (post === "preset" && form.presetId !== null) body.preset_id = form.presetId;
   if (post === "edit" && form.edit) body.edit = form.edit;
+  if (post === "capcut" && form.capcut) body.capcut = form.capcut;
   if (!patternsOnly && form.autoExport && form.autoExport !== "off") body.auto_export = { content: form.autoExport };
   return body;
 }
