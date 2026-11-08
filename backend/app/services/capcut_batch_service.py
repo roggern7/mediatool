@@ -484,8 +484,10 @@ def add_import_video(ctx: AppContext, capcut_batch_id: int, media_id: int, impor
         if batch is None or batch["hidden"] or batch["cancel_requested"]:
             return None
         media = ctx.media.get(media_id)
+        # Já na fila de OUTRO lote: entra aqui também e é editado nos dois (escolha do dono em 2026-11-08); só o mesmo
+        # vídeo duas vezes no MESMO lote é pulado.
         if (media is None or media["media_type"] != "video" or (media.get("role") or "original") == "cover"
-                or repo(ctx).open_media_ids([media_id])):
+                or repo(ctx).open_in_batch(capcut_batch_id, media_id)):
             return None
         options = batch["options"] or {}
         plan = options.get("edit") if batch["mode"] in EDIT_MODES else None
@@ -538,9 +540,18 @@ def batch_out(ctx: AppContext, batch: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(UTC)
     current = repo(ctx).running_in_batch(batch["id"]) if counts["running"] else None
     eta = None
+    # Na fila atrás de outros lotes: quantos vídeos vêm antes e quanto falta para começar (para não parecer travado).
+    queue_ahead = 0
+    if not counts["running"] and counts["pending"] + counts["waiting"] > 0 and not batch["paused"]:
+        queue_ahead = repo(ctx).queue_ahead(batch["id"])
+    queue_wait = None
+    if queue_ahead:
+        any_per_video, _ = repo(ctx).average_seconds(limit=ESTIMATE_SAMPLES)
+        base = any_per_video if any_per_video is not None else per_video
+        queue_wait = None if base is None else round(base * queue_ahead, 1)
     if per_video is not None:
         running_for = (_seconds(current["started_at"], now) or 0.0) if current is not None else 0.0
-        eta = max(0.0, per_video * open_count - running_for)
+        eta = max(0.0, per_video * open_count - running_for) + (queue_wait or 0.0)
     finished = _parse(batch["finished_at"]) if open_count == 0 else None
     options = dict(batch["options"] or {})
     options.pop("job_options", None)   # opções completas dos jobs do lote da importação (com o modelo de legenda)
@@ -555,6 +566,8 @@ def batch_out(ctx: AppContext, batch: dict[str, Any]) -> dict[str, Any]:
         "progress": max(0, min(100, int(round(batch["progress_sum"] / total)))) if total else 0,
         "per_video_seconds": None if per_video is None else round(per_video, 1),
         "eta_seconds": None if eta is None else round(eta, 1),
+        "queue_ahead": queue_ahead,
+        "queue_wait_seconds": queue_wait,
         "elapsed_seconds": _seconds(batch["created_at"], finished or now),
         "current_job": capcut_service.job_out(current) if current is not None else None,
         "summary": dict(options.get("summary") or {}),

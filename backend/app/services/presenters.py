@@ -185,7 +185,8 @@ def _capcut_summary(ctx: AppContext, capcut_id: int) -> dict[str, Any] | None:
     counts = batch["counts"]
     return {"batch_id": capcut_id, "status": batch["status"], "total": counts["total"],
             "completed": counts["completed"], "running": counts["running"], "failed": counts["failed"],
-            "review": counts.get("review", 0)}
+            "review": counts.get("review", 0), "queue_ahead": batch.get("queue_ahead", 0),
+            "queue_wait_seconds": batch.get("queue_wait_seconds")}
 
 
 def capcut_links(ctx: AppContext, *, batch_ids: list[int] = (), group_ids: list[int] = ()) -> dict[str, Any]:

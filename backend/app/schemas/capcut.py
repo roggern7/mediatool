@@ -492,6 +492,8 @@ class BatchOut(BaseModel):
     progress: int
     per_video_seconds: float | None
     eta_seconds: float | None
+    queue_ahead: int = 0                       # vídeos de outros lotes antes do próximo deste (nada rodando aqui)
+    queue_wait_seconds: float | None = None    # estimativa até este lote começar
     elapsed_seconds: float | None
     current_job: JobOut | None
     summary: BatchSummary

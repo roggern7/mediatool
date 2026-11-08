@@ -171,6 +171,23 @@ class CapCutRepository:
         return int(self.db.scalar(
             f"SELECT COUNT(*) FROM capcut_jobs WHERE held = 1 AND status IN ('pending', 'waiting') AND {NOT_REVIEW_SQL}"))
 
+    def open_in_batch(self, capcut_batch_id: int, media_id: int) -> bool:
+        """A mídia já tem job aberto NESTE lote (em outro lote ela pode ser editada de novo, a pedido do dono)."""
+        return bool(self.db.scalar(
+            f"SELECT 1 FROM capcut_jobs WHERE capcut_batch_id = ? AND media_id = ? AND status IN {OPEN_STATUSES_SQL}"
+            " LIMIT 1", (capcut_batch_id, media_id)))
+
+    def queue_ahead(self, capcut_batch_id: int) -> int:
+        """Vídeos de OUTROS lotes (ou avulsos) que o executor pega antes do próximo vídeo deste lote (ordem da fila =
+        id). Não contam: os parados na revisão, os pausados individualmente e os de lote pausado ou cancelado."""
+        return int(self.db.scalar(
+            "SELECT COUNT(*) FROM capcut_jobs j LEFT JOIN capcut_batches b ON b.id = j.capcut_batch_id"
+            " WHERE j.status IN ('pending', 'running', 'waiting') AND COALESCE(j.wait_reason, '') <> 'review'"
+            " AND j.held = 0 AND (j.capcut_batch_id IS NULL OR j.capcut_batch_id <> ?)"
+            " AND (b.id IS NULL OR (b.paused = 0 AND b.cancel_requested = 0))"
+            " AND j.id < (SELECT MIN(id) FROM capcut_jobs WHERE capcut_batch_id = ? AND status IN ('pending', 'waiting')"
+            " AND held = 0 AND COALESCE(wait_reason, '') <> 'review')", (capcut_batch_id, capcut_batch_id)) or 0)
+
     def open_media_ids(self, media_ids: list[int]) -> set[int]:
         """Mídias que já têm job aberto (pending/running/waiting)."""
         if not media_ids:
@@ -388,8 +405,10 @@ class CapCutRepository:
         `limit` últimos concluídos do `mode` (qualquer lote)."""
         if batch_id is not None:
             where, params, tail = "capcut_batch_id = ?", [batch_id], ""
-        else:
+        elif mode is not None:
             where, params, tail = "mode = ?", [mode], f" ORDER BY finished_at DESC LIMIT {int(limit)}"
+        else:   # qualquer modo: ritmo geral da fila
+            where, params, tail = "1 = 1", [], f" ORDER BY finished_at DESC LIMIT {int(limit)}"
         row = self.db.fetchone(
             "SELECT AVG(s) AS avg, COUNT(*) AS n FROM (SELECT (julianday(finished_at) - julianday(started_at))"
             f" * 86400.0 AS s FROM capcut_jobs WHERE status = 'completed' AND {where} AND started_at IS NOT NULL"

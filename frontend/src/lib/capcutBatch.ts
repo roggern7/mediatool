@@ -603,10 +603,22 @@ export function zipLabel(batch: Pick<CapCutBatch, "counts">): string {
 }
 
 /** Selo da importação com "Edição CapCut": "Edição CapCut: 3 de 10 prontos · editando" (abre o lote). */
-export function capcutLinkText(link: { status: string; total: number; completed: number; running: number; failed: number; review: number }): string {
+/** "Na fila: 7 vídeos de outros lotes antes (~10 min)"; null quando nada espera na frente. */
+export function queueAheadText(ahead: number | undefined, waitSeconds: number | null | undefined): string | null {
+  if (!ahead || ahead <= 0) return null;
+  const wait = waitSeconds !== null && waitSeconds !== undefined ? ` (${formatEta(waitSeconds)})` : "";
+  return `na fila: ${formatCount(ahead)} ${ahead === 1 ? "vídeo" : "vídeos"} de outros lotes antes${wait}`;
+}
+
+export function capcutLinkText(link: {
+  status: string; total: number; completed: number; running: number; failed: number; review: number;
+  queue_ahead?: number; queue_wait_seconds?: number | null;
+}): string {
   if (link.status === "importing" && link.total === 0) return "Edição CapCut: aguardando downloads";
   const parts = [`Edição CapCut: ${formatCount(link.completed)} de ${formatCount(link.total)} prontos`];
   if (link.running > 0) parts.push("editando agora");
+  const queued = link.running > 0 ? null : queueAheadText(link.queue_ahead, link.queue_wait_seconds);
+  if (queued) parts.push(queued);
   if (link.review > 0) parts.push(`${formatCount(link.review)} para revisar`);
   if (link.failed > 0) parts.push(`${formatCount(link.failed)} com erro`);
   return parts.join(" · ");
